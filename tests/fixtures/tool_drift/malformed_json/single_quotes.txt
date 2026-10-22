@@ -1,0 +1,4 @@
+Let me check.
+```json
+{'name': 'read_file', 'arguments': {'path': 'notes.md'}}
+```

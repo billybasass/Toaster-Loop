@@ -1,0 +1,3 @@
+Working
+```json
+{"name": "search_files", "arguments": {"query": "needle in the haystack file at

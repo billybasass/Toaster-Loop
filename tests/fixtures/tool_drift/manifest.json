@@ -1,0 +1,196 @@
+{
+  "malformed_json/data_json_negative.txt": {
+    "expect_args": null,
+    "expect_name": null,
+    "expect_parsed": false,
+    "expect_tags_any": null
+  },
+  "malformed_json/leaked_markup_negative.txt": {
+    "expect_args": null,
+    "expect_name": null,
+    "expect_parsed": false,
+    "expect_tags_any": null
+  },
+  "malformed_json/py_literals.txt": {
+    "expect_args": {
+      "bg": false,
+      "command": "ls",
+      "note": null
+    },
+    "expect_name": "run_command",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "py_literals"
+    ]
+  },
+  "malformed_json/single_quotes.txt": {
+    "expect_args": {
+      "path": "notes.md"
+    },
+    "expect_name": "read_file",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "single_quotes"
+    ]
+  },
+  "malformed_json/trailing_commas.txt": {
+    "expect_args": {
+      "path": "src"
+    },
+    "expect_name": "list_dir",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "trailing_commas"
+    ]
+  },
+  "malformed_json/truncated_object.txt": {
+    "expect_args": {
+      "query": "needle"
+    },
+    "expect_name": "search_files",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "unclosed_fence",
+      "truncated_close"
+    ]
+  },
+  "malformed_json/truncated_value.txt": {
+    "expect_args": {},
+    "expect_name": "search_files",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "truncated_close"
+    ]
+  },
+  "mixed/bare_prose_with_stop_tail.txt": {
+    "expect_args": {
+      "path": "docs"
+    },
+    "expect_name": "list_dir",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "bare_json_prose"
+    ]
+  },
+  "mixed/quotes_unclosed_and_typo_case.txt": {
+    "expect_args": {
+      "path": "z.md"
+    },
+    "expect_name": "read_file",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "name_normalized"
+    ]
+  },
+  "mixed/typo_name_refusal.txt": {
+    "expect_args": null,
+    "expect_name": null,
+    "expect_parsed": false,
+    "expect_tags_any": null
+  },
+  "reasoning_loop/healthy_code.txt": {
+    "expect_args": null,
+    "expect_loop": false,
+    "expect_name": null,
+    "expect_parsed": false,
+    "expect_tags_any": null
+  },
+  "reasoning_loop/healthy_list.txt": {
+    "expect_args": null,
+    "expect_loop": false,
+    "expect_name": null,
+    "expect_parsed": false,
+    "expect_tags_any": null
+  },
+  "reasoning_loop/hedge_cycle.txt": {
+    "expect_args": null,
+    "expect_loop": true,
+    "expect_name": null,
+    "expect_parsed": false,
+    "expect_tags_any": null
+  },
+  "reasoning_loop/interleaved_think.txt": {
+    "expect_args": null,
+    "expect_loop": true,
+    "expect_name": null,
+    "expect_parsed": false,
+    "expect_tags_any": null
+  },
+  "reasoning_loop/near_dup_cycle.txt": {
+    "expect_args": null,
+    "expect_loop": true,
+    "expect_name": null,
+    "expect_parsed": false,
+    "expect_tags_any": null
+  },
+  "reasoning_loop/paragraph_cycle.txt": {
+    "expect_args": null,
+    "expect_loop": true,
+    "expect_name": null,
+    "expect_parsed": false,
+    "expect_tags_any": null
+  },
+  "stop_token_repeat/header_repeat.txt": {
+    "expect_args": {},
+    "expect_name": "todo_read",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "stop_tokens"
+    ]
+  },
+  "stop_token_repeat/tail_tokens_after_fence.txt": {
+    "expect_args": {
+      "path": "."
+    },
+    "expect_name": "list_dir",
+    "expect_parsed": true,
+    "expect_tags_any": null
+  },
+  "stop_token_repeat/tokens_inside_fence.txt": {
+    "expect_args": {
+      "path": "a.py"
+    },
+    "expect_name": "read_file",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "stop_tokens"
+    ]
+  },
+  "stop_token_repeat/word_stop_tail.txt": {
+    "expect_args": {},
+    "expect_name": "todo_read",
+    "expect_parsed": true,
+    "expect_tags_any": null
+  },
+  "xml_wrapped/gemini_eq.txt": {
+    "expect_args": {
+      "glob": "*.py",
+      "query": "needle"
+    },
+    "expect_name": "search_files",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "xml_parameters"
+    ]
+  },
+  "xml_wrapped/params_claude.txt": {
+    "expect_args": {
+      "path": "src"
+    },
+    "expect_name": "list_dir",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "xml_parameters"
+    ]
+  },
+  "xml_wrapped/tool_tag.txt": {
+    "expect_args": {
+      "path": "x.txt"
+    },
+    "expect_name": "read_file",
+    "expect_parsed": true,
+    "expect_tags_any": [
+      "xml_tool_wrapper"
+    ]
+  }
+}

@@ -1,0 +1,3 @@
+I will use <tool>
+read_file {"path": "x.txt"}
+</tool> now

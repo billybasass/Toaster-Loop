@@ -1,0 +1,64 @@
+# sable CI — no GPU required: the suite is hermetic (fake OpenAI server,
+# temp SABLE_HOME; torch stays lazily imported inside the training
+# worker, enforced by tests/test_license_hygiene.py).
+#
+# Cross-OS matrix (portability audit P0): the same hermetic suite runs on
+# Windows and macOS so platform-specific regressions (os.kill liveness probes,
+# signal semantics, path handling) fail CI instead of only surfacing on user
+# machines. bash is pinned as the shell everywhere for step-command parity
+# (git-bash on the Windows runner).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install (locked deps)
+        run: |
+          uv python install "${{ matrix.python-version }}"
+          uv sync --frozen --extra dev --python "${{ matrix.python-version }}"
+
+      - name: Lint (ruff)
+        run: uv run --frozen ruff check sable tests
+
+      - name: Type check (mypy — gated core; see [tool.mypy] in pyproject.toml)
+        run: uv run --frozen mypy
+
+      - name: Test (with coverage report, non-gating)
+        run: uv run --frozen pytest tests/ -q --cov=sable --cov-report=term
+
+  js-check:
+    # Real ES-module parse of the shipped dashboard JS; on machines without
+    # node the test-suite fallback (tokenizer-aware delimiter balance) runs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: node --check every shipped .js
+        run: |
+          fail=0
+          for f in $(find sable/dashboard/static -name '*.js'); do
+            node --check "$f" || fail=1
+          done
+          exit $fail

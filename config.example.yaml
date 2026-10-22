@@ -1,0 +1,778 @@
+# sable configuration (Phases 1–5)
+# Copy to config.yaml and edit, or pass via --config / SABLE_CONFIG.
+# Every value can also be set by env var (shown in comments); env wins over file.
+
+# State root: experience buffer (buffer/ + SQLite index), datasets and
+# model registry live under here.
+# Default: ~/.sable . Env: SABLE_HOME
+home: null                 # e.g. ~/data/sable
+
+# Path to the GGUF model served by supervisor-owned llama-server.
+# Env: SABLE_GGUF
+gguf_path: null            # e.g. ~/models/qwen3-8b-q4_k_m.gguf
+
+# Base model folder scanned for the Serve/Train model pickers: GGUFs found
+# under the Hugging Face hub layout (models--org--name/snapshots/...) fill the
+# Serve dropdown; snapshot dirs with a config.json fill the Train base-model
+# dropdown. Null => fall back to $SABLE_MODELS_DIR, then $HF_HOME/hub, then
+# ~/.cache/huggingface/hub. Env: SABLE_MODELS_DIR
+models_dir: null           # e.g. ~/.cache/huggingface/hub
+
+# Port for llama-server on 127.0.0.1. 0 = pick a free dynamic port.
+# Never reuse :8888 here if another external server runs on it.
+# Env: SABLE_PORT
+port: 0
+
+# Context length passed to llama-server (-c).
+# Env: SABLE_CONTEXT
+context_length: 65536
+
+# Attach mode: base URL of an already-running OpenAI-compatible server
+# (e.g. http://127.0.0.1:8888 -> /v1 is appended).
+# When set, sable spawns nothing. Env: SABLE_ATTACH_URL
+attach_url: null
+
+# Opt-in external-server discovery: setting the env var
+# SABLE_EXTERNAL_SERVER_URL=http://host:port lets `sable serve` probe that
+# server (GET /v1/models) and prefer attach mode over spawning. Unset by
+# default — sable never scans ports or auto-connects to anything.
+
+# Optional bearer token for attach targets that require auth (an auth-gated
+# external server). Supervisor-owned llama-server needs none.
+# Env: SABLE_ATTACH_API_KEY
+attach_api_key: null
+
+# Model id reported to/used with the endpoint. Null = derive from GGUF filename
+# or the attached server's /models list. Env: SABLE_MODEL
+model_name: null
+
+# Agent runtime tuning. When the estimated prompt exceeds context_token_budget,
+# older REPL/Chat turns are summarized by the served model itself (one tools-
+# off call) instead of overflowing the context window. 0 disables compression.
+# Defaults: budget = 75% of context_length; keep_recent_tokens = tail kept
+# verbatim during compression.
+agent:
+  context_token_budget: null   # e.g. 40000
+  keep_recent_tokens: 2048
+  # Backlog #9: workspace containment for the file tools (read_file, list_dir,
+  # write_file, patch, search_files). Enforced centrally when the runner is
+  # created (core/agent_runner.create_runner), so CLI and dashboard chat share
+  # it. SABLE_HOME and the system temp dir are always allow-listed alongside
+  # this root (todo_write and tmp-based flows keep working); '..' traversal
+  # components and symlink escapes outside every root are refused.
+  #   unset  -> current working directory at runner start (default)
+  #   null   -> UNRESTRICTED, back-compat mode (logs a one-time warning)
+  #   path   -> explicit workspace root
+  # Agent profiles may carry their own `workspace_root` to widen/narrow this
+  # per profile (see profiles: below).
+  # workspace_root: ~/projects/my-app   # omit = cwd; explicit null = unrestricted
+  # Auto-healing tool calls: rescue tool calls that weak local
+  # models emit as fenced JSON/XML text instead of the native field. On by
+  # default; set false to treat such turns as plain final answers.
+  # heal_tool_calls: true
+  # Verification-stop nudge: when a run edits code but no successful check is
+  # observed since the last edit, inject exactly ONE follow-up asking for
+  # verification before finishing (prose/data files are exempt). On by
+  # default; traces that still finish unverified record
+  # failure_reason=verification_nudge so curation down-weights them.
+  # verify_on_stop: true
+  # Per-agent capabilities — global DEFAULTS for reaching outside the machine.
+  # Off by default (local-first): agents only touch the local filesystem
+  # inside the workspace. Each capability exposes one extra tool, gated per
+  # runner so a profile can turn it on/off independently of the tools grid:
+  #   internet      -> web_fetch (public http(s) only; SSRF posture blocks
+  #                    private/loopback/link-local targets, redirects are
+  #                    re-validated per hop — SSRF-safe)
+  #   run_commands  -> run_command (run other programs via shell; executes with
+  #                    YOUR privileges — workspace containment does NOT apply
+  #                    to shell commands, so enable only for trusted profiles)
+  # Agent profiles may override these per profile (`capabilities:` under
+  # profiles: below); the Profiles panel exposes them as toggles.
+  # capabilities:
+  #   internet: false
+  #   run_commands: false
+  #   vision: false                  # view_image — attach local images so a
+  #                                  # vision model can see them (needs an
+  #                                  # mmproj projector below + a VL model)
+  #   screenshots: false             # take_screenshot — grab the screen and
+  #                                  # look at it (grim on Hyprland/wlroots)
+  # Image input for vision models. "auto" (default) probes the served
+  # endpoint for a projector; true/false force it. When on, image attach
+  # markers from view_image/take_screenshot/uploads are expanded into native
+  # multimodal parts on the request to the model — traces and text-only
+  # backends keep plain text stubs. See core/images.py.
+  # vision: auto
+
+# Explicit llama-server binary path. Null = PATH, then ~/.sable/llama.cpp,
+# /opt/llama.cpp/build/bin and other common locations.
+# Env: SABLE_LLAMA_SERVER
+llama_server_binary: null
+
+# GPU offload layers passed to llama-server as -ngl (any vendor: CUDA/ROCm/
+# Metal/Vulkan). Null = auto-detect: full offload when a GPU runtime exists,
+# 0 on CPU-only boxes. Set 0 to force CPU inference. Env: SABLE_GPU_LAYERS
+gpu_layers: null
+
+# Unified-memory systems (AMD Strix Halo gfx1151, NVIDIA Jetson/Tegra and
+# similar shared-memory SoCs, excluding Macs) automatically launch
+# llama-server with GGML_CUDA_ENABLE_UNIFIED_MEMORY=1. Force on/off on an
+# unusual board with env SABLE_UNIFIED_MEMORY=1/0 (`sable doctor` shows
+# the verdict).
+
+# Build llama.cpp automatically (clone + cmake for the detected backend into
+# <home>/llama.cpp) when no llama-server exists anywhere. Needs git, cmake and
+# a C/C++ compiler; `sable doctor` reports readiness, `sable setup` runs it
+# manually. Env opt-out: SABLE_NO_AUTO_SETUP=1
+llama_auto_setup: true
+
+# Source + build options for the managed llama.cpp install (`sable update`
+# keeps it current). Point repo at a fork and ref at its branch/tag, e.g.
+#   llama_repo: https://github.com/Lychee-Technology/llama-cpp-for-strix-halo
+#   llama_ref: master        # or a release tag from the repo's Releases page
+# backend forces cuda|rocm|metal|vulkan|cpu instead of auto-detection.
+# Env: SABLE_LLAMA_REPO / SABLE_LLAMA_REF / SABLE_LLAMA_BACKEND
+llama_repo: null
+llama_ref: null
+llama_backend: null
+
+# Experience-buffer trace recording (Phase 2). On by default: every `sable
+# run` execution is appended to <home>/buffer/ as a JSONL trace + SQLite index
+# row with an automatic heuristic outcome score. Recording failures never
+# break a conversation. Env: SABLE_RECORDING (0/false disables)
+recording:
+  enabled: true
+  # Backlog #1: mask API keys/tokens/credentials in the durable trace copy
+  # before the JSONL write (traces feed training data -> weights). Set false
+  # only if you know exactly why — a loud warning is logged when disabled.
+  redact_secrets: true
+  # Buffer retention: default age cutoff (days) for `sable traces prune`.
+  # The buffer is append-only forever unless pruned; like the model janitor,
+  # pruning never runs automatically — put `sable traces prune --yes` in a
+  # cron if you want it scheduled. Curated traces are kept unless the command
+  # passes --include-curated. 0 (default) disables the implicit window so
+  # prune requires an explicit --older-than.
+  retention_days: 0
+
+# Built-in toolset policy (backlog #1). block_sensitive_files: read_file and
+# search_files refuse credential paths (.env*, SSH keys, .aws/.gnupg stores,
+# .netrc, .pgpass, credentials.json). Defense-in-depth against secrets
+# entering traces; set false to allow the agent to read them.
+#
+# Backlog #10 (spill): oversized tool results are persisted instead of being
+# dropped from context. The full output goes to
+# <SABLE_HOME>/cache/spillover/<tool_call_id>.txt (redacted on write, like
+# the trace) and the in-context content becomes a small
+# <persisted-output path=… bytes=N> stub the agent can re-read via read_file.
+# The trace records the stub, keeping datasets lean. Guardrails always see
+# the real content before spilling. Files older than spill_retention_days
+# are pruned by a once-per-process best-effort sweep.
+tools:
+  block_sensitive_files: true
+  # run_command_argv_only: harden the `run_commands` capability to run WITHOUT
+  # a shell (shlex-split argv). Pipes, redirection and command substitution
+  # then become literal arguments rather than executable syntax, and any `$`
+  # or backtick token is refused. For profiles that need program execution but
+  # not full shell semantics. Default false (shell, as documented).
+  run_command_argv_only: false
+  # web_fetch knobs (only used when an agent has the `internet` capability):
+  #   allow_private_networks: false — default refuses loopback/RFC1918/
+  #   link-local/metadata addresses (SSRF posture). Set true only for
+  #   deliberate local-API work; scheme checks (http/https) always apply.
+  # web_fetch:
+  #   allow_private_networks: false
+  spill_enabled: true            # false = pre-#10 behavior (inline results)
+  spill_threshold_chars: 48000   # per-result spill threshold (8000 was too
+                                 # aggressive — it spilled ordinary file reads
+                                 # and forced chunked reading)
+  # spill_threshold_tokens: 16000  # optional token-accurate gate: when set it
+                                 # WINS over spill_threshold_chars (exact
+                                 # /tokenize counts, so CJK/code-heavy output
+                                 # spills at the right size). Falls back to the
+                                 # chars comparison while /tokenize is down.
+                                 # Unset = char gate only (default behavior).
+  turn_result_budget_chars: 120000  # per-turn aggregate; largest spill first
+  spill_retention_days: 7        # spillover file age before prune
+  # Feature-wave Phase 4 (editor-style error checking): after a successful
+  # write_file/patch, tier 1 runs a cheap in-process syntax check on the new
+  # content (py_compile for .py; `node --check` for JS, TS only when node >=
+  # 23 supports it; other extensions skipped silently). The WRITE IS NEVER
+  # REJECTED — failures append "✗ SYNTAX ERROR ..." with the parser message
+  # so the model fixes it next turn; clean writes get a subtle "✓ syntax ok".
+  # Pre-existing errors are filtered out (delta vs. the pre-edit content).
+  # Env: SABLE_LINT_ON_WRITE (0/false disables everything).
+  lint_on_write: true
+  # Tier 2 (opt-in): LSP diagnostics via stdlib JSON-RPC over stdio. When a
+  # server for the file's language is detected on PATH, the pre-edit content
+  # is opened in a shadow document and only NEW diagnostics after the edit
+  # are reported. Graceful skip when no server exists or it misbehaves; every
+  # probe is hard-bounded by check_timeout_seconds (only its own child is
+  # ever terminated). Env: SABLE_LSP (1/true enables with defaults).
+  lsp:
+    enabled: false
+    startup_timeout_seconds: 15
+    check_timeout_seconds: 20
+    # Per-extension server command overrides (default map covers .py ->
+    # pyright-langserver --stdio, .ts/.tsx/.js/.jsx ->
+    # typescript-language-server --stdio, .go -> gopls, .rs -> rust-analyzer).
+    # servers:
+    #   .py: "pyright-langserver --stdio"
+    #   .go: "gopls"
+
+# Agent delegation (feature-wave Phase 2): list_agents / delegate_task /
+# check_delegation let one agent profile hand a subtask to another profile on
+# the SAME project. The child runs with its own profile's prompt/tools/
+# guardrails, records its own trace (linked via header `delegation` metadata),
+# and appends lineage to the chat thread's `delegations` list when run from
+# the dashboard. delegate_task waits synchronously up to timeout_seconds for
+# the child; on timeout it returns a diagnostics payload instead of hanging.
+# Env: SABLE_DELEGATION (0/false disables), SABLE_DELEGATION_TIMEOUT_S.
+delegation:
+  enabled: true
+  timeout_seconds: 300           # default wait cap (tool arg can override)
+
+# Multi-instance serving (feature-wave Phase 6). N named llama-server
+# instances run concurrently; their DEFINITIONS are NOT stored in this file —
+# they live as one JSON per instance at <SABLE_HOME>/serving/instances/
+# <id>.json (runtime state at <SABLE_HOME>/serving/state/<id>.json), managed
+# by the Serve panel / /api/servers*. The reserved "default" instance has no
+# file: it mirrors the legacy single-server keys above (gguf_path, attach_url,
+# port, context_length) and its runtime state stays in serve_state.json, so
+# old configs and endpoints keep working unchanged. Each instance may override
+# run_settings/sampling on top of the global sections below; spawn VRAM
+# over-commit warns (never blocks; force bypasses); attach URLs must be
+# loopback (127.0.0.1/localhost). Shutdown stops only processes sable
+# spawned — attached or foreign servers are never killed.
+
+# Model run settings — applied when sable spawns
+# llama-server (Serve panel / `sable serve`). Restart the server after
+# changes. Blank/omitted keys keep llama.cpp defaults. Named instances may
+# override any of these per instance (instance keys win).
+run_settings:
+  # kv_cache_type: q8_0        # -ctk/-ctv KV cache dtype: f16|bf16|q8_0|q4_0|q4_1|iq4_nl
+  # flash_attn: true           # --flash-attn
+  # parallel: 4                # -np parallel slots (>1 enables multi-request)
+  # batch_size: 512            # -b logical batch
+  # ubatch_size: 128           # -ub physical micro-batch
+  # tensor_parallel: true      # --tensor-parallel (multi-GPU)
+  # gpu_memory_pct: 90         # VRAM budget 1..100: scales layer offload when
+  #                            # gpu_layers is auto (VRAM budget percentage)
+  # no_mmap: true              # --no-mmap (force full load into RAM)
+  # mlock: true                # --mlock (pin in RAM)
+  # mmproj_path: null          # vision projector GGUF (--mmproj) for VLMs
+  # extra_args: ""             # appended verbatim, e.g. "--rope-scaling yarn --yarn-orig-ctx 32768"
+
+# Sampling defaults sent with every built-in agent/chat request (applies to
+# attached servers too). Omit a key to keep the server default.
+sampling: {}
+  # logprobs: true             # pass4 #40: request per-token logprobs and store
+  #                            # two confidence floats per trace (record-only;
+  #                            # feeds `sable insights` calibration). Backends
+  #                            # without support answer unchanged. Default false.
+  # temperature: 0.7
+  # top_p: 0.95
+  # top_k: 20
+  # min_p: 0.0
+  # repeat_penalty: 1.05
+  # presence_penalty: 0.0
+  # max_tokens: null
+
+# Codebase indexing for semantic search (search_codebase tool + dashboard).
+# Phase 5 schema: one sqlite index per project (<SABLE_HOME>/index/<id>.db,
+# plus a `default` DB when no project context exists). Each project's index
+# root is its workspace_dir — no path list needed. sable owns the embedding
+# server: point `model` at an embedding GGUF and it spawns/stops its own
+# loopback llama-server --embedding (127.0.0.1 only, only its own process).
+# With no model, a BM25 lexical index is used — still useful, fully offline.
+indexing:
+  enabled: false
+  # model: null                # e.g. ~/models/nomic-embed-text-v1.5.Q4_K_M.gguf
+  # output_dim: 768            # MRL truncation: 768 | 512 | 256 | 128 (dim
+  #                            # mismatch vs a built index reports "needs rebuild")
+  search_mode: hybrid          # hybrid | semantic | lexical
+  # paths_override: []         # advanced: manual roots for the default
+                               # (no-project) DB only; projects ignore this
+# Migration: legacy keys embedding_url / embedding_model / top_k / paths are
+# absorbed on load (embedding_model -> model, paths -> paths_override; url
+# and top_k dropped — sable now owns the server and top_k is internal).
+
+# Dataset curation (Phase 3) — consumed by `sable curate`. All keys optional;
+# defaults shown. See sable/curate/curater.py (CurationConfig).
+curation:
+  min_score: 0.5            # effective outcome score threshold (user feedback
+                            # overrides the heuristic; explicit positive user
+                            # feedback admits a trace regardless of score)
+  include_failures: false   # admit `failure` traces to selection — they only
+                            # ever serve as DPO negatives
+  # since: null             # ISO-8601 lower bound, e.g. "2026-09-01"
+  # model_alias: null       # only traces served by this model alias
+  # agent_profile: null     # backend name, e.g. sable
+  limit: null               # cap rows per output file (deterministic: highest
+                            # score first, then most recent)
+  formats: both             # sft | dpo | both
+  min_turns: 2              # quality gates on ShareGPT turn count
+  max_turns: 200
+  max_est_tokens: 16384     # token-length estimate = total chars / 4 (rough;
+                            # the real tokenizer pass belongs to the trainer)
+  drop_tool_error_only: true  # drop traces where EVERY tool result looks like
+                              # an error unless score/user feedback is positive
+  # Backlog #12 (LLM-as-judge): judging itself is purely flag-driven —
+  # `sable curate --judge N` scores the top-N borderline traces with the
+  # served model and stores feedback rows source=judge (effective-score
+  # precedence user > judge > heuristic). NO config key turns it on; zero
+  # LLM calls without the flag. The judged model grading its own traces is
+  # BIASED — treat verdicts as a tiebreaker, not ground truth.
+  judge_band: 0.15            # borderline = |score - min_score| < band
+  # judge_model: null         # override model id for judge calls (default:
+                              # the served/attached model)
+  # train.yaml template inputs (Phase 4 executes this file):
+  # base_model: null        # HF id/path written into train.yaml's `model:`.
+  #                         # NOT the top-level gguf_path — GGUFs are
+  #                         # serve-only; set training.base_model instead.
+  # output_dir: null        # adapter output dir; defaults to dataset outputs/
+  gguf_quant: q4_k_m        # Phase 4 GGUF export hint recorded in train.yaml
+
+# Training (Phase 4) — consumed by `sable train` / `sable iterate`.
+# GPU work runs in a worker subprocess; the daemon never imports torch.
+#
+# Backlog #13 — every train.yaml knob the worker honors today, per section:
+#   training: training_type, max_seq_length (16384), load_in_4bit (true),
+#     output_dir, num_epochs (3), learning_rate (2e-4), batch_size (2),
+#     gradient_accumulation_steps (4), warmup_steps (5), max_steps (0=off),
+#     save_steps (0=default 50), weight_decay (0.01), random_seed (3407),
+#     packing (false; unmasked SFTTrainer path only — warn+ignore elsewhere
+#     or when the installed TRL API rejects it), train_on_completions (true),
+#     gradient_checkpointing (true bool; compression-mode variants are NOT
+#     exposed — no trivially equivalent TrainingArguments usage),
+#     eval_fraction/eval_seed (#4), use_rslora (false, also accepted here).
+#   speed/VRAM knobs (opt-in, SFT + DPO): optim ("paged_adamw_8bit" keeps
+#     optimizer states in 8-bit — big VRAM saving on small/unified-memory
+#     GPUs, needs bitsandbytes; empty = trainer default AdamW), torch_compile
+#     (false bool; fuses the backward pass for ~10-30% step speedup — slow
+#     first step, and some ROCm builds fail to compile, so test with
+#     max_steps=5 first).
+#   lora: lora_r (64), lora_alpha (16), lora_dropout (0.0), target_modules
+#     (comma string or list), use_rslora (false — rank-stable scaling),
+#     use_dora (false — weight-decomposed LoRA). Both are direct peft args.
+#   model / data / logging: contract sections kept for external-tool file-format
+#     compatibility; logging flags (wandb/tensorboard) are inert here.
+# Tune any of them per-run WITHOUT editing YAML:
+#   sable train start --dataset <id> --config-key training.lora_r=32 \
+#       --config-key lora.use_dora=true
+#   sable iterate --config-key training.num_epochs=1
+# Values typed true/false, int, float, JSON list/object, else string; applied
+# onto the resolved train.yaml and logged into the job log (provenance).
+training:
+  # HF checkpoint id or local HF-format dir used for fine-tuning. NOT a GGUF
+  # (GGUFs are serve-only). Resolves the REPLACE_* placeholder in train.yaml.
+  base_model: null           # e.g. "Qwen/Qwen3-8B"
+  python: null               # interpreter with torch installed; null = current
+  # WP10 — training backend (opt-in). Default "peft" runs the established
+  # transformers+peft path byte-identically. "streamed" routes sft jobs to
+  # the streamed-LoRA runner: HF checkpoint split by layer on disk, meta-
+  # device shell + bounded layer window, PEFT-free LoRA with backward
+  # recompute, chunked cross-entropy, per-step train_metrics.csv
+  # (step,loss,peak_vram_gb,elapsed_s) and a GGUF-LoRA artifact (lora.gguf).
+  # Requirements: training.base_model must be a LOCAL checkpoint directory
+  # (never downloaded); pinned reference archs only (llama/qwen3-shaped);
+  # ~1x model-size extra disk during splitting (training.delete_original
+  # reclaims copies under the run dir only); splitting progress streams to
+  # the job log. Mistyped values warn and fall back to "peft".
+  # GPU/VRAM effects are UNMEASURED (development box is CPU-only) — no
+  # speed or memory claims until a measured GPU run (bench --noise-floor).
+  backend: peft              # peft | streamed
+  # Streamed backend only: delete the layer-split source shards after the
+  # split verifies. Only ever touches trees under the run dir — a user-
+  # owned checkpoint directory is never deleted regardless of this flag.
+  # delete_original: false
+  # Roadmap (default OFF, not implemented in WP10): packed-expert LoRA for
+  # MoE checkpoints — airllm's rationale: 512-expert adapters + Adam states
+  # do not fit small VRAM; future work.
+  # Multi-GPU: run N training jobs concurrently, one per device slot. Each
+  # worker sees exactly one GPU (CUDA/HIP_VISIBLE_DEVICES). Keep 1 on
+  # single-GPU/unified-memory boxes (this Strix Halo is max 1).
+  max_parallel_jobs: 1       # >1 only with multiple physical GPUs
+  gpu_ids: null              # optional slot->device map, e.g. [0, 2]
+  # Best-effort resource gate before starting a job (skipped gracefully when
+  # nvidia-smi / rocm-smi / battery info is unavailable):
+  min_free_vram_mib: 0       # 0 disables the VRAM gate; e.g. 12288 for 12 GiB
+  require_ac_power: false    # refuse to train on battery (laptops)
+  worker_timeout_s: 14400    # hard cap per worker (default 4 h): SIGTERM after
+                             # N s, 10 s grace, then SIGKILL — a hung worker
+                             # would otherwise hold its device slot forever.
+                             # Explicit 0 = no timeout (escape hatch).
+  gguf_quant: q4_k_m         # export quantization (GGUF path)
+  # Export format: gguf (default; llama.cpp convert+quantize) | awq | gptq.
+  # awq/gptq produce a quantized HF dir (needs optional autoawq / auto-gptq
+  # in the training env + training.python pointing at it):
+  # export_format: gguf
+  # awq_bits: 4              awq_calib_dataset: wikitext
+  # gptq_bits: 4             gptq_group_size: 128   gptq_desc_act: false
+  # GRPO (kind=grpo): rule rewards + rollout count.
+  # grpo_rewards: [format, length, solution]   # subset of these three
+  # grpo_num_generations: 2                    # must divide batch*grad_accum
+  # max_completion_length: 512
+  # Backlog #4 — eval split + promotion gate. The worker only splits when the
+  # dataset is big enough (>= 20 rows total AND >= 2 eval rows after taking the
+  # fraction); tiny datasets skip eval entirely and keep the old behavior.
+  eval_fraction: 0.1         # 0 disables the eval split
+  eval_seed: 42              # fixed seed => reruns produce the identical split
+  # Soft gate at promotion: compares the candidate's final eval_loss against
+  # the parent adapter's recorded eval_loss (registry). Only applies when BOTH
+  # exist. "warn" logs a warning; "block" refuses promotion past the limit.
+  eval_gate: warn            # warn | block
+  max_eval_regression_pct: 25.0
+  # Pass 4 #34 — adaptive LoRA rank growth (off by default). When enabled the
+  # worker watches the loss stream; after min_improvement_steps consecutive
+  # improvements of >= min_rel_improvement it stops at the current checkpoint,
+  # adds a fresh peft adapter at 2x r seeded zero-padded from the trained one
+  # (composed delta preserved exactly), and continues — stage-chained growth.
+  # Growth history lands beside provenance (rank_history). Adopt only once
+  # shadow eval (#32) can prove growth helps rather than merely fits.
+  # rank_scaling: false      # false | true | {max_rank: 256,
+                             #   min_improvement_steps: 3, min_rel_improvement: 0.01}
+  # --auto trigger rule: train when the buffer holds >= auto_min_traces
+  # unclaimed traces with mean score >= auto_min_score. Autonomous runs are an
+  # external-scheduler concern: `sable train auto-check --trigger` exits 0
+  # silently when the rule/gate don't pass and runs the full iterate loop when
+  # they do — cron it (the Schedule panel shows the exact line).
+  auto_enabled: false        # intent flag shown by the Schedule panel
+  auto_min_traces: 50
+  auto_min_score: 0.5
+  # worker_command: null     # advanced: argv prefix replacing the built-in
+                             # `python -m sable.training.worker` (tests/stubs)
+
+# Disk janitor (backlog #16) — recoverable archival of aged model artifacts.
+# Never deletes: superseded/failed/rolled_back models older than
+# retention_days move to <home>/archive/<id>/ (`sable models restore <id>`
+# reverses it). Pinned models (`sable models pin <id>`) are never touched,
+# and active/candidate/validated models can never be auto-archived. Run state
+# lives in <home>/janitor_state.json (last_run_at, run_count, last_summary).
+# `sable models janitor [--days N] [--dry-run]` runs it manually any time.
+janitor:
+  # Conservative default false: enabling makes `sable train auto-check`
+  # (the cron entrypoint) archive automatically on every check. Opt in once
+  # you've watched `sable models janitor --dry-run` on your registry.
+  enabled: false
+  retention_days: 30       # age threshold; per-row reference is promoted_at
+                           # when the model ever went live, else created_at
+  # Aged *operational* files (worker/server logs, chat uploads/, spillover,
+  # batch checkpoints) are deleted — not archived — after this many days.
+  # Only those allow-listed directories are ever touched; models/datasets/
+  # buffer/archive contents are never part of this pass. 0 disables it.
+  # Preview any run with `sable models janitor --dry-run`.
+  disk_retention_days: 90
+
+# Logging — root log configuration for the CLI and dashboard processes.
+# Console (stderr) logging is always on; -v overrides level to INFO.
+# logging:
+#   level: WARNING         # DEBUG|INFO|WARNING|ERROR for non-verbose runs
+#   file: logs/sable.log # rotating file handler; relative names resolve
+#                          # under SABLE_HOME (unset => stderr only)
+#   max_bytes: 5000000     # rotation size per file (default 5 MB)
+#   backup_count: 3        # rotated files kept
+#   module_levels:         # per-logger overrides
+#     sable.serving: DEBUG
+
+# Dashboard (Phase 5) — `sable dashboard` web UI. The bind host is always
+# 127.0.0.1 (loopback); it cannot be widened from config or env. No external
+# assets are fetched by the UI, so it works fully offline.
+dashboard:
+  port: 0                # 0 = dynamic free loopback port; env: SABLE_DASHBOARD_PORT
+  # /api/* auth token — ON by default: with no token configured anywhere,
+  # the dashboard generates one on first start and persists it (0600) at
+  # <home>/dashboard.token. `sable launch` opens the browser already
+  # authenticated. Set an explicit secret here (or SABLE_DASHBOARD_TOKEN),
+  # or disable auth entirely with the empty string:
+  # token: ""            # single-user trust; loopback + Origin checks remain
+
+# Agent profiles (Phase 5e) — named runner configurations managed by the
+# dashboard Profiles panel (or by hand here). Chat's agent mode applies the
+# selected profile: system_prompt replaces the built-in prompt, tools restricts
+# the tool set (built-in tool names), model_name
+# overrides the served-model alias. default_profile is used when none is picked.
+default_profile: null    # e.g. coder
+profiles: []
+  # - name: coder
+  #   system_prompt: "You are a careful coding assistant."
+  #   tools: [read_file, write_file, list_dir]   # omit/null = all tools
+  #   model_name: null                           # null = whatever is served
+  #   workspace_root: null                       # backlog #9: override the
+  #                                              # global agent.workspace_root
+  #                                              # for this profile
+  #   server_instance: null                      # Phase 6: id of a managed
+  #                                              # server instance (Serve
+  #                                              # panel) this profile's chat
+  #                                              # runs target instead of the
+  #                                              # default serve endpoint —
+  #                                              # e.g. orchestrator model vs
+  #                                              # coding model concurrently
+  #   capabilities:                              # per-agent reach-out toggles
+  #     internet: false                          # grant web_fetch to this agent
+  #     run_commands: false                      # grant run_command (shell —
+  #                                              # runs with your privileges;
+  #                                              # trusted profiles only)
+  #                                              # omitted = inherit the global
+  #                                              # agent.capabilities defaults
+
+# Prompt evolution (pass 4 #39, evaluation/evolve.py) — GEPA-style search over
+# a profile's system prompt using golden tasks (validate_tool_calls format).
+# `sable evolve <profile> --goldens FILE` queues an in-process job (kind
+# evolve, VRAM-gated like shadow_eval): k mutations/generation from the judge
+# model, deterministic golden checks FIRST (hard-fail = eliminated without any
+# judge calls), judge scoring for golden passers, top-2 per generation. The
+# output is ALWAYS a diff proposal — never auto-applied; `sable evolve apply
+# <job_id>` (or the Profiles panel button) is the explicit gated action.
+evolution:
+  enabled: false           # master switch — OFF means the evolve job refuses
+                           # to run and the CLI errors before queueing
+  max_call_budget: 60      # hard cap on total LLM calls per job (mutation +
+                           # replay + judge); params call_budget is clamped here
+
+# Playbooks (pass 4 #38, core/playbooks.py) — distilled markdown recipes from
+# recurring successful tool chains, injected into profile system prompts.
+# Manage with `sable playbooks scan|candidates|promote|retire|show|export`.
+playbooks:
+  enabled: false           # master switch — OFF means ZERO behavior change:
+                           # no store access, prompts byte-identical to before
+  total_cap_chars: 2000    # hard cap on the whole "## Playbooks" section;
+                           # recipes that do not fit whole are OMITTED whole
+                           # (most-recently-promoted first), never sliced
+  per_recipe_cap_chars: 800  # over-cap recipes are omitted entirely
+
+# Skills (core/skills.py) — agent-authored persistent procedures. Where
+# playbooks mine recurring chains from SUCCESSFUL traces, skills are written
+# deliberately by the agent itself (save_skill) at the moment it learns
+# something durable about a program or this machine: GUI coordinates that
+# work, which screenshot path survives, headless invocation recipes, failure
+# gotchas. Stored as markdown under <SABLE_HOME>/skills/ with a companion
+# scripts dir per skill for bundled executables (run_command uses them).
+# Only name+description index LINES are injected into prompts — full bodies
+# are read on demand via read_skill, so standing context cost is one line
+# per skill. Human-editable: fix a recipe by editing its .md file or from the
+# dashboard (Settings -> Skills card lists/edits/deletes via /api/skills).
+skills:
+  enabled: false           # master switch — OFF means ZERO behavior change:
+                           # save_skill/read_skill/list_skills/delete_skill are
+                           # not exposed and prompts stay byte-identical to before
+  index_total_cap_chars: 1500  # hard cap on the "## Skills" index section;
+                               # most-recently-updated first, entries that do
+                               # not fit are OMITTED whole
+
+# Easy training — turnkey loop for one or more agent profiles (dashboard "Easy"
+# panel). Pick agent profiles that are already bound to managed server
+# instances; enabling writes the optimal preset into
+# curation:/training:/validation:/goldens_mine:: SFT+DPO curation with failures
+# as preference negatives, eval split + soft regression gate, shadow-baseline
+# comparison before promotion (warn-only; also what unattended auto-promotion
+# needs to reach tier T2), and golden mining from 👍 traces (one best-effort
+# pass runs before each easy-loop train so fresh thumbed behavior gates the
+# promoted model). It stamps every loop profile's chat traces so curation and
+# readiness scope to them, and lets one click run the full iterate loop per
+# agent. `train auto-check --trigger` (cron) checks and trains each agent in
+# turn while enabled. Deliberately NOT in the preset: training.backend:
+# streamed and rank_scaling (GPU effects unmeasured), rft.enabled and
+# janitor.enabled (real GPU spend / archival side effects — explicit opt-in
+# stays yours). See sable/training/easy.py.
+easy_training:
+  enabled: false           # master switch — OFF means zero behavior change
+  profile: null            # PRIMARY agent profile name (legacy single key)
+  # profiles: [coder, writer]  # multi-agent loop; includes the primary. Absent
+  # or single-entry => exactly the old one-profile behavior. Each agent trains
+  # as its own scoped iterate run (own readiness gauge, own auto-deploy target).
+  auto_deploy: false       # hot-swap each agent's server to its promoted GGUF
+  # min_traces / min_score override training.auto_min_traces / auto_min_score
+  # for this loop only; leave unset to share the Schedule panel thresholds.
+  # min_traces: 50
+  # min_score: 0.5
+
+# Rejection-sampling fine-tuning (STaR / RFT) — turn serving into a data engine.
+# For prompts sable can VERIFY, sample K completions from the SERVED model,
+# keep only verified-correct ones, and emit a ShareGPT SFT dataset (same layout
+# as `sable curate`, manifest source: "rft") that the training pipeline
+# consumes unchanged. Runs as job kind `rft` (in-process like shadow_eval/evolve,
+# under dispatcher drain). Verification is never self-consistency: golden tasks
+# reuse the deterministic validation checks; open-chat prompts need the LLM judge
+# at a STRICT bar. Prompts already sampled are ledger-recorded and never
+# resampled; trace-derived rows share the curater's claim protocol, so rft and
+# curate datasets can never overlap. See sable/training/rejection.py.
+rft:
+  enabled: false           # master switch — OFF means zero behavior change
+  sample_k: 4              # candidate completions sampled per prompt (K)
+  judge_min_score: 0.85    # STRICT pass bar for open-chat judge verification
+  max_prompts: 16          # prompts sampled per run (GPU-cost bound)
+  temperature: 0.9         # elevated sampling temperature for diversity
+  max_tokens: 512          # completion budget per candidate
+  max_prompt_tokens: 8192  # exact-token budget gate — longer contexts skipped
+  emit_dpo: true           # also emit dpo.jsonl: kept samples paired against
+                           # verifier-failed candidates of the same prompt
+                           # (on within RFT — the whole feature is gated by
+                           # `enabled`; prompts with no kept row emit nothing)
+  max_dpo_pairs_per_prompt: 3   # cap per prompt; distinct failure reasons first
+  # agent_profile: null    # restrict trace selection to one profile's traces
+  # project: null          # ...or one project's
+  # base_model: null       # train.yaml template input for emitted datasets
+
+# Golden mining (review idea #3) — distill 👍-thumbed traces into golden
+# validation tasks with machine-checkable verifiers. Every mined golden carries
+# at least one deterministic self-checked check (substring lines and/or an
+# expect_tool_call name derived from the trace's own successful output), is
+# redacted before persisting, and lands in <home>/goldens/mined.jsonl — which
+# both validation (promotion gate) and rft golden selection read automatically.
+# The mined_goldens ledger (schema v8) dedups by trace and prompt-hash, so
+# re-running never duplicates. See sable/curate/mine_goldens.py.
+goldens_mine:
+  enabled: false           # master switch — OFF means zero behavior change
+  max_per_run: 8           # goldens mined per pass (hygiene cap)
+  max_candidates: 64       # 👍 traces examined per pass
+  min_feedback_score: 1.0  # 👍 threshold on user feedback rows
+  use_judge: false         # optionally propose extra substring checks via the
+                           # served model (proposals still pass the same
+                           # deterministic self-check gate before persisting)
+
+# Capability-tier auto-routing (review idea #2) — route runs to the tier
+# appropriate for request complexity across RUNNING server instances, with
+# whole-run escalation small->big when a lower-tier attempt fails on infra.
+# Tiers are the registry's derived capability tiers (T0 experimental .. T3
+# field-proven); instances whose model has no registry row read as untiered
+# (T0). Decisions are per-run, never mid-stream. Explicit profile/instance
+# bindings always win over routing. See sable/serving/router.py.
+routing:
+  enabled: false           # master switch — OFF means zero behavior change
+  escalate_on_failure: true  # retry a failed run at the next-higher tier
+  prefer: lowest_tier      # small models first (the point of the cascade);
+                           # "highest_tier" flips the preference
+  high_context_tokens: 8192  # prompt tokens above this require tier >= 2
+  tool_heavy_min_tools: 6  # enabled tools counting as tool-heavy (>= tier 1)
+  # profile_hints: {}      # {profile_name: low|high|auto} per-profile hints
+  # refusal_markers: []    # response substrings treated as refusals that
+                           # trigger escalation (empty = never; opt-in only)
+
+# Serving-launch behavior (WP3 autotune + WP4 engine watchdog + WP5 coexistence).
+# See sable/serving/calibrate.py, sable/serving/watchdog.py and
+# sable/serving/coexist.py.
+serve:
+  calibration: off         # off | auto — `auto` applies the stored profile
+                           # from `sable calibrate` for THIS machine-id +
+                           # model-hash as launch defaults, underneath explicit
+                           # run_settings (manual values always win). With no
+                           # profile, or this key absent/off, launches are
+                           # byte-identical to pre-WP3.
+  # --- WP4 engine watchdog (STRICTLY OPT-IN; default off) -------------------
+  # Detects a FROZEN llama-server child: a request in flight for the whole
+  # window with ZERO process CPU-time growth AND zero disk-IO growth over the
+  # sample interval (/proc/<pid>/stat + /proc/<pid>/io). A healthy-but-slow
+  # server (CPU busy computing) is NEVER killed, and an idle server (no
+  # request in flight) never triggers anything. On detection the pid is
+  # re-verified as sable-owned (foreign/recycled pids are never killed),
+  # SIGTERM -> SIGKILL after grace, then restart with exponential backoff up
+  # to a per-window cap (loud `restart_capped` event when hit). Linux only:
+  # without /proc the watchdog logs once and never kills. Events land on the
+  # dashboard bus as `serve.watchdog`: freeze_suspect, freeze_detected,
+  # instance_killed, stale_state_cleared, instance_restarted, restart_failed,
+  # restart_capped.
+  watchdog_enabled: false          # master switch — nothing runs when false
+  # watchdog_window_seconds: 90    # stall duration before a freeze call
+  # watchdog_sample_interval_seconds: 5   # /proc sampling cadence
+  # watchdog_cpu_threshold_ms: 10  # "≈0 CPU": max utime+stime growth per sample
+  # watchdog_io_threshold_bytes: 0 # "≈0 IO": max read+write growth per sample
+  # watchdog_kill_grace_seconds: 8 # SIGTERM -> SIGKILL escalation grace
+  # watchdog_restart_backoff_base_seconds: 2  # base * 2^(attempt-1)
+  # watchdog_max_restarts: 3       # cap within the window below, then give up
+  # watchdog_restart_window_seconds: 600
+  # --- WP5 GPU coexistence (STRICTLY OPT-IN; all defaults off) --------------
+  # Idle-unload / lazy-load + the train+serve handshake (inspired by Strata's
+  # idle-unload pattern, re-implemented inline). With no keys set, behavior is
+  # byte-identical to pre-WP5. See sable/serving/coexist.py.
+  idle_unload_seconds: 0           # 0 = disabled. When > 0, a supervisor-side
+                                   # timer gracefully stops (SIGTERM via the
+                                   # owned-stop paths) any running instance
+                                   # with NO tracked request for this long and
+                                   # records it `unloaded`; NEVER while a
+                                   # request is in flight.
+  lazy_load: false                 # true: a request resolving to an unloaded
+                                   # instance transparently re-launches it
+                                   # (blocking; cold-start accepted) before
+                                   # forwarding. false: such requests fail with
+                                   # a load-it / enable-lazy_load message.
+  min_free_vram_mib: 0             # 0 = no handshake. Together with
+                                   # idle_unload_seconds > 0 it arms the
+                                   # train+serve handshake: a training job that
+                                   # FAILS the VRAM gate but WOULD pass assuming
+                                   # served instances are unloaded triggers an
+                                   # unload first, then a bounded poll of the
+                                   # free-VRAM probe before admitting the job.
+  coexist_policy: refuse           # refuse (default, safe): nothing unloaded;
+                                   # a `coexist_refused` event shows the
+                                   # headroom numbers. unload: perform it.
+  # --- Inference engines (STRICTLY OPT-IN; sable/serving/engines.py) -------
+  # default_engine: <id>           # engine the DEFAULT server spawns with.
+  #                                # Unset / blank / "llama-cpp" = built-in
+  #                                # llama.cpp path (byte-identical default).
+  #                                # Register extra OpenAI-compatible engines
+  #                                # (vLLM, llama-swap, ...) on the Hardware
+  #                                # page; named instances can also bind an
+  #                                # engine individually on the Serve page.
+  # default_engine: ""
+  # Race policy: load/unload serialize per instance id. A request arriving
+  # mid-unload blocks, then reloads transparently (lazy_load true) or gets a
+  # clear retryable error (lazy_load false). Events on the dashboard bus kind
+  # `serve.coexist`: instance_unloaded, instance_loaded,
+  # coexist_unload_triggered, coexist_refused.
+  # Manual control: `sable instances status|load|unload <id>` or
+  # POST /api/servers/<id>/load|unload (dashboard).
+
+# Validation gate (Phase 4) — replayed before ANY promotion. Keep tiny and
+# deterministic: substring + tool-call checks, no LLM judge. A model promotes
+# only when pass_rate >= min_pass_rate; otherwise it is marked failed and the
+# previous active model stays live (`sable models rollback` remains available).
+#
+# Two check kinds (a task may mix both):
+#   expect_contains / expect_not_contains — case-insensitive substring tripwires.
+#   expect_tool_call (backlog #5) — sends the prompt WITH the production
+#   TOOL_SCHEMAS and asserts a tool call comes back (native tool_calls field or
+#   text-emitted calls recovered by core/tool_calls.py). Catches quantization/
+#   merge bugs that break tool-call grammar while prose still passes. Optional
+#   keys: name (exact function name), arg_contains ({arg: substring},
+#   case-insensitive). Opt-in per task — commented-out examples below; uncomment
+#   once your base model is expected to function-call reliably.
+validation:
+  min_pass_rate: 1.0         # fraction of golden tasks that must pass
+  request_timeout_s: 120
+  max_tokens: 256
+  temperature: 0.0           # deterministic tripwires
+  parallel: 2                # concurrent golden-task replays (ThreadPoolExecutor cap).
+                             # llama.cpp single-slot (-np 1) queues server-side, so the
+                             # win is client-side pipelining only; raise above 2 only
+                             # with -np > 1. Set 1 for the old serial replay.
+  # --- Shadow-baseline evaluation (pass 4 #32, opt-in) ----------------------
+  # Post-train, pre-promote replay of N recent high-feedback traces against
+  # BOTH the active model and the candidate, scored by the existing LLM
+  # judge (bounded: 2xN calls, circuit-breaker-aware). Runs as a normal
+  # scheduler job (kind shadow_eval) so VRAM gating applies. The verdict is
+  # stored on the registry row next to eval_loss.
+  shadow_enabled: false          # master switch — iterate runs shadow eval only when true
+  max_shadow_regression_pct: 5.0 # regression tolerance, % of the judge's 0..1
+                                 # score range (improvement < -pct/100 flags it)
+  shadow_blocks_promotion: false # implement-but-off strict gate: true turns a
+                                 # flagged regression into a promotion veto
+  shadow_replay_n: 8             # replay-set size (judge calls = 2xN)
+  shadow_judge_model: null       # optional judge model name (default: served per side)
+  # --- Capability tiers (pass 4 #41, registry/tiers.py) ----------------------
+  # Derived autonomy tier T0 experimental / T1 validated / T2 shadow-proven /
+  # T3 field-proven (T4 audited reserved, unimplemented). Minimum derived tier
+  # required for UNATTENDED automatic promotion (`train auto-check --trigger`).
+  # Manual `sable iterate`, `models promote` and deploy are never gated —
+  # tiers gate automation, not humans. Set 0 to disable the policy entirely.
+  min_tier_auto_deploy: 2
+  golden_tasks:
+    - prompt: "What is 12 * 12?"
+      expect_contains: ["144"]
+    - prompt: "Reply with exactly the word OK"
+      expect_contains: ["ok"]
+      # expect_not_contains: ["error"]
+    # --- expect_tool_call examples (backlog #5; drop or comment out if your
+    #     base model is not expected to function-call reliably) -----------
+    - prompt: "Read the file notes/todo.md and tell me the first line."
+      expect_tool_call: {name: read_file, arg_contains: {path: "notes"}}
+    - prompt: "List the contents of the current directory."
+      expect_tool_call: {name: list_dir}

@@ -1,0 +1,20 @@
+Wait, I need to check the config first.
+Actually, the file might not exist yet.
+No, the error said permission denied specifically.
+Hold on, maybe I should try a different path instead.
+Hmm, but wait, what about the symlink situation?
+Wait, I need to check the config first.
+Actually, the file might not exist yet.
+No, the error said permission denied specifically.
+Hold on, maybe I should try a different path instead.
+Hmm, but wait, what about the symlink situation?
+Wait, I need to check the config first.
+Actually, the file might not exist yet.
+No, the error said permission denied specifically.
+Hold on, maybe I should try a different path instead.
+Hmm, but wait, what about the symlink situation?
+Wait, I need to check the config first.
+Actually, the file might not exist yet.
+No, the error said permission denied specifically.
+Hold on, maybe I should try a different path instead.
+Hmm, but wait, what about the symlink situation?

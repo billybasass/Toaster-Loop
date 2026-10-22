@@ -1,0 +1,3 @@
+Okay.
+```json
+{"name": "search_files", "arguments": {"query": "needle"}

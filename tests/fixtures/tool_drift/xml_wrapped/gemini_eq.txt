@@ -1,0 +1,4 @@
+< function=search_files>
+< parameter name="query">needle< /parameter>
+< parameter name="glob">*.py< /parameter>
+< /function>

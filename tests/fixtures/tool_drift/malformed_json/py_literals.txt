@@ -1,0 +1,3 @@
+```json
+{"name": "run_command", "arguments": {"command": "ls", "bg": False, "note": None}}
+```

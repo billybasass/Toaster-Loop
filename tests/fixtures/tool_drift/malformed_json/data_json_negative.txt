@@ -1,0 +1,5 @@
+The config looks like this:
+```json
+{"retention_days": 30, "enabled": true}
+```
+Nice and tidy.

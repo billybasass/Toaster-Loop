@@ -1,0 +1,237 @@
+// runsettings.js — shared "model run settings" editor (reference style).
+// Used by the Settings page (defaults for the default server) and the Serve
+// page (per-instance settings captured when an instance is created/edited).
+//
+// Vision follows the studio pattern: NO mmproj path input. We ask the backend
+// (GET /api/mmproj?gguf=...) whether a projector GGUF sits next to the model;
+// if not but the hub repo publishes one, we offer a download into that same
+// folder. The user only ever flips a "load vision projector" toggle.
+//
+// Speculative decoding mirrors studio's mode dropdown (auto / ngram / mtp /
+// chained / off) plus an optional draft length (-1 = platform default).
+
+import { api } from "./api.js";
+import { el, toast } from "./ui.js";
+
+const KV_TYPES = ["f16", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl"];
+
+// Sampling + thinking defaults (reference style): request-time
+// parameters merged into every /chat/completions call — per server instance
+// (Serve page) and globally (Settings page). Distinct from the llama-server
+// CLI run settings above; these work for attached servers too.
+export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"];
+export const SPEC_MODES = [
+  ["", "— off (llama.cpp default) —"],
+  ["auto", "auto (recommended: n-gram self-speculation)"],
+  ["ngram", "ngram (zero-VRAM self-speculation)"],
+  ["mtp", "mtp (needs a model with an MTP head / drafter)"],
+  ["ngram+mtp", "ngram + mtp (chained)"],
+  ["off", "off (explicitly disabled)"],
+];
+
+function field(labelText, input, hint) {
+  return el("div", { class: "field" }, el("label", { text: labelText }),
+    input, hint ? el("span", { class: "hint", text: hint }) : null);
+}
+
+function numInput(value, ph = "") {
+  return el("input", { type: "number", step: "any", value: value ?? "", placeholder: ph });
+}
+
+function triSelect(value) {
+  const s = el("select", {},
+    el("option", { value: "", text: "—" }),
+    el("option", { value: "true", text: "true" }),
+    el("option", { value: "false", text: "false" }));
+  if (value === true || value === false) s.value = String(value);
+  return s;
+}
+
+/**
+ * Build the editor. Returns { node, getPatch() }.
+ * opts:
+ *   gguf(): () => string||null — current model GGUF path for mmproj status
+ *   showVision (default true), showExtra (default true)
+ */
+export function runSettingsEditor(initial = {}, opts = {}) {
+  const rs = initial || {};
+  const host = el("div");
+
+  const kvSel = el("select", {}, el("option", { value: "", text: "—" }),
+    ...KV_TYPES.map((t) => el("option",
+      { value: t, text: t === "f16" ? "f16 (default)" : t,
+        selected: rs.kv_cache_type === t })));
+  const faSel = triSelect(rs.flash_attn);
+  const parIn = numInput(rs.parallel, "auto");
+  const bsIn = numInput(rs.batch_size, "auto");
+  const ubIn = numInput(rs.ubatch_size, "auto");
+  const tpSel = triSelect(rs.tensor_parallel);
+  const vramPctIn = numInput(rs.gpu_memory_pct, "100 = full offload");
+  const mmapSel = triSelect(rs.no_mmap);
+  const mlockSel = triSelect(rs.mlock);
+
+  // Speculative decoding (studio-style mode dropdown + draft length).
+  const specSel = el("select", {},
+    ...SPEC_MODES.map(([v, t]) => el("option", { value: v, text: t,
+      selected: (rs.speculative_type || "") === v })));
+  const specNMaxIn = el("input", { type: "number", min: "1", max: "16",
+    value: rs.spec_draft_n_max ?? "", placeholder: "draft n-max (default 4)" });
+
+  // Vision: toggle + detected/downloaded mmproj status (no path input).
+  const visionSel = triSelect(rs.vision === undefined ? true : rs.vision);
+  const mmStatus = el("span", { class: "hint" });
+  const dlBtn = el("button", { class: "small", text: "download projector",
+    style: "display:none" });
+
+  async function refreshMmproj() {
+    const gguf = (opts.gguf && opts.gguf()) || "";
+    dlBtn.style.display = "none";
+    if (!gguf) { mmStatus.textContent = ""; return; }
+    mmStatus.textContent = "checking vision projector…";
+    try {
+      const d = await api("/api/mmproj?gguf=" + encodeURIComponent(gguf));
+      if (d.local) {
+        mmStatus.textContent = `mmproj detected: ${d.local.split("/").pop()}`;
+      } else if (d.downloadable) {
+        mmStatus.textContent = d.repo_id
+          ? `no local projector — ${d.remote[0].rfilename} available from ${d.repo_id}`
+          : "no local projector found";
+        dlBtn.style.display = "";
+      } else {
+        mmStatus.textContent = "no vision projector for this model";
+      }
+    } catch (e) { mmStatus.textContent = e.message; }
+  }
+  dlBtn.addEventListener("click", async () => {
+    const gguf = (opts.gguf && opts.gguf()) || "";
+    if (!gguf) return;
+    dlBtn.disabled = true;
+    mmStatus.textContent = "downloading projector…";
+    try {
+      await api("/api/mmproj/download", { method: "POST", body: { gguf } });
+      toast("mmproj download started — watch the console", "ok");
+      // Poll briefly; projectors are small (hundreds of MB) but not instant.
+      for (let i = 0; i < 60; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const d = await api("/api/mmproj?gguf=" + encodeURIComponent(gguf));
+        if (d.local) { mmStatus.textContent = `downloaded: ${d.local.split("/").pop()}`;
+          dlBtn.style.display = "none"; return; }
+      }
+      mmStatus.textContent = "download still running — check the console";
+    } catch (e) { mmStatus.textContent = e.message; }
+    finally { dlBtn.disabled = false; }
+  });
+
+  const extraTa = el("textarea", { rows: 2, spellcheck: "false",
+    placeholder: "--rope-scaling yarn --yarn-orig-ctx 32768" });
+  extraTa.value = rs.extra_args || "";
+
+  const kids = [
+    field("KV cache dtype", kvSel, "-ctk/-ctv (q8_0 saves VRAM)"),
+    field("Flash attention", faSel, "--flash-attn"),
+    field("Parallel slots / batch / micro-batch",
+      el("span", {}, parIn, bsIn, ubIn), "-np · -b · -ub"),
+    field("Tensor parallelism", tpSel, "--tensor-parallel"),
+    field("VRAM budget %", vramPctIn,
+      "scales GPU layer offload when gpu_layers is auto (VRAM budget percentage)"),
+    field("mmap / mlock", el("span", {}, mmapSel, mlockSel), "no-mmap · mlock"),
+    field("Speculative decoding", el("span", {}, specSel, specNMaxIn),
+      "--spec-type (n-gram self-speculation is free VRAM-wise; mtp needs an MTP model)"),
+  ];
+  if (opts.showVision !== false) {
+    kids.push(field("Vision (mmproj)", el("div", {}, visionSel,
+      el("div", {}, mmStatus, " ", dlBtn)),
+      "load the projector GGUF found next to the model (auto-downloaded from its hub repo on request)"));
+  }
+  if (opts.showExtra !== false) {
+    kids.push(field("Extra arguments", extraTa,
+      "appended verbatim to the llama-server command"));
+  }
+  host.replaceChildren(...kids);
+
+  function getPatch() {
+    const p = {};
+    const set = (k, v, kind) => {
+      if (v === "" || v == null) return;
+      p[k] = kind === "num" ? Number(v) : kind === "bool" ? v === "true" : v;
+    };
+    set("kv_cache_type", kvSel.value);
+    set("flash_attn", faSel.value, "bool");
+    set("parallel", parIn.value, "num");
+    set("batch_size", bsIn.value, "num");
+    set("ubatch_size", ubIn.value, "num");
+    set("tensor_parallel", tpSel.value, "bool");
+    set("gpu_memory_pct", vramPctIn.value, "num");
+    set("no_mmap", mmapSel.value, "bool");
+    set("mlock", mlockSel.value, "bool");
+    set("speculative_type", specSel.value);
+    set("spec_draft_n_max", specNMaxIn.value, "num");
+    if (opts.showVision !== false) set("vision", visionSel.value, "bool");
+    const extra = extraTa.value.trim();
+    if (extra !== (rs.extra_args || "")) p.extra_args = extra;
+    return p;
+  }
+
+  return { node: host, getPatch, refreshMmproj };
+}
+
+/**
+ * Sampling + thinking editor (reference style). Same shape as
+ * runSettingsEditor: returns { node, getPatch() } producing a `sampling:`
+ * patch ({temperature, top_p, top_k, min_p, repeat_penalty,
+ * presence_penalty, max_tokens, enable_thinking, reasoning_effort,
+ * preserve_thinking}). Used by the Serve page (per-instance), the Settings
+ * page (global defaults) and the Profiles panel (per-agent overrides).
+ */
+export function samplingEditor(initial = {}) {
+  const sp = initial || {};
+  const host = el("div");
+
+  const tempIn = numInput(sp.temperature, "server default");
+  const topPIn = numInput(sp.top_p, "server default");
+  const topKIn = numInput(sp.top_k, "server default");
+  const minPIn = numInput(sp.min_p, "server default");
+  const repIn = numInput(sp.repeat_penalty, "server default");
+  const presIn = numInput(sp.presence_penalty, "server default");
+  const maxTokIn = numInput(sp.max_tokens, "server default");
+
+  // Thinking / reasoning controls: gate + effort + history preservation.
+  const thinkSel = triSelect(sp.enable_thinking);
+  const effortSel = el("select", {}, el("option", { value: "", text: "—" }),
+    ...REASONING_EFFORTS.map((e) => el("option",
+      { value: e, text: e, selected: sp.reasoning_effort === e })));
+  const preserveSel = triSelect(sp.preserve_thinking);
+
+  host.replaceChildren(
+    field("temperature", tempIn),
+    field("top_p / top_k / min_p", el("span", {}, topPIn, topKIn, minPIn)),
+    field("repetition / presence penalty", el("span", {}, repIn, presIn)),
+    field("max_tokens", maxTokIn),
+    field("Thinking (enable_thinking)", thinkSel,
+      "on/off for reasoning-capable models (Qwen3, DeepSeek-R1, gpt-oss…)"),
+    field("Reasoning effort", effortSel,
+      "low / medium / high — for effort-style models; none disables thinking"),
+    field("Preserve thinking history", preserveSel,
+      "keep past  blocks in the prompt (Qwen-style templates)"),
+  );
+
+  function getPatch() {
+    const p = {};
+    const set = (k, v, kind) => {
+      if (v === "" || v == null) return;
+      p[k] = kind === "num" ? Number(v) : kind === "bool" ? v === "true" : v;
+    };
+    set("temperature", tempIn.value, "num");
+    set("top_p", topPIn.value, "num");
+    set("top_k", topKIn.value, "num");
+    set("min_p", minPIn.value, "num");
+    set("repeat_penalty", repIn.value, "num");
+    set("presence_penalty", presIn.value, "num");
+    set("max_tokens", maxTokIn.value, "num");
+    set("enable_thinking", thinkSel.value, "bool");
+    set("preserve_thinking", preserveSel.value, "bool");
+    set("reasoning_effort", effortSel.value);
+    return p;
+  }
+  return { node: host, getPatch };
+}

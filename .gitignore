@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# sable runtime state that must never live in the repo (all belongs under
+# SABLE_HOME / tmp paths)
+serve_state.json
+serve_state.json.tmp
+adapter/
+outputs/
+train_runs/
+datasets/
+models/
+*.db
+*.db-wal
+*.db-shm
+logs/
+None/
+
+# coverage artifacts (pytest-cov)
+.coverage
+htmlcov/
+
+# local config with possible secrets
+config.yaml
+.env

@@ -1,0 +1,3 @@
+Searching!
+```
+{"name": "serch_files", "arguments": {"query": "x"}

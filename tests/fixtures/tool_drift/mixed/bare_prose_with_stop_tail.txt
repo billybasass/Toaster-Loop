@@ -1,0 +1,1 @@
+Here you are: {"name": "list_dir", "arguments": {"path": "docs"}} Hope that helps!<|eos|><|eos|>

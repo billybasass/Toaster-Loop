@@ -1,0 +1,5 @@
+Sure!
+```json
+{"name": "list_dir", "arguments": {"path": "."}}
+```
+<|im_end|><|im_end|><|im_end|>

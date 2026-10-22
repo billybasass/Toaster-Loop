@@ -1,0 +1,4 @@
+```json
+{"name": "read_file", "arguments": {"path": "a.py"}}<|im_end|><|eos|>
+```
+All set.
