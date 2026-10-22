@@ -115,6 +115,22 @@ export default {
       title: "agent profile: system prompt + tool subset for this run" },
       el("option", { value: "", text: "profile: default" }));
     let defaultProfile = null;
+    // The selected profile survives navigation (bug fix: returning from
+    // Settings used to reset the dropdown to default mid-conversation).
+    // `pendingProfile` is the restore target; it is applied whenever the
+    // option list (re)builds, and overridden by a thread's stored profile
+    // when that thread is opened.
+    let pendingProfile = sget(skey("ui", "", "profile")) || "";
+
+    function applyProfileSelection() {
+      const names = [...profileSel.options].map((o) => o.value);
+      profileSel.value = names.includes(pendingProfile) ? pendingProfile : "";
+    }
+    profileSel.addEventListener("change", () => {
+      pendingProfile = profileSel.value;
+      if (pendingProfile) sset(skey("ui", "", "profile"), pendingProfile);
+      else sdel(skey("ui", "", "profile"));
+    });
 
     async function loadProfiles() {
       try {
@@ -125,7 +141,16 @@ export default {
             ? `default (${defaultProfile})` : "default (built-in prompt)" }),
           ...(d.profiles || []).map((p) =>
             el("option", { value: p.name, text: p.name })));
+        applyProfileSelection();
       } catch { /* profiles are optional; keep the default option */ }
+    }
+
+    // Select the profile a thread was last run with (null/absent = default).
+    function selectThreadProfile(name) {
+      pendingProfile = name || "";
+      applyProfileSelection();
+      if (pendingProfile) sset(skey("ui", "", "profile"), pendingProfile);
+      else sdel(skey("ui", "", "profile"));
     }
 
     // auto-scroll with user-scroll-up guard
@@ -543,6 +568,7 @@ export default {
     function newThread() {
       if (running) return toast("stop the current run first", "error");
       threadId = null;
+      sdel(skey("ui", "", "last-thread")); // don't reopen a discarded draft
       threadWasProjectless = true; // fresh thread adopts the active project
       messages = [];
       threadSummary = null; // backlog #6: rolling compaction summary
@@ -592,6 +618,10 @@ export default {
       try {
         const d = await api("/api/chat/threads/" + encodeURIComponent(id));
         threadId = id;
+        // Remember which thread was open so returning to the panel reopens
+        // it (and adopts any run still going on it) instead of dropping the
+        // user into an empty chat that looks like the agent stopped.
+        sset(skey("ui", "", "last-thread"), id);
         // A thread that already belongs to a project keeps it on re-save;
         // a projectless one adopts the current active project context.
         threadWasProjectless = !d.thread.project;
@@ -599,6 +629,9 @@ export default {
           (m) => m && typeof m.role === "string");
         threadSummary = typeof d.thread.summary === "string"
           ? d.thread.summary : null;
+        // The dropdown follows the thread: reopen a "sable" conversation and
+        // the selector shows sable, not default.
+        selectThreadProfile(d.thread.profile || "");
         renderMsgs();
         renderThreadList();
         // Run lifecycle: if this thread has an in-flight run (orphaned by a
@@ -693,18 +726,27 @@ export default {
       for (const m of messages) msgHost.appendChild(msgBubble(m));
     }
 
-    // Streaming turn (Zoo-code style): ONE assistant block per run. The
-    // collapsible reasoning pane sits on top; below it a segment host keeps
-    // everything in chronological order — text segments and tool cards splice
-    // into the same column, so thinking/tools/replies read as one narrative
-    // instead of loose siblings scattered between bubbles. Content deltas
-    // extend the current md segment; a tool card closes it so later text
-    // starts a fresh segment after the card.
+    // Streaming turn (Zoo-code style): ONE assistant block per run. A segment
+    // host keeps everything in chronological order — thinking panes, text
+    // segments and tool cards splice into the same column, so the run reads as
+    // one narrative instead of loose siblings scattered between bubbles.
+    // Content deltas extend the current md segment; a tool card or a new
+    // thinking burst closes it so later text starts a fresh segment after it.
+    //
+    // Thinking segmentation (crash fix): each CONTIGUOUS burst of reasoning
+    // deltas gets its own collapsible pane instead of one bubble that grows
+    // for the whole task. Live deltas append to a single text node (O(1) DOM
+    // work per token); markdown renders ONCE when the segment closes. A view
+    // cap bounds DOM size on runaway streams — the full text is still
+    // persisted with the message. The old design re-ran renderMarkdown over
+    // the entire accumulated reasoning on every single delta: O(n²) parsing
+    // plus one unbounded DOM node, which froze and eventually crashed the tab
+    // on long thinking-heavy runs.
     function streamingBubble() {
       let raw = "";
-      let reasoningRaw = "";
-      let seg = null;      // current md segment element
-      let segRaw = "";     // accumulated text of the current segment
+      const reasoningParts = [];  // closed thinking segments, chronological
+      let seg = null;             // current md segment element
+      let segRaw = "";            // accumulated text of the current segment
       const ensureSeg = () => {
         if (seg) return seg;
         seg = el("div", { class: "md" });
@@ -712,31 +754,65 @@ export default {
         segRaw = "";
         return seg;
       };
-      const thinkBody = el("div", { class: "reasoning-body md" });
-      const thinkToggle = el("button", { class: "reasoning-toggle",
-        text: "◂ thinking…" });
-      const thinkPane = el("div", { class: "reasoning hidden" },
-        thinkToggle, thinkBody);
-      let thinkOpen = true;
-      const setThinkOpen = (on) => {
-        thinkOpen = on;
-        thinkBody.classList.toggle("hidden", !on);
-        thinkToggle.textContent = on ? "▾ thinking" : "◂ thinking";
-      };
-      thinkToggle.addEventListener("click", () => setThinkOpen(!thinkOpen));
-      const bubble = el("div", { class: "msg assistant streaming" },
-        thinkPane);
+
+      const THINK_VIEW_CAP = 20000;   // chars rendered live per pane
+      let thinkPane = null, thinkToggle = null, thinkBody = null;
+      let thinkText = null;           // live text node (appendData = O(1))
+      let thinkRaw = "";
+      let thinkCapped = false;
+
+      function closeThink() {
+        if (!thinkPane) return;
+        reasoningParts.push(thinkRaw);
+        // Final paint: markdown once for the finished segment (capped).
+        thinkBody.replaceChildren();
+        renderMarkdown(thinkBody,
+          thinkRaw.length > THINK_VIEW_CAP
+            ? thinkRaw.slice(0, THINK_VIEW_CAP) + "\n… [view truncated]"
+            : thinkRaw);
+        // Collapse: the reader follows the answer, not old thoughts.
+        thinkBody.classList.add("hidden");
+        thinkToggle.textContent = "◂ thinking";
+        thinkPane = null; thinkToggle = null; thinkBody = null;
+        thinkText = null; thinkRaw = ""; thinkCapped = false;
+      }
+
+      const bubble = el("div", { class: "msg assistant streaming" });
       return {
         node: bubble,
         appendReasoning(text) {
-          reasoningRaw += text;
-          thinkPane.classList.remove("hidden");
-          setThinkOpen(true);
-          renderMarkdown(thinkBody, reasoningRaw);
+          if (!thinkPane) {
+            thinkToggle = el("button", { class: "reasoning-toggle",
+              text: "▾ thinking…" });
+            thinkBody = el("div", { class: "reasoning-body md" });
+            thinkPane = el("div", { class: "reasoning" },
+              thinkToggle, thinkBody);
+            // Capture THIS pane's nodes: closeThink() reassigns the outer
+            // refs, and an already-closed pane's toggle must keep working.
+            const tToggle = thinkToggle, tBody = thinkBody;
+            tToggle.addEventListener("click", () => {
+              const open = !tBody.classList.toggle("hidden");
+              tToggle.textContent = open ? "▾ thinking" : "◂ thinking";
+            });
+            bubble.appendChild(thinkPane);
+            seg = null;   // thinking interrupts the text segment
+          }
+          if (thinkCapped) { thinkRaw += text; return; }  // keep raw for save
+          thinkRaw += text;
+          if (thinkText) thinkText.appendData(text);
+          else thinkBody.replaceChildren(
+            thinkText = document.createTextNode(thinkRaw));
+          if (thinkRaw.length > THINK_VIEW_CAP) {
+            thinkCapped = true;
+            thinkBody.replaceChildren(document.createTextNode(
+              thinkRaw.slice(0, THINK_VIEW_CAP) +
+              "\n… [streaming view truncated — full text saved with the message]"));
+            thinkText = null;
+          }
           scrollDown();
         },
         append(text) {
-          if (reasoningRaw && thinkOpen) setThinkOpen(false); // answer started
+          if (thinkPane) closeThink();  // answer started: seal the thought
           // Acquire the segment BEFORE touching segRaw: ensureSeg() resets
           // segRaw when it opens a fresh segment (first delta after a tool
           // card), so appending first silently swallowed that chunk — every
@@ -760,15 +836,18 @@ export default {
           if (raw) { ensureSeg(); segRaw = raw; renderMarkdown(seg, segRaw); }
           scrollDown();
         },
-        // Splice a tool card into the turn column (closes the text segment).
+        // Splice a tool card into the turn column (closes thought + segment:
+        // the tool call was what the agent was thinking about).
         addCard(node) {
+          closeThink();
           seg = null;
           bubble.appendChild(node);
         },
         // Footer / stop-reason go at the very end of the block.
-        finish(node) { bubble.appendChild(node); },
+        finish(node) { closeThink(); bubble.appendChild(node); },
         text: () => raw,
-        reasoning: () => reasoningRaw,
+        reasoning: () => [...reasoningParts, thinkRaw]
+          .filter(Boolean).join("\n\n"),
       };
     }
 
@@ -1000,6 +1079,7 @@ export default {
       let footerInfo = {};
       let errored = false;
       let conflicted = false;   // 409 run_in_flight: the turn never ran
+      let aborted = false;      // stream aborted (Stop / navigation away)
 
       // Phase 2 (delegation): live status flips for open nested cards.
       const offDeleg = bus.on("delegation.update", (rec) => {
@@ -1083,7 +1163,10 @@ export default {
             }
           }, abort.signal);
       } catch (e) {
-        if (e.name === "AbortError") hint.textContent = "stopped";
+        if (e.name === "AbortError") {
+          aborted = true;
+          hint.textContent = "stopped";
+        }
         else if (e.code === "run_in_flight") {
           // Server-side single-flight won the race: a run is already in
           // flight for this thread (another panel, or one we just lost
@@ -1123,6 +1206,13 @@ export default {
         // user message (the thread reload shows the real state).
         messages.pop();
         renderMsgs();
+      } else if (aborted && threadId) {
+        // Stream aborted mid-run (Stop or navigation away): the run keeps
+        // executing on the server, which persists the COMPLETE turn when it
+        // finishes (POST /api/chat/stream writes the thread file itself).
+        // Saving our partial buffer here would race that write, and a late
+        // arrival could clobber the finished transcript — so don't. Keep the
+        // in-memory view as-is; returning to chat reloads from disk.
       } else if (errored && !content && !toolRecs.length) {
         messages.pop(); // dangling user msg
       } else if (!errored) {
@@ -1227,8 +1317,16 @@ export default {
     applyExplorerWidth();
     syncExplorerAvailability();
     loadProjects().then(() => { renderThreadList(); syncExplorerAvailability(); });
-    loadThreads();
     loadProfiles();
+    // Reopen the thread that was open before navigating away (bug fix: the
+    // panel used to start blank, hiding both the transcript and any run
+    // still executing on the server — which read as "the agent stopped").
+    // openThread also adopts an in-flight run for that thread.
+    const lastThread = sget(skey("ui", "", "last-thread"));
+    loadThreads().then(() => {
+      if (lastThread && threads.some((t) => t.id === lastThread))
+        openThread(lastThread);
+    });
     input.focus();
 
     return { destroy() {

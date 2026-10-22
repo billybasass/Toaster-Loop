@@ -3368,9 +3368,41 @@ class DashboardApp:
             # the returned message list afterwards, exactly like before.
             evq: "_queue.Queue[Any]" = _queue.Queue()
             live = {"n": 0}
+            # Navigation resilience: accumulate the whole turn here (the sink
+            # runs on THIS worker thread, so no locking is needed) so the
+            # transcript can be persisted server-side when the run finishes.
+            # Previously persistence was client-only: navigating away aborted
+            # the SSE stream, the panel saved only its partial buffer, and the
+            # finished reply was never written to the thread at all.
+            acc: Dict[str, Any] = {"text": "", "reasoning": "", "tools": []}
 
             def _sink(kind: str, data: Dict[str, Any]) -> None:
                 live["n"] += 1
+                try:
+                    if kind == "message.delta":
+                        acc["text"] += str(data.get("text") or "")
+                    elif kind == "message.reset":
+                        # stream->non-stream fallback: the authoritative text
+                        # replaces everything streamed so far.
+                        acc["text"] = str(data.get("text") or "")
+                    elif kind == "reasoning.delta":
+                        acc["reasoning"] += str(data.get("text") or "")
+                    elif kind == "tool.call":
+                        acc["tools"].append({"id": data.get("id", ""),
+                                             "name": data.get("name", ""),
+                                             "args": data.get("args") or {},
+                                             "result": None})
+                    elif kind == "tool.result":
+                        for t in reversed(acc["tools"]):
+                            if t["id"] == data.get("id"):
+                                t["result"] = {"ok": bool(data.get("ok")),
+                                               "preview": str(
+                                                   data.get("preview") or ""),
+                                               "truncated": bool(
+                                                   data.get("truncated"))}
+                                break
+                except Exception:  # accumulation must never kill the run
+                    pass
                 evq.put(("event", kind, data))
 
             def _worker() -> None:
@@ -3379,6 +3411,24 @@ class DashboardApp:
                                       previous_summary=previous_summary)
                            if previous_summary else
                            runner.run(prompt, history=history))
+                    # Persist BEFORE announcing done: an adoption poll (or a
+                    # thread reload) that sees the run leave the registry can
+                    # then re-read a complete transcript immediately.
+                    if thread_id:
+                        try:
+                            self._persist_run_turn(
+                                thread_id, prompt, acc, res,
+                                {"trace_id": res.trace_id,
+                                 "tokens_in": res.tokens_in,
+                                 "tokens_out": res.tokens_out,
+                                 "duration_s": round(time.monotonic() - t0, 3),
+                                 "backend": res.backend,
+                                 "failure_reason": res.failure_reason},
+                                prof.get("name") if prof else None)
+                        except Exception:  # persistence must never eat the run
+                            logging.getLogger("sable.dashboard").debug(
+                                "chat transcript persist failed for thread %s",
+                                thread_id, exc_info=True)
                     evq.put(("done", res))
                 except Exception as e:  # surfaced as run.error by the drainer
                     evq.put(("error", e))
@@ -3599,6 +3649,96 @@ class DashboardApp:
                     rid)
                 r["status"] = "interrupted"
         return len(inflight)
+
+    def _persist_run_turn(self, thread_id: str, prompt: str, acc: Dict[str, Any],
+                          res: Any, footer: Dict[str, Any],
+                          profile_name: Optional[str]) -> None:
+        """Server-side transcript persistence for a finished chat run.
+
+        Persistence used to be client-only: the starting panel saved the thread
+        after its SSE stream ended. Navigating away aborted that stream, so a
+        finished run's reply was never written to the thread file (the "agent
+        stopped responding" symptom when returning to chat). The worker now
+        calls this when the run completes, regardless of who is still reading
+        the stream.
+
+        Merge rules keep the connected-client save (which still happens and
+        overwrites with equivalent content) and an aborted panel's partial
+        state from producing duplicates: everything after the LAST user turn
+        equal to this run's prompt is dropped — anything there is either that
+        panel's partial rendering of THIS run (mid-stream abort) or the bare
+        prompt itself. When no matching user turn exists, the prompt is
+        appended before the authoritative assistant turn.
+
+        Runners without live events (test stubs) never filled the accumulator;
+        for those the assistant text falls back to ``res.final_response``.
+        """
+        p = self._thread_path(thread_id)
+        t: Dict[str, Any] = {}
+        if p.is_file():
+            try:
+                t = json.loads(p.read_text())
+            except (OSError, json.JSONDecodeError):
+                t = {}
+        msgs = [m for m in (t.get("messages") or []) if isinstance(m, dict)]
+
+        text = str(acc.get("text") or "")
+        tools = list(acc.get("tools") or [])
+        if not text and not tools:
+            text = str(getattr(res, "final_response", "") or "").strip()
+        if not text and not tools:
+            return  # the run produced nothing at all — persist no phantom turn
+
+        last_user = next(
+            (i for i in range(len(msgs) - 1, -1, -1)
+             if msgs[i].get("role") == "user"
+             and str(msgs[i].get("content") or "") == prompt), None)
+        if last_user is not None:
+            del msgs[last_user + 1:]   # drop this run's partial leftovers
+        else:
+            msgs.append({"role": "user", "content": prompt})
+
+        assistant: Dict[str, Any] = {"role": "assistant", "content": text}
+        reasoning = str(acc.get("reasoning") or "")
+        if reasoning:
+            assistant["reasoning"] = reasoning
+        if tools:
+            assistant["tools"] = tools
+        clean_footer = {k: v for k, v in (footer or {}).items()
+                        if v is not None and k != "summary"}
+        if clean_footer:
+            assistant["footer"] = clean_footer
+        msgs.append(assistant)
+
+        t.setdefault("id", thread_id)
+        t["messages"] = msgs
+        t["updated"] = _utcnow()
+        t.setdefault("created", t["updated"])
+        # Last agent profile used on this thread (drives the dropdown on
+        # reopen — previously it always fell back to default). None is a
+        # legitimate value here: a later default run must clear a stale one.
+        t["profile"] = profile_name
+        tid = getattr(res, "trace_id", None)
+        if tid:
+            t["trace_ids"] = sorted(set((t.get("trace_ids") or []) + [str(tid)]))
+        summary = getattr(res, "summary", None)
+        if isinstance(summary, str) and summary:
+            # Backlog #6 parity with the client save path: a run that finished
+            # while nobody was reading still keeps its compaction state.
+            t["summary"] = summary
+        if not t.get("title"):
+            from ..core.titles import DERIVED, derive_title
+            title = derive_title(msgs)
+            if title:
+                t["title"] = title
+                t["title_source"] = DERIVED
+
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(t, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, p)
 
     # -- thread persistence (<home>/chat/<id>.json) ---------------------------
 
