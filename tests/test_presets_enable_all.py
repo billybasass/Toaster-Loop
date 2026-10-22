@@ -131,24 +131,32 @@ def test_apply_idempotent_empty_diff_second_time(app, home):
 
 
 def test_rollback_on_failed_patch(app, home, monkeypatch):
-    # Poison the SECOND patch so the first write lands and then must revert.
+    # Poison the SECOND section-patch so the first write lands and then must
+    # revert. handle() converts PUT failures to ApiResponse (never raises),
+    # which is exactly the contract h_features_enable_all rolls back on.
     called = {"n": 0}
-    orig = app.handle
+    orig = DashboardApp.handle
 
-    def flaky(method, path, query=None, body=None):
+    def flaky(self, method, path, query=None, body=None):
         if method == "PUT" and path == "/api/config":
             called["n"] += 1
             if called["n"] == 2:
-                from sable.dashboard.app import HttpError
-                raise HttpError(500, "boom", code="test")
-        return orig(method, path, query=query, body=body)
+                from sable.dashboard.app import ApiResponse
+                return ApiResponse(500, {"error": {
+                    "code": "test", "message": "boom"}})
+        return orig(self, method, path, query, body)
 
-    monkeypatch.setattr(app, "handle", flaky)
-    with pytest.raises(Exception) as ei:
-        app.handle("POST", "/api/features/enable_all", body={})
-    assert getattr(ei.value, "code", None) == "test" or "boom" in str(ei.value)
-    # After rollback the live config has none of the switches on.
-    cfg = load_config(str(home / "sable.yaml")) if (home / "sable.yaml").is_file() \
-        else SableConfig()
-    assert not (cfg.skills or {}).get("enabled")
-    assert not (cfg.routing or {}).get("enabled")
+    monkeypatch.setattr(DashboardApp, "handle", flaky)
+    # handle() converts the handler's HttpError into an error ApiResponse.
+    r = orig(app, "POST", "/api/features/enable_all", body={})
+    assert r.status >= 400
+    assert r.body["error"]["message"] == "boom"
+    assert called["n"] == 2  # first landed, second failed, then rollback
+    # After rollback neither the live config nor the file has any switch on.
+    assert not (app.cfg.skills or {}).get("enabled")
+    assert not (app.cfg.playbooks or {}).get("enabled")
+    cfg_file = home / "sable.yaml"
+    if cfg_file.is_file():
+        cfg = load_config(str(cfg_file))
+        assert not (cfg.skills or {}).get("enabled")
+        assert not (cfg.playbooks or {}).get("enabled")

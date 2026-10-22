@@ -585,6 +585,18 @@ easy_training:
   # min_traces: 50
   # min_score: 0.5
 
+# One-shot feature preset (core/presets.py) — the Options panel's
+# "★ Enable all recommended" button (POST /api/features/enable_all, same
+# preview-then-apply + all-or-nothing contract as /api/easy/enable). It flips
+# the master switches of the safe-and-useful opt-in features through the
+# normal validated config path: skills, playbooks, indexing, rft, evolution,
+# goldens_mine, validation.shadow_enabled, routing, serve.watchdog_enabled —
+# plus tools.lsp.enabled only when a language server is on PATH and
+# serve.calibration: auto only when a calibration profile was measured.
+# Deliberately never touched: easy_training (a loop decision needing a bound
+# profile), janitor (cron-driven archival side effects), and unmeasured GPU
+# knobs (cardinal rule 2). Everything stays editable per-card afterwards.
+
 # Rejection-sampling fine-tuning (STaR / RFT) — turn serving into a data engine.
 # For prompts sable can VERIFY, sample K completions from the SERVED model,
 # keep only verified-correct ones, and emit a ShareGPT SFT dataset (same layout

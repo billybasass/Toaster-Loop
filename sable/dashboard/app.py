@@ -5454,9 +5454,10 @@ class DashboardApp:
             try:
                 if snapshot is None:
                     cfg_path.unlink(missing_ok=True)
+                    self.cfg = SableConfig()
                 else:
                     cfg_path.write_bytes(snapshot)
-                self.cfg = load_config(str(cfg_path))
+                    self.cfg = load_config(str(cfg_path))
             except Exception:  # last resort: keep serving, file may be mixed
                 logger.exception("easy training: config rollback failed")
 
@@ -5515,12 +5516,17 @@ class DashboardApp:
         snapshot = (cfg_path.read_bytes() if cfg_path.is_file() else None)
 
         def _rollback() -> None:
+            # Snapshot restore AND in-memory reload must both happen even
+            # when no config file existed before (fresh install): load_config
+            # raises FileNotFoundError on a missing path, which used to leave
+            # self.cfg stale-with-half-the-preset while the file was gone.
             try:
                 if snapshot is None:
                     cfg_path.unlink(missing_ok=True)
+                    self.cfg = SableConfig()
                 else:
                     cfg_path.write_bytes(snapshot)
-                self.cfg = load_config(str(cfg_path))
+                    self.cfg = load_config(str(cfg_path))
             except Exception:  # last resort: keep serving, file may be mixed
                 logger.exception("enable-all: config rollback failed")
 
