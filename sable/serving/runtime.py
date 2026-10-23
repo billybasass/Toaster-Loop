@@ -560,6 +560,143 @@ def _cmake_flags(backend: str) -> List[str]:
     return flags
 
 
+# ------------------------------------------- Windows MSVC/CUDA build env
+
+def _vs_install_dir() -> Optional[str]:
+    """Most recent Visual Studio (2017+) install path, via vswhere; None if absent."""
+    pf86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+    vswhere = Path(pf86) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
+    if not vswhere.is_file():
+        return None
+    try:
+        r = subprocess.run(
+            [str(vswhere), "-products", "*", "-latest",
+             "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+             "-property", "installationPath"],
+            capture_output=True, text=True, timeout=20.0,
+        )
+    except OSError:
+        return None
+    line = (r.stdout or "").strip().splitlines()
+    return line[0].strip() if r.returncode == 0 and line else None
+
+
+def _cuda_toolkit_roots() -> List[str]:
+    """Installed CUDA toolkit roots, newest version first."""
+    base = Path(os.environ.get("ProgramFiles", r"C:\Program Files")
+                ) / "NVIDIA GPU Computing Toolkit" / "CUDA"
+    roots: List[Path] = []
+    try:
+        for d in base.iterdir():
+            if d.is_dir() and (d / "bin" / "nvcc.exe").is_file():
+                roots.append(d)
+    except OSError:
+        pass
+
+    def _ver_key(p: Path):
+        m = re.match(r"v(\d+)\.(\d+)", p.name)
+        return tuple(int(x) for x in m.groups()) if m else (0, 0)
+
+    return [str(p) for p in sorted(roots, key=_ver_key, reverse=True)]
+
+
+def _capture_vcvars(vs_dir: str) -> dict:
+    """Environment produced by vcvars64.bat (cl.exe + Windows SDK on PATH).
+
+    Runs the batch inside a generated temp .bat — passing ``call "..." && set``
+    through subprocess's cmd quoting is unreliable for paths with spaces and
+    parentheses. Returns {} when vcvars is missing or fails."""
+    bat = Path(vs_dir) / "VC" / "Auxiliary" / "Build" / "vcvars64.bat"
+    if not bat.is_file():
+        return {}
+    import tempfile
+
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(prefix="sable_vcvars_", suffix=".bat")
+        with os.fdopen(fd, "w", encoding="ascii") as f:
+            f.write(f'@echo off\ncall "{bat}" >nul 2>&1\nset\n')
+        r = subprocess.run(["cmd", "/c", tmp], capture_output=True, text=True,
+                           timeout=300.0)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    if r.returncode != 0:
+        return {}
+    env: dict = {}
+    for line in (r.stdout or "").splitlines():
+        key, sep, val = line.partition("=")
+        # `set` also prints lines whose value contains '='; keep only valid
+        # identifier keys (variable names may include (), {} and .).
+        if sep and key and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_(){}.\-]*", key):
+            env[key] = val
+    return env
+
+
+def build_env(backend: str, log_fn=None) -> dict:
+    """Environment for cmake configure/build of llama.cpp on this host.
+
+    On Windows with the CUDA backend this is what makes or breaks the build:
+      * vcvars64.bat puts cl.exe + the Windows SDK on PATH — without it CMake's
+        default MSVC generator dies with 'No CUDA toolset found' when Visual
+        Studio lacks the CUDA integration files (a separate VS workload, and
+        admin-only to install). Ninja sidesteps that entirely.
+      * The newest installed CUDA toolkit is pinned ahead of PATH entries:
+        stale machine-PATH versions shadow newer installs otherwise (nvcc then
+        rejects the VS host compiler with 'unsupported Microsoft Visual Studio
+        version').
+    Returns os.environ unchanged when no adjustment applies (POSIX, CPU-only,
+    or a working env already present)."""
+    if sys.platform != "win32" or backend != BACKEND_CUDA:
+        return dict(os.environ)
+    log = log_fn or (lambda line: logger.info("%s", line))
+
+    # Newest toolkit first so an old PATH entry can't shadow it.
+    roots = _cuda_toolkit_roots()
+    if not roots:
+        return dict(os.environ)
+    newest = roots[0]
+
+    vs_dir = _vs_install_dir()
+    env = _capture_vcvars(vs_dir) if vs_dir else {}
+    if env:
+        log(f"msvc environment: vcvars64 from {vs_dir}")
+    else:
+        env = dict(os.environ)  # no VS found — try with the current environment
+
+    # cmd's `set` emits the variable as ``Path``; merging that dict into an
+    # environment that also carries ``PATH`` gives the child two PATH-like
+    # entries. Collapse to a single case-insensitive lookup before editing.
+    path_key = next((k for k in env if k.upper() == "PATH"), None)
+    cur_path = env.pop(path_key, None) or os.environ.get("PATH", "")
+    path_parts = [str(Path(newest) / "bin")]
+    for p in cur_path.split(os.pathsep):
+        # drop every CUDA bin dir, then re-add only the newest at the front
+        if "\\NVIDIA GPU Computing Toolkit\\CUDA\\" in p.lower():
+            continue
+        path_parts.append(p)
+    env["Path"] = os.pathsep.join(path_parts)
+    env["CUDA_PATH"] = newest
+    env["CUDA_PATH_V" + Path(newest).name.lstrip("v").replace(".", "_")] = newest
+    log(f"cuda toolkit: {newest}")
+
+    # Prefer Ninja when available (bundled with VS or on PATH): CMake's default
+    # MSVC generator needs the CUDA MSBuild integration installed into VS,
+    # which vcvars alone does not provide.
+    ninja = shutil.which("ninja", path=env["Path"]) or (vs_dir and str(
+        Path(vs_dir) / "Common7" / "IDE" / "CommonExtensions" / "Microsoft"
+        / "CMake" / "Ninja" / "ninja.exe"))
+    if ninja and Path(ninja).is_file():
+        env["SABLE_CMAKE_GENERATOR"] = "Ninja"
+        env["CMAKE_MAKE_PROGRAM"] = ninja
+    return env
+
+
 #: Provenance file written next to our install (NOT inside the checkout, so a
 #: `git clean`/re-clone can never fake it). Records repo/ref/backend so update
 #: and doctor know what this build came from.
@@ -829,7 +966,7 @@ def setup_llama_cpp(
     # resolves SPIRV-Headers to a dead path — configure passes, then the build
     # dies at 'spirv/unified1/spirv.hpp: No such file or directory'. The
     # explicit -DSPIRV-Headers_DIR also overrides any stale cached lookup.
-    child_env = dict(os.environ)
+    child_env = build_env(backend, log_fn=log)
     vulkan_flags: List[str] = []
     if str(backend) == BACKEND_VULKAN:
         venv_extra, vulkan_flags = _vulkan_build_env(log)
@@ -843,8 +980,17 @@ def setup_llama_cpp(
 
     log(f"configuring llama.cpp for backend={backend} …")
     cfg_cmd = [cmake, "-S", str(root), "-B", str(root / "build"), "-DCMAKE_BUILD_TYPE=Release"]
+    if child_env.get("SABLE_CMAKE_GENERATOR"):
+        cfg_cmd += ["-G", child_env["SABLE_CMAKE_GENERATOR"]]
+        child_env.pop("SABLE_CMAKE_GENERATOR")
     cfg_cmd += _cmake_flags(backend) + vulkan_flags
     r = subprocess.run(cfg_cmd, capture_output=True, text=True, env=child_env)
+    if r.returncode != 0 and (root / "build" / "CMakeCache.txt").is_file():
+        # Stale cache from an earlier configure (different generator/backend —
+        # e.g. a pre-fix VS-generator attempt). The build dir is ours; wipe + retry once.
+        log("stale cmake cache; wiping build dir and reconfiguring …")
+        shutil.rmtree(root / "build", ignore_errors=True)
+        r = subprocess.run(cfg_cmd, capture_output=True, text=True, env=child_env)
     if r.returncode != 0:
         raise SetupError(
             f"cmake configure failed for backend={backend}. A working C/C++ compiler "
