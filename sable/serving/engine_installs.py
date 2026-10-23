@@ -729,8 +729,16 @@ def install_recipe(recipe_id: str, *, home: Path, ref: Optional[str] = None,
 
 # ------------------------------------------------- engine registration glue
 
-def engine_body_for(recipe_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
-    """Engine-registry body for a completed install (re-register / update)."""
+def engine_body_for(recipe_id: str, state: Dict[str, Any],
+                    home: Optional[Path] = None) -> Dict[str, Any]:
+    """Engine-registry body for a completed install (re-register / update).
+
+    ``home`` lets checkout-run engines resolve their cwd from the canonical
+    install layout (<SABLE_HOME>/engines/<id>/src) instead of trusting the
+    recorded prefix: state files written before a recipe gained
+    ``run_from_checkout`` carry the *venv* dir as prefix, and spawning
+    ``python -m <pkg>`` from there dies with ModuleNotFoundError (strata's
+    serve/server.py lives in the checkout, not the venv)."""
     recipe = get_recipe(recipe_id)
     body = {
         "name": recipe["name"],
@@ -741,8 +749,14 @@ def engine_body_for(recipe_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
                  + f" [installed by sable {state.get('installed_at') or ''}]"
                    .strip(),
     }
-    cwd = str(state.get("prefix") or "") if recipe.get(
-        "run_from_checkout") else ""
+    cwd = ""
+    if recipe.get("run_from_checkout"):
+        if home is not None:
+            src = src_dir(Path(home), recipe_id)
+            if (src / ".git").is_dir():
+                cwd = str(src)
+        if not cwd:  # no checkout on disk to re-derive from => recorded value
+            cwd = str(state.get("prefix") or "")
     if cwd:
         body["cwd"] = cwd
     mk = str(recipe.get("model_kind") or "").strip().lower()
@@ -771,7 +785,7 @@ def sync_installed_recipes(home: Path) -> List[str]:
         eng = engines_mod.get_engine(home, rid)
         if eng is None or eng.get("builtin"):
             continue
-        body = engine_body_for(rid, st)
+        body = engine_body_for(rid, st, home=home)
         want_kind = str(r.get("kind") or "")
         want_bin_name = str(r.get("binary_name") or "")
         if want_kind == "diffusion" and body["binary"] and \

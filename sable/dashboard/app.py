@@ -1972,7 +1972,7 @@ class DashboardApp:
         from ..serving import engine_installs as ei
         from ..serving import engines as engines_mod
 
-        body = ei.engine_body_for(recipe_id, state)
+        body = ei.engine_body_for(recipe_id, state, home=self.home)
         existing = engines_mod.get_engine(self.home, recipe_id)
         if existing is not None and not existing.get("builtin"):
             merged = dict(existing)

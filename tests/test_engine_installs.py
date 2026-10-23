@@ -724,6 +724,37 @@ def test_sync_upgrades_strata_to_spawnable_openai(home):
     assert again["args_template"][:2] == ["-m", "serve.server"]
 
 
+def test_sync_repairs_stale_strata_venv_cwd(home):
+    """Installs recorded while strata was inventory-only carry the VENV dir as
+    prefix; spawning `python -m serve.server` from there dies with
+    ModuleNotFoundError. Sync must re-derive cwd from the checkout layout."""
+    st_bin = _fake_install(home, "strata", "python")
+    # The git checkout run_from_checkout needs on disk (serve/server.py lives
+    # inside it; sable spawns with cwd=checkout).
+    src = ei.src_dir(home, "strata")
+    (src / ".git").mkdir(parents=True)
+    (src / "serve").mkdir()
+    (src / "serve" / "server.py").write_text("")
+    # Legacy state: prefix is the VENV (written before strata was spawnable).
+    ei.write_state(home, "strata", {"recipe": "strata",
+                                    "binary": str(st_bin),
+                                    "prefix": str(ei.venv_dir(home, "strata")),
+                                    "installed_at": "2026-01-01T00:00:00Z"})
+    eng = eng_mod.validate_engine_body(
+        {"name": "Strata", "binary": str(st_bin), "kind": "openai",
+         "args_template": ["-m", "serve.server"], "cwd":
+             str(ei.venv_dir(home, "strata")), "model_kind": "json"})
+    eng["id"] = "strata"
+    eng_mod.save_engine(home, eng)
+
+    refreshed = ei.sync_installed_recipes(home)
+    assert refreshed == ["strata"]
+    again = eng_mod.get_engine(home, "strata")
+    assert again["cwd"] == str(src)  # repaired to the checkout
+    # second pass is a no-op
+    assert ei.sync_installed_recipes(home) == []
+
+
 def test_sync_skips_engines_not_matching_install_state(home):
     """A hand-registered engine that merely shares a recipe id but whose
     binary differs from the install state is left alone."""
