@@ -7,7 +7,8 @@ import { api } from "../api.js";
 import { bus } from "../bus.js";
 import { el, toast, badge, confirmDialog, copyButton, fmtTime,
   fmtUptime, empty } from "../ui.js";
-import { runSettingsEditor, samplingEditor } from "../runsettings.js";
+import { runSettingsEditor, samplingEditor, imageSettingsEditor }
+  from "../runsettings.js";
 
 export default {
   title: "Serve",
@@ -237,7 +238,9 @@ export default {
       instEngineSel.replaceChildren(
         el("option", { value: "", text: "llama.cpp (built-in)" }));
       for (const e of engines) {
-        if (e.builtin || e.kind !== "openai") continue;
+        // Spawnable kinds: openai chat servers and diffusion image servers.
+        // kind "other" stays inventory-only (Hardware page).
+        if (e.builtin || !["openai", "diffusion"].includes(e.kind)) continue;
         const o = el("option", { value: e.id },
           e.name + (e.installed ? "" : " (not installed)"));
         instEngineSel.appendChild(o);
@@ -250,6 +253,7 @@ export default {
         const d = await api("/api/engines");
         engines = d.engines || [];
         fillEngineSelect();
+        updateEngineForm();
       } catch { /* built-in-only form still works */ }
     }
     const instGgufSel = el("select", {},
@@ -270,6 +274,18 @@ export default {
     // Per-instance sampling + thinking defaults (request-time parameters sent
     // with every chat/agent request against this server, studio-style).
     const instSampling = samplingEditor({});
+    // Per-instance diffusion generation defaults (sd-server: steps/CFG/size).
+    // Shown INSTEAD of the chat run-settings/sampling sections when a
+    // diffusion engine is selected — image models have no top_k.
+    const instImage = imageSettingsEditor({});
+    // model_kind "json" engines (strata) launch from their own run-config
+    // file, not a GGUF; this input replaces the disk picker for them.
+    const instCfgIn = el("input", { type: "text", class: "mono", size: 40,
+      placeholder: "path to strata run-config.json (written by its setup)" });
+    function selectedEngine() {
+      if (!instEngineSel.value) return null;
+      return engines.find((e) => e.id === instEngineSel.value) || null;
+    }
 
     function ggufLabel(m) {
       const size = m.size_bytes ? ` · ${(m.size_bytes / 1e9).toFixed(1)} GB` : "";
@@ -295,18 +311,36 @@ export default {
       clearErr();
       const body = { name: nameIn.value.trim(), role: roleSel.value };
       if (instEmbedChk.checked) body.role = "embedding";
-      if (instGgufSel.value) body.gguf = instGgufSel.value;
+      const eng = selectedEngine();
+      const kind = eng ? eng.kind : "openai";
+      const modelKind = eng ? (eng.model_kind || "gguf") : "gguf";
+      if (modelKind === "json") {
+        // strata-style engine: the "model" is its run-config.json path.
+        if (!instCfgIn.value.trim()) {
+          showErr({ code: "bad_request",
+            message: "enter the path to this engine's run-config.json" });
+          return;
+        }
+        body.gguf = instCfgIn.value.trim();
+      } else if (instGgufSel.value) body.gguf = instGgufSel.value;
       else if (instAttachIn.value.trim()) body.attach_url = instAttachIn.value.trim();
       else { showErr({ code: "bad_request",
         message: "pick a GGUF from disk or enter an attach URL" }); return; }
-      if (instEngineSel.value && instGgufSel.value)
+      if (instEngineSel.value && body.gguf)
         body.engine = instEngineSel.value;
       if (instPortIn.value) body.port = parseInt(instPortIn.value, 10);
       if (instCtxIn.value) body.context_length = parseInt(instCtxIn.value, 10);
-      const rsPatch = instRs.getPatch();
-      if (Object.keys(rsPatch).length) body.run_settings = rsPatch;
-      const spPatch = instSampling.getPatch();
-      if (Object.keys(spPatch).length) body.sampling = spPatch;
+      if (kind === "diffusion") {
+        // Image generation defaults instead of the chat knobs (which an
+        // sd-server spawn ignores entirely).
+        const imPatch = instImage.getPatch();
+        if (Object.keys(imPatch).length) body.image_settings = imPatch;
+      } else {
+        const rsPatch = instRs.getPatch();
+        if (Object.keys(rsPatch).length) body.run_settings = rsPatch;
+        const spPatch = instSampling.getPatch();
+        if (Object.keys(spPatch).length) body.sampling = spPatch;
+      }
       createBtn.disabled = true;
       try {
         const r = await api("/api/servers", { method: "POST", body });
@@ -317,39 +351,75 @@ export default {
       finally { createBtn.disabled = false; }
     });
 
+    // Sections the engine dropdown toggles: chat engines get GGUF picker +
+    // run settings + sampling; diffusion engines (sd-server) get image
+    // generation defaults instead; model_kind "json" engines (strata) take a
+    // run-config path instead of a GGUF.
+    const ggufField = el("div", { class: "field" },
+      el("label", { text: "model from disk" }), instGgufSel, catHint);
+    const cfgField = el("div", { class: "field hidden" },
+      el("label", { text: "run-config" }), instCfgIn,
+      el("span", { class: "hint", text:
+        "this engine launches from its own config file, not a GGUF — point it " +
+        "at the run-config.json written by strata setup" }));
+    const rsSection = el("div", {},
+      el("h4", { text: "Model run settings (this instance only)" }),
+      instRs.node);
+    const spSection = el("div", {},
+      el("h4", { text: "Sampling & thinking defaults (this instance only)" }),
+      instSampling.node);
+    const imSection = el("div", { class: "hidden" },
+      el("h4", { text: "Image generation defaults (this instance only)" }),
+      instImage.node);
+
+    function updateEngineForm() {
+      const e = selectedEngine();
+      const kind = e ? e.kind : "openai";
+      const mk = e ? (e.model_kind || "gguf") : "gguf";
+      cfgField.classList.toggle("hidden", mk !== "json");
+      ggufField.classList.toggle("hidden", mk === "json");
+      imSection.classList.toggle("hidden", kind !== "diffusion");
+      rsSection.classList.toggle("hidden", kind === "diffusion");
+      spSection.classList.toggle("hidden", kind === "diffusion");
+    }
+    instEngineSel.addEventListener("change", updateEngineForm);
+
     const newInstanceCard = el("div", { class: "card" },
       el("h3", { text: "New server instance" }),
       el("div", { class: "field" }, el("label", { text: "name" }), nameIn,
         el("label", { text: "role" }), roleSel),
-      el("div", { class: "field" }, el("label", { text: "model from disk" }),
-        instGgufSel, catHint,
-        el("label", { text: "engine" }), instEngineSel),
+      el("div", { class: "field" }, el("label", { text: "engine" }),
+        instEngineSel),
+      ggufField, cfgField,
       el("div", { class: "field" }, el("label", { text: "or attach URL" }),
         instAttachIn,
         el("span", { class: "hint", text: "loopback only (127.0.0.1)" })),
       el("div", { class: "field" }, el("label", { text: "port" }), instPortIn,
         el("label", { text: "context" }), instCtxIn,
         el("label", { class: "chk" }, instEmbedChk, " --embedding server")),
-      el("h4", { text: "Model run settings (this instance only)" }),
-      instRs.node,
-      el("h4", { text: "Sampling & thinking defaults (this instance only)" }),
-      instSampling.node,
+      rsSection, spSection, imSection,
       el("div", { class: "btnrow" }, createBtn),
       el("p", { class: "hint", text:
-        "Spawned llama-servers bind 127.0.0.1 on dynamic ports; attach " +
-        "instances point at an already-running endpoint and are never killed. " +
-        "These run settings belong to the instance — they are not inherited " +
-        "from the Settings page defaults." }));
+        "Spawned servers bind 127.0.0.1 on dynamic ports; attach instances " +
+        "point at an already-running endpoint and are never killed. These " +
+        "settings belong to the instance — they are not inherited from the " +
+        "Settings page defaults. Diffusion engines (stable-diffusion.cpp) " +
+        "take image generation defaults; strata takes a run-config.json path." }));
 
     // ------------------------------------------------- edit-run-settings dialog
     async function editRunSettings(s) {
-      const editor = runSettingsEditor(s.run_settings || {},
-        { gguf: () => s.gguf || "" });
-      editor.refreshMmproj();
+      // Diffusion instances (sd-server) edit image generation defaults;
+      // everything else keeps the chat run-settings + sampling editors.
+      const eng = engines.find((x) => x.id === s.engine);
+      const diffusion = !!eng && eng.kind === "diffusion";
+      const editor = diffusion
+        ? imageSettingsEditor(s.image_settings || {})
+        : runSettingsEditor(s.run_settings || {}, { gguf: () => s.gguf || "" });
+      if (!diffusion) editor.refreshMmproj();
       // Sampling + thinking overrides live HERE (per server instance), not on
       // the Profiles page — an existing instance gets the same editors the
       // new-instance form shows.
-      const sampEditor = samplingEditor(s.sampling || {});
+      const sampEditor = diffusion ? null : samplingEditor(s.sampling || {});
       let done = false;
       await new Promise((resolve) => {
         const host = document.getElementById("modal-host");
@@ -357,9 +427,12 @@ export default {
         const save = async () => {
           saveBtn.disabled = true;
           try {
+            const patch = diffusion
+              ? { image_settings: editor.getPatch() }
+              : { run_settings: editor.getPatch(),
+                  sampling: sampEditor.getPatch() };
             await api("/api/servers/" + encodeURIComponent(s.id),
-              { method: "PUT", body: { run_settings: editor.getPatch(),
-                sampling: sampEditor.getPatch() } });
+              { method: "PUT", body: patch });
             toast(`run settings saved for ${s.name}`, "ok");
             close(true);
           } catch (e) { showErr(e); close(false); }
@@ -368,8 +441,9 @@ export default {
         const cancelBtn = el("button", { text: "Cancel", onclick: () => close(false) });
         const box = el("div", { class: "modal", role: "dialog", "aria-modal": "true" },
           el("h3", { text: `Run settings — ${s.name}` }), editor.node,
-          el("h4", { text: "Sampling & thinking defaults (this instance only)" }),
-          sampEditor.node,
+          diffusion ? null : el("h4",
+            { text: "Sampling & thinking defaults (this instance only)" }),
+          diffusion ? null : sampEditor.node,
           el("div", { class: "modal-actions" }, cancelBtn, saveBtn));
         const backdrop = el("div", { class: "backdrop",
           onclick: (ev) => { if (ev.target === backdrop) close(false); } }, box);

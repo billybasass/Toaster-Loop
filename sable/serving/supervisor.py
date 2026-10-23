@@ -515,12 +515,15 @@ def start_instance_server(cfg, inst: dict, *, log_path: Optional[Path] = None,
 
 def _engine_spawn_cmd(cfg, inst: dict, engine_ref: str, *, gguf: str,
                       port: int):
-    """(argv, extra_env) for an instance bound to a registered engine.
+    """(argv, extra_env, cwd, kind) for an instance bound to a registered engine.
 
-    Only OpenAI-compatible engines are spawnable (sable health-checks them
-    through /v1/models); kind "other" is inventory-only and refuses here
-    rather than pretending a healthcheck will pass. A missing binary raises
-    with the fix path (register/repair it on the Hardware page)."""
+    OpenAI-compatible and diffusion engines are spawnable (sable health-checks
+    openai kinds through /v1/models, diffusion kinds on the bare HTTP root);
+    kind "other" is inventory-only and refuses here rather than pretending a
+    healthcheck will pass. A missing binary raises with the fix path
+    (register/repair it on the Hardware page). Diffusion instances append their
+    per-instance image_settings (steps/cfg/size/sampler) to the command —
+    llama.cpp run_settings do not apply to sd-server."""
     from ..store.paths import resolve_sable_home
     from . import engines as engines_mod
 
@@ -530,11 +533,12 @@ def _engine_spawn_cmd(cfg, inst: dict, engine_ref: str, *, gguf: str,
         raise ServeError(
             f"unknown inference engine {engine_ref!r} — register it on the "
             "Hardware page first")
-    if eng.get("kind") != "openai":
+    kind = str(eng.get("kind") or "openai")
+    if kind not in ("openai", "diffusion"):
         raise ServeError(
-            f"engine {eng.get('name')!r} is kind={eng.get('kind')!r}: only "
-            "OpenAI-compatible engines can be spawned — attach it manually "
-            "instead")
+            f"engine {eng.get('name')!r} is kind={kind!r}: only OpenAI-"
+            "compatible and diffusion engines can be spawned — attach it "
+            "manually instead")
     probe = engines_mod.probe(eng)
     if not probe["found"]:
         raise ServeError(
@@ -543,7 +547,12 @@ def _engine_spawn_cmd(cfg, inst: dict, engine_ref: str, *, gguf: str,
             "Hardware page")
     cmd = engines_mod.build_engine_cmd(eng, probe["path"], model=gguf,
                                        host="127.0.0.1", port=port)
-    return cmd, engines_mod.engine_env(eng)
+    if kind == "diffusion":
+        from .run_args import image_settings_args
+
+        cmd += image_settings_args(inst.get("image_settings"))
+    return (cmd, engines_mod.engine_env(eng),
+            str(eng.get("cwd") or "") or None, kind)
 
 
 def _start_instance_server(cfg, inst: dict, *,
@@ -574,12 +583,14 @@ def _start_instance_server(cfg, inst: dict, *,
 
     engine_ref = str(inst.get("engine") or "").strip()
     from . import engines as engines_mod
+    eng_cwd: Optional[str] = None
+    eng_kind: Optional[str] = None
     if engine_ref and not engines_mod.is_builtin_ref(engine_ref):
         # Registered engine: argv + env from the engine record. No llama.cpp
         # discovery/auto-setup, no run_settings translation (the engine owns
-        # its own flags).
-        cmd, engine_env = _engine_spawn_cmd(cfg, inst, engine_ref,
-                                            gguf=str(gguf), port=port)
+        # its own flags; diffusion kinds get their image_settings instead).
+        cmd, engine_env, eng_cwd, eng_kind = _engine_spawn_cmd(
+            cfg, inst, engine_ref, gguf=str(gguf), port=port)
         child_env_extra = dict(engine_env)
     else:
         binary = find_llama_server(
@@ -609,6 +620,7 @@ def _start_instance_server(cfg, inst: dict, *,
         proc = subprocess.Popen(
             cmd, stdout=out, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, env=child_env,
+            cwd=eng_cwd,  # None => inherit (byte-identical for llama.cpp)
             **runtime.detached_popen_kwargs(),
         )
     except OSError as e:
@@ -620,7 +632,15 @@ def _start_instance_server(cfg, inst: dict, *,
         if logf is not None:
             logf.close()
 
-    base_url = f"http://127.0.0.1:{port}/v1"
+    # Diffusion servers (sd-server) have no /v1 namespace — their base URL is
+    # the bare root and readiness is any HTTP response from "/" (the server
+    # answers index/404 as soon as it is listening).
+    if eng_kind == "diffusion":
+        base_url = f"http://127.0.0.1:{port}"
+        health_url = base_url + "/"
+    else:
+        base_url = f"http://127.0.0.1:{port}/v1"
+        health_url = base_url + "/models"
     deadline = time.monotonic() + ready_timeout
     last_err = None
     while time.monotonic() < deadline:
@@ -632,7 +652,7 @@ def _start_instance_server(cfg, inst: dict, *,
             proc.terminate()
             raise ServeError("Shutdown requested while server was starting")
         try:
-            r = httpx.get(base_url + "/models", timeout=3.0)
+            r = httpx.get(health_url, timeout=3.0)
             if r.status_code == 200:
                 break
             last_err = f"HTTP {r.status_code}"

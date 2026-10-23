@@ -109,29 +109,51 @@ CATALOG: List[Dict[str, Any]] = [
         "id": "strata",
         "name": "Strata",
         "homepage": "https://github.com/niko1221/strata",
-        "kind": "other",
+        # Strata's serve/server.py exposes an OpenAI-compatible endpoint
+        # (/v1/chat/completions, /v1/models), so sable CAN spawn it — but it
+        # launches from its own run-config JSON (written by strata setup), NOT
+        # a GGUF path. The instance "model" is therefore the path to that
+        # config file ({model} below); the Serve page shows a config-path
+        # picker for this engine (model_kind json).
+        "kind": "openai",
+        "model_kind": "json",
         "method": "git_pip",
         "repo": "https://github.com/niko1221/strata",
         "ref": None,  # repo default branch
         "binary_name": "python",
-        "args_template": [],
+        # run as `python -m serve.server` from the checkout (cwd below)
+        "run_from_checkout": True,
+        "args_template": ["-m", "serve.server", "--engine", "strata",
+                          "--config", "{model}", "--host", "{host}",
+                          "--port", "{port}"],
         "os_support": {"linux": True, "darwin": True, "windows": True},
-        "requires": "research codebase; inspect README before installing",
-        "notes": "Layer-wise dynamic depth pruning research project "
-                 "(installed editable into its own venv). Inventory-only "
-                 "entry — used from scripts/notebooks in that venv.",
+        "requires": "research codebase; inspect README before installing; "
+                    "needs a run-config.json written by strata's own setup",
+        "notes": "Strata inference server (OpenAI-compatible). Spawned as "
+                 "`python -m serve.server --engine strata --config <run-"
+                 "config.json>` from the checkout; create instances by "
+                 "pointing the model field at a run-config.json.",
     },
     {
         "id": "sd-cpp",
         "name": "stable-diffusion.cpp",
         "homepage": "https://github.com/leejet/stable-diffusion.cpp",
-        "kind": "other",
+        # sd-server is an HTTP image-generation server (endpoints / +
+        # /sdcpp/v1/*). Spawnable as kind "diffusion": sable health-checks
+        # the bare root (no /v1) and appends per-instance image_settings
+        # (--steps/--cfg-scale/-W/-H/...) to the command.
+        "kind": "diffusion",
+        "model_kind": "gguf",
         "method": "git_cmake",
         "repo": "https://github.com/leejet/stable-diffusion.cpp",
         "ref": None,
         "recursive": True,  # vendored ggml submodule
-        "binary_name": "sd-cli",
-        "args_template": [],
+        # the build produces both CLIs; sd-server is what sable spawns,
+        # sd-cli stays as a fallback for older/newer upstream layouts
+        "binary_name": "sd-server",
+        "fallback_binary_names": ["sd-cli"],
+        "args_template": ["--model", "{model}", "--listen-ip", "{host}",
+                          "--listen-port", "{port}"],
         # Verified against the repo README/docs/build.md (2026-10): platforms
         # Linux/macOS/Windows; backends CPU (AVX/AVX2/AVX512), CUDA
         # (-DSD_CUDA=ON), Vulkan (-DSD_VULKAN=ON, needs libvulkan-dev + glslc),
@@ -150,8 +172,10 @@ CATALOG: List[Dict[str, Any]] = [
         "requires": "C/C++ compiler + cmake (same toolchain as llama.cpp); "
                     "GPU backend auto-picked (CUDA/Vulkan/Metal/HIP)",
         "notes": "Image generation (SD1/SD2/SDXL/Flux/Qwen-Image …) in C/C++. "
-                 "Not an OpenAI chat server — inventory-only; use sd-cli from "
-                 "SABLE_HOME/engines/sd-cpp/src/build/bin.",
+                 "Spawned via sd-server (loopback HTTP); image defaults "
+                 "(steps/CFG/size/sampler) are per-instance image_settings, "
+                 "not chat sampling. Models are GGUF files picked from the "
+                 "models folder.",
     },
 ]
 
@@ -656,6 +680,8 @@ def install_recipe(recipe_id: str, *, home: Path, ref: Optional[str] = None,
             _pip_install(list(recipe["packages"]), log, py,
                          extra_index_url=eix)
         binary = str(venv_python(home, recipe_id))
+        if recipe.get("run_from_checkout"):
+            prefix = src_dir(home, recipe_id)
 
     elif method == "git_cmake":
         sdir = src_dir(home, recipe_id)
@@ -671,6 +697,10 @@ def install_recipe(recipe_id: str, *, home: Path, ref: Optional[str] = None,
         log(f"cmake backend: {be} {' '.join(flags) if flags else '(CPU default)'}")
         _cmake_build(sdir, log, extra_flags=flags)
         found = _find_built_binary(sdir, recipe["binary_name"])
+        for fb in recipe.get("fallback_binary_names") or []:
+            if found is not None:
+                break
+            found = _find_built_binary(sdir, fb)
         if found is None:
             raise InstallError(
                 f"build finished but no {recipe['binary_name']!r} under "
@@ -702,7 +732,7 @@ def install_recipe(recipe_id: str, *, home: Path, ref: Optional[str] = None,
 def engine_body_for(recipe_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
     """Engine-registry body for a completed install (re-register / update)."""
     recipe = get_recipe(recipe_id)
-    return {
+    body = {
         "name": recipe["name"],
         "kind": recipe["kind"],
         "binary": str(state.get("binary") or ""),
@@ -711,3 +741,72 @@ def engine_body_for(recipe_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
                  + f" [installed by sable {state.get('installed_at') or ''}]"
                    .strip(),
     }
+    cwd = str(state.get("prefix") or "") if recipe.get(
+        "run_from_checkout") else ""
+    if cwd:
+        body["cwd"] = cwd
+    mk = str(recipe.get("model_kind") or "").strip().lower()
+    if mk:
+        body["model_kind"] = mk
+    return body
+
+
+def sync_installed_recipes(home: Path) -> List[str]:
+    """Re-derive the registry bodies of catalog-managed engines (id == recipe
+    id) so recipe upgrades reach existing installs — e.g. stable-diffusion.cpp
+    moving from inventory-only ``other`` to spawnable ``diffusion`` (with its
+    sd-server binary), or strata gaining its serve args. Returns refreshed
+    engine ids. Only touches engines whose id matches a recipe AND whose
+    binary still matches the recorded install state (a hand-registered engine
+    that merely shares the name is left alone). Cheap: stat() + two JSON reads
+    per recipe, and after the first refresh nothing re-writes."""
+    from . import engines as engines_mod
+
+    refreshed: List[str] = []
+    for r in CATALOG:
+        rid = str(r["id"])
+        st = read_state(home, rid)
+        if not st or not recipe_installed(home, rid):
+            continue
+        eng = engines_mod.get_engine(home, rid)
+        if eng is None or eng.get("builtin"):
+            continue
+        body = engine_body_for(rid, st)
+        want_kind = str(r.get("kind") or "")
+        want_bin_name = str(r.get("binary_name") or "")
+        if want_kind == "diffusion" and body["binary"] and \
+                Path(body["binary"]).name != want_bin_name:
+            # Installs recorded before the server binary existed (sd-cli
+            # only): promote to the server sitting next to it; when there is
+            # none, leave the entry inventory-only rather than promoting a
+            # CLI that cannot answer the healthcheck.
+            sib = Path(body["binary"]).parent / _exe(want_bin_name)
+            if sib.is_file():
+                body["binary"] = str(sib)
+            else:
+                continue
+        # Only touch records this install actually owns: the recorded state
+        # binary or its promoted sibling. A hand-registered engine that just
+        # happens to share the recipe id keeps its own binary.
+        cur_bin = str(eng.get("binary") or "")
+        if cur_bin not in (str(st.get("binary") or ""), body["binary"]):
+            continue
+        if str(eng.get("kind") or "") == want_kind and \
+                str(eng.get("binary") or "") == body["binary"] and \
+                list(eng.get("args_template") or []) == body["args_template"] \
+                and str(eng.get("cwd") or "") == str(body.get("cwd") or ""):
+            continue  # already current
+        merged = dict(eng)
+        user_notes = str(eng.get("notes") or "").strip()
+        merged.update(body)
+        if user_notes and "[installed by sable" not in user_notes:
+            merged["notes"] = user_notes  # keep genuine user edits
+        merged["id"] = rid
+        try:
+            new_eng = engines_mod.validate_engine_body(merged, existing=eng)
+        except Exception:  # defensive: a broken record must not break listing
+            continue
+        new_eng["id"] = rid
+        engines_mod.save_engine(home, new_eng)
+        refreshed.append(rid)
+    return refreshed

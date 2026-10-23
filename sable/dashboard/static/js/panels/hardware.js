@@ -398,6 +398,7 @@ export default {
         placeholder: "vLLM", style: "max-width:14em" });
       const kindSel = el("select", { class: "input" },
         el("option", { value: "openai", text: "openai (spawnable)" }),
+        el("option", { value: "diffusion", text: "diffusion (image server)" }),
         el("option", { value: "other", text: "other (inventory only)" }));
       const binIn = el("input", { class: "input mono", type: "text",
         placeholder: "vllm  (path or command on PATH)", style: "max-width:20em" });
@@ -430,11 +431,13 @@ export default {
           badge(`${engines.filter((e) => e.installed).length}/${engines.length} installed`,
             engines.every((e) => e.installed) ? "done" : "warn")),
         el("p", { class: "hint", text:
-          "Local OpenAI-compatible engines sable can spawn server instances " +
-          "with (placeholders {model} {host} {port}; loopback only). “other” " +
-          "engines (e.g. stable-diffusion.cpp) are recorded for inventory — " +
-          "sable never spawns them. The default server's engine is set on " +
-          "the Settings page." }),
+          "Local engines sable can spawn server instances with " +
+          "(placeholders {model} {host} {port}; loopback only). “openai” " +
+          "engines speak the chat API; “diffusion” engines are image servers " +
+          "(stable-diffusion.cpp's sd-server — health-checked on /, per-" +
+          "instance steps/CFG/size instead of sampling). “other” engines are " +
+          "recorded for inventory — sable never spawns them. The default " +
+          "server's engine is set on the Settings page." }),
         engines.length ? el("table", {},
           el("thead", {}, el("tr", {},
             el("th", { text: "Engine" }), el("th", { text: "Kind" }),

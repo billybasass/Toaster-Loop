@@ -16,9 +16,12 @@ Design:
 * **Kinds**: ``openai`` engines expose an OpenAI-compatible endpoint and can be
   spawned + health-checked by sable (the command comes from the engine's
   ``args_template`` with ``{model}``/``{host}``/``{port}`` placeholders).
-  ``other`` engines (e.g. stable-diffusion.cpp — not an OpenAI chat server) are
-  recorded for inventory/attach bookkeeping only; sable refuses to spawn them
-  rather than pretending a healthcheck will pass.
+  ``diffusion`` engines are image-generation servers (stable-diffusion.cpp's
+  sd-server): spawnable like openai ones, but health-checked on the bare HTTP
+  root (no /v1/models) and configured with per-instance ``image_settings``
+  (steps/cfg/size/sampler) instead of chat run settings.
+  ``other`` engines are recorded for inventory/attach bookkeeping only; sable
+  refuses to spawn them rather than pretending a healthcheck will pass.
 * **Loopback**: spawned engines bind 127.0.0.1 exactly like llama-server does;
   nothing here ever talks to a non-local endpoint.
 * **Ownership**: engine-spawned children go through the SAME supervisor
@@ -45,8 +48,10 @@ logger = logging.getLogger("sable.serving.engines")
 BUILTIN_ID = "llama-cpp"
 
 #: Engine kinds. "openai" => spawnable + health-checked by sable;
+#: "diffusion" => image-generation server (spawnable, health-checked on the
+#: bare HTTP root, configured per instance via image_settings);
 #: "other" => inventory only (attach manually / manage externally).
-KINDS = ("openai", "other")
+KINDS = ("openai", "diffusion", "other")
 
 #: Placeholders an args_template may use.
 PLACEHOLDERS = ("{model}", "{host}", "{port}")
@@ -55,6 +60,12 @@ _ENGINE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 _DEFAULT_OPENAI_ARGS = ["--model", "{model}", "--host", "127.0.0.1",
                         "--port", "{port}"]
+
+#: Diffusion engines (stable-diffusion.cpp's sd-server): same placeholder
+#: contract, but the server's own flags (--listen-ip/--listen-port) and no
+#: /v1 endpoint — sable health-checks the bare HTTP root for this kind.
+_DEFAULT_DIFFUSION_ARGS = ["--model", "{model}", "--listen-ip", "127.0.0.1",
+                           "--listen-port", "{port}"]
 
 
 # ------------------------------------------------------------------ paths
@@ -96,6 +107,8 @@ def builtin_engine() -> Dict[str, Any]:
         "binary": "llama-server",
         "args_template": [],          # empty => supervisor builds the argv
         "env": {},
+        "cwd": None,
+        "model_kind": "gguf",
         "notes": "sable's built-in engine: discovery, auto-setup, full "
                  "run_settings support.",
         "created": None,
@@ -223,6 +236,16 @@ def _normalize_args_template(raw: Any) -> List[str]:
     return parts
 
 
+def _normalize_cwd(raw: Any) -> Optional[str]:
+    """Optional working directory for spawned engine children (strata's
+    ``python -m serve.server`` needs its checkout on the path). Blank => None
+    => inherit the parent cwd."""
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    return s or None
+
+
 def _normalize_env(raw: Any) -> Dict[str, str]:
     if raw is None or raw == "":
         return {}
@@ -262,7 +285,17 @@ def validate_engine_body(body: Dict[str, Any],
         body.get("args_template", existing.get("args_template")))
     if kind == "openai" and not args:
         args = list(_DEFAULT_OPENAI_ARGS)
+    if kind == "diffusion" and not args:
+        args = list(_DEFAULT_DIFFUSION_ARGS)
     env = _normalize_env(body.get("env", existing.get("env")))
+    cwd = _normalize_cwd(body.get("cwd", existing.get("cwd")))
+    # What the instance "model" field means for this engine: "gguf" (a GGUF
+    # path — llama.cpp/vLLM/sd-server), "json" (a config file, e.g. strata's
+    # run-config.json), or None (chat default). Drives the Serve page form.
+    model_kind = str(body.get("model_kind", existing.get("model_kind"))
+                     or "").strip().lower() or None
+    if model_kind not in (None, "gguf", "json"):
+        raise ServeError("model_kind must be 'gguf' or 'json'")
     notes = str(body.get("notes", existing.get("notes")) or "").strip()
     return {
         "id": str(existing.get("id") or body.get("id") or ""),
@@ -271,6 +304,8 @@ def validate_engine_body(body: Dict[str, Any],
         "binary": binary,
         "args_template": args,
         "env": env,
+        "cwd": cwd,
+        "model_kind": model_kind,
         "notes": notes,
         "created": existing.get("created") or _utcnow(),
         "updated": _utcnow(),
@@ -300,6 +335,8 @@ def build_engine_cmd(engine: Dict[str, Any], binary: str, *, model: str,
     template = list(engine.get("args_template") or [])
     if engine.get("kind") == "openai" and not template:
         template = list(_DEFAULT_OPENAI_ARGS)
+    if engine.get("kind") == "diffusion" and not template:
+        template = list(_DEFAULT_DIFFUSION_ARGS)
     subs = {"model": str(model), "host": str(host), "port": str(int(port))}
     cmd = [binary]
     for a in template:

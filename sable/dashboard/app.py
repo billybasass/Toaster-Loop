@@ -1396,6 +1396,9 @@ class DashboardApp:
             "context_length": inst.get("context_length"),
             "run_settings": inst.get("run_settings") or {},
             "sampling": inst.get("sampling") or {},
+            # Diffusion engines (sd-server): generation defaults instead of
+            # the chat knobs above. Additive field, old readers ignore it.
+            "image_settings": inst.get("image_settings") or {},
             "created": inst.get("created"),
             "updated": inst.get("updated"),
             "default": iid == srv_inst.DEFAULT_ID,
@@ -1759,6 +1762,8 @@ class DashboardApp:
         from ..serving import engines as engines_mod
 
         row = dict(eng)
+        row.setdefault("model_kind",
+                       "gguf" if eng.get("builtin") else None)
         try:
             row["installed"] = bool(engines_mod.probe(eng)["found"])
         except Exception:  # defensive: probe must never break listing
@@ -1768,8 +1773,16 @@ class DashboardApp:
         return row
 
     def h_engines_list(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
+        from ..serving import engine_installs as ei
         from ..serving import engines as engines_mod
 
+        # Recipe upgrades (kind/binary/args changes) reach existing installs
+        # here: idempotent, stat()-cheap, and a no-op once records are current.
+        try:
+            if ei.sync_installed_recipes(self.home):
+                self.bus.publish("engines.changed", {"event": "synced"})
+        except Exception:  # defensive: listing must never fail on a sync
+            pass
         rows = [self._engine_row(e) for e in engines_mod.list_engines(self.home)]
         default_engine = str((self.cfg.serve or {}).get("default_engine")
                              or "").strip() or None

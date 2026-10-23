@@ -105,6 +105,7 @@ def default_instance(cfg: SableConfig) -> Dict[str, Any]:
         "engine": engine,
         "run_settings": {},   # inherits the global run_settings:
         "sampling": {},       # inherits the global sampling:
+        "image_settings": {},
         "autostart": False,
         "created": None,
         "updated": None,
@@ -214,8 +215,11 @@ def validate_instance_body(body: Dict[str, Any],
             raise ServeError("context_length must be >= 128")
     rs = body.get("run_settings", existing.get("run_settings")) or {}
     sp = body.get("sampling", existing.get("sampling")) or {}
-    if not isinstance(rs, dict) or not isinstance(sp, dict):
-        raise ServeError("run_settings and sampling must be objects")
+    im = body.get("image_settings", existing.get("image_settings")) or {}
+    if not isinstance(rs, dict) or not isinstance(sp, dict) \
+            or not isinstance(im, dict):
+        raise ServeError("run_settings, sampling and image_settings must "
+                         "be objects")
     # Instance run settings are their OWN (new instances do not inherit the
     # global run_settings: section — see supervisor.build_instance_cmd), so
     # validate them here with the same rules the config API applies.
@@ -234,6 +238,15 @@ def validate_instance_body(body: Dict[str, Any],
     except ValueError as e:
         raise ServeError(f"sampling: {e}") from e
     sp = {k: v for k, v in sp.items() if v is not None}
+    # Diffusion engines (sd-server) carry generation defaults instead of the
+    # chat knobs above: steps / cfg_scale / width / height / sampler / ...
+    from .run_args import sanitize_image_settings
+
+    try:
+        im = sanitize_image_settings(im)
+    except ValueError as e:
+        raise ServeError(f"image_settings: {e}") from e
+    im = {k: v for k, v in im.items() if v is not None}
     autostart = bool(body.get("autostart", existing.get("autostart") or False))
     # Optional GPU pinning (multi-GPU boxes): int or list[int] of physical
     # device ids. Absent/None => spawn with the ambient environment exactly
@@ -259,6 +272,7 @@ def validate_instance_body(body: Dict[str, Any],
         "engine": engine,
         "run_settings": rs,
         "sampling": sp,
+        "image_settings": im,
         "autostart": autostart,
         "gpu_id": gpu_id,
         "created": existing.get("created") or _utcnow(),

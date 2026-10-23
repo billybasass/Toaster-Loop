@@ -176,6 +176,80 @@ export function runSettingsEditor(initial = {}, opts = {}) {
 }
 
 /**
+ * Image-generation settings editor (diffusion engines, e.g. stable-diffusion.
+ * cpp's sd-server). Same shape as runSettingsEditor: returns { node,
+ * getPatch() } producing an `image_settings` map ({steps, cfg_scale, width,
+ * height, sampler, scheduler, seed, batch_count, extra_args}). These are the
+ * generation DEFAULTS baked into the sd-server command — chat sampling
+ * (top_k/temperature) does not apply to an image model. Flag names mirror
+ * `sd-server --help`.
+ */
+export const SD_SAMPLERS = [
+  "euler", "euler_a", "heun", "dpm2", "dpm++2s_a", "dpm++2m", "dpm++2mv2",
+  "ipndm", "ipndm_v", "lcm", "ddim_trailing", "tcd",
+];
+export const SD_SCHEDULERS = [
+  "discrete", "karras", "exponential", "ays", "sgm_uniform", "simple",
+  "smoothstep", "lcm",
+];
+
+export function imageSettingsEditor(initial = {}) {
+  const im = initial || {};
+  const host = el("div");
+
+  const stepsIn = numInput(im.steps, "20 (server default)");
+  const cfgIn = numInput(im.cfg_scale, "7.0 (server default)");
+  const wIn = numInput(im.width, "512");
+  const hIn = numInput(im.height, "512");
+  const samplerSel = el("select", {},
+    el("option", { value: "", text: "— server default —" }),
+    ...SD_SAMPLERS.map((s) => el("option",
+      { value: s, text: s, selected: im.sampler === s })));
+  const schedSel = el("select", {},
+    el("option", { value: "", text: "— model-specific —" }),
+    ...SD_SCHEDULERS.map((s) => el("option",
+      { value: s, text: s, selected: im.scheduler === s })));
+  const seedIn = numInput(im.seed, "-1 = random");
+  const batchIn = numInput(im.batch_count, "1");
+  const extraTa = el("textarea", { rows: 2, spellcheck: "false",
+    placeholder: "--vae-tiling --offload-to-cpu" });
+  extraTa.value = im.extra_args || "";
+
+  host.replaceChildren(
+    field("Steps", stepsIn, "--steps (denoising iterations)"),
+    field("CFG scale", cfgIn, "--cfg-scale (prompt adherence; 4.5-8 typical)"),
+    field("Width × height", el("span", {}, wIn, hIn),
+      "-W / -H in pixels (multiples of 8; model-dependent max)"),
+    field("Sampler", samplerSel, "--sampling-method"),
+    field("Scheduler", schedSel, "--scheduler (sigma schedule)"),
+    field("Seed", seedIn, "-s (-1 = random per request)"),
+    field("Batch count", batchIn, "-b images per request"),
+    field("Extra arguments", extraTa,
+      "appended verbatim to the sd-server command"),
+  );
+
+  function getPatch() {
+    const p = {};
+    const set = (k, v, kind) => {
+      if (v === "" || v == null) return;
+      p[k] = kind === "num" ? Number(v) : v;
+    };
+    set("steps", stepsIn.value, "num");
+    set("cfg_scale", cfgIn.value, "num");
+    set("width", wIn.value, "num");
+    set("height", hIn.value, "num");
+    set("sampler", samplerSel.value);
+    set("scheduler", schedSel.value);
+    set("seed", seedIn.value, "num");
+    set("batch_count", batchIn.value, "num");
+    const extra = extraTa.value.trim();
+    if (extra !== (im.extra_args || "")) p.extra_args = extra;
+    return p;
+  }
+  return { node: host, getPatch };
+}
+
+/**
  * Sampling + thinking editor (reference style). Same shape as
  * runSettingsEditor: returns { node, getPatch() } producing a `sampling:`
  * patch ({temperature, top_p, top_k, min_p, repeat_penalty,

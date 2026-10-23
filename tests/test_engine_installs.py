@@ -63,9 +63,17 @@ def test_catalog_contains_the_four_engines():
     assert vllm["kind"] == "openai"
     assert "{model}" in " ".join(vllm["args_template"])
     assert "127.0.0.1" not in " ".join(vllm["args_template"])  # host via {host}
-    # library / cli engines are inventory-only (never spawned by sable)
-    for rid in ("airllm", "strata", "sd-cpp"):
-        assert ei.get_recipe(rid)["kind"] == "other"
+    # strata's serve/server.py is an OpenAI-compatible server launched from
+    # its own run-config JSON (model_kind json), not a GGUF path
+    strata = ei.get_recipe("strata")
+    assert strata["kind"] == "openai" and strata["model_kind"] == "json"
+    assert strata["args_template"][:2] == ["-m", "serve.server"]
+    # sd-cpp spawns as a diffusion image server (sd-server)
+    sd = ei.get_recipe("sd-cpp")
+    assert sd["kind"] == "diffusion" and sd["model_kind"] == "gguf"
+    assert "--listen-port" in " ".join(sd["args_template"])
+    # AirLLM is a library — inventory-only (never spawned by sable)
+    assert ei.get_recipe("airllm")["kind"] == "other"
     with pytest.raises(KeyError):
         ei.get_recipe("nope")
 
@@ -348,7 +356,7 @@ def test_install_git_cmake_missing_binary_errors(home, monkeypatch):
     monkeypatch.setattr(ei, "_stream", lambda cmd, log, cwd=None: 0)
     monkeypatch.setattr(ei, "_require", lambda tool, hint: f"/usr/bin/{tool}")
     monkeypatch.setattr(ei, "_git_commit", lambda dest: None)
-    with pytest.raises(ei.InstallError, match="sd-cli"):
+    with pytest.raises(ei.InstallError, match="sd-server"):
         ei.install_recipe("sd-cpp", home=home, log_fn=lambda _s: None)
 
 
@@ -618,3 +626,132 @@ def test_reregister_preserves_user_edits(app, home):
     assert again is not None
     assert again["binary"] == "/new/venv/bin/vllm"
     assert again["notes"] == "my custom notes"
+
+
+# ------------------------------------------------- spawnable recipe bodies
+
+def test_strata_engine_body_spawns_as_openai_server(home):
+    """Strata registers as an OpenAI-compatible engine whose {model} is its
+    run-config.json, run from the checkout (cwd) via `python -m serve.server`."""
+    st = {"binary": str(home / "engines/strata/venv/bin/python"),
+          "prefix": str(home / "engines/strata/src"),
+          "installed_at": "2026-01-01T00:00:00Z"}
+    body = ei.engine_body_for("strata", st)
+    eng = eng_mod.validate_engine_body(body)
+    assert eng["kind"] == "openai"
+    assert eng["model_kind"] == "json"
+    assert eng["cwd"] == str(home / "engines/strata/src")
+    cmd = eng_mod.build_engine_cmd(eng, eng["binary"], model="/c/run.json",
+                                   host="127.0.0.1", port=8095)
+    assert cmd[1:3] == ["-m", "serve.server"]
+    assert "--config" in cmd and "/c/run.json" in cmd
+    assert "--port" in cmd and "8095" in cmd
+
+
+def test_sd_cpp_engine_body_is_diffusion_server(home):
+    st = {"binary": str(home / "engines/sd-cpp/src/build/bin/sd-server"),
+          "installed_at": "2026-01-01T00:00:00Z"}
+    body = ei.engine_body_for("sd-cpp", st)
+    eng = eng_mod.validate_engine_body(body)
+    assert eng["kind"] == "diffusion"
+    assert eng.get("model_kind") == "gguf"
+    cmd = eng_mod.build_engine_cmd(eng, "/x/sd-server", model="/m/sdxl.gguf",
+                                   host="127.0.0.1", port=1234)
+    assert "--model" in cmd and "/m/sdxl.gguf" in cmd
+    assert "--listen-ip" in cmd and "127.0.0.1" in cmd
+    assert "--listen-port" in cmd and "1234" in cmd
+
+
+# ------------------------------------------------------- recipe sync
+
+def _fake_install(home, rid, binary_name):
+    b = ei.engine_dir(home, rid) / "bin" / (
+        binary_name + (".exe" if os.name == "nt" else ""))
+    b.parent.mkdir(parents=True, exist_ok=True)
+    b.write_text("#!/bin/sh\n")
+    os.chmod(b, 0o755)
+    ei.write_state(home, rid, {"recipe": rid, "binary": str(b),
+                               "installed_at": "2026-01-01T00:00:00Z"})
+    return b
+
+
+def test_sync_upgrades_legacy_sd_cpp_other_to_diffusion(home):
+    """Installs recorded while sd-cpp was inventory-only flip to diffusion
+    once the built tree has sd-server next to the recorded binary."""
+    cli = _fake_install(home, "sd-cpp", "sd-cli")
+    srv = cli.parent / ("sd-server" + (".exe" if os.name == "nt" else ""))
+    srv.write_text("#!/bin/sh\n")
+    os.chmod(srv, 0o755)
+    eng = eng_mod.validate_engine_body({"name": "stable-diffusion.cpp",
+                                        "binary": str(cli), "kind": "other"})
+    eng["id"] = "sd-cpp"
+    eng_mod.save_engine(home, eng)
+
+    refreshed = ei.sync_installed_recipes(home)
+    assert refreshed == ["sd-cpp"]
+    again = eng_mod.get_engine(home, "sd-cpp")
+    assert again["kind"] == "diffusion"
+    assert again["binary"] == str(srv)          # promoted to the server binary
+    assert "--listen-port" in " ".join(again["args_template"])
+    # second pass is a no-op
+    assert ei.sync_installed_recipes(home) == []
+
+
+def test_sync_keeps_sd_cpp_inventory_without_server_binary(home):
+    """No sd-server on disk => do not promote to spawnable (a CLI could never
+    answer the healthcheck); record stays inventory-only."""
+    cli = _fake_install(home, "sd-cpp", "sd-cli")
+    eng = eng_mod.validate_engine_body({"name": "stable-diffusion.cpp",
+                                        "binary": str(cli), "kind": "other"})
+    eng["id"] = "sd-cpp"
+    eng_mod.save_engine(home, eng)
+    assert ei.sync_installed_recipes(home) == []
+    assert eng_mod.get_engine(home, "sd-cpp")["kind"] == "other"
+
+
+def test_sync_upgrades_strata_to_spawnable_openai(home):
+    st_bin = _fake_install(home, "strata", "python")
+    eng = eng_mod.validate_engine_body({"name": "Strata",
+                                        "binary": str(st_bin),
+                                        "kind": "other"})
+    eng["id"] = "strata"
+    eng_mod.save_engine(home, eng)
+    refreshed = ei.sync_installed_recipes(home)
+    assert refreshed == ["strata"]
+    again = eng_mod.get_engine(home, "strata")
+    assert again["kind"] == "openai"
+    assert again["model_kind"] == "json"
+    assert again["args_template"][:2] == ["-m", "serve.server"]
+
+
+def test_sync_skips_engines_not_matching_install_state(home):
+    """A hand-registered engine that merely shares a recipe id but whose
+    binary differs from the install state is left alone."""
+    _fake_install(home, "sd-cpp", "sd-server")
+    other = home / "somewhere-else" / ("sd-server" + (".exe" if os.name == "nt" else ""))
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text("#!/bin/sh\n")
+    os.chmod(other, 0o755)
+    eng = eng_mod.validate_engine_body({"name": "My SD", "binary": str(other),
+                                        "kind": "diffusion"})
+    eng["id"] = "sd-cpp"
+    eng_mod.save_engine(home, eng)
+    assert ei.sync_installed_recipes(home) == []
+    assert eng_mod.get_engine(home, "sd-cpp")["binary"] == str(other)
+
+
+def test_engines_list_endpoint_syncs_installed_recipes(app, home):
+    """GET /api/engines refreshes recipe-managed records (so the Serve page
+    sees the new kind without a reinstall)."""
+    cli = _fake_install(home, "sd-cpp", "sd-cli")
+    srv = cli.parent / ("sd-server" + (".exe" if os.name == "nt" else ""))
+    srv.write_text("#!/bin/sh\n")
+    os.chmod(srv, 0o755)
+    eng = eng_mod.validate_engine_body({"name": "stable-diffusion.cpp",
+                                        "binary": str(cli), "kind": "other"})
+    eng["id"] = "sd-cpp"
+    eng_mod.save_engine(home, eng)
+    r = app.handle("GET", "/api/engines")
+    assert r.status == 200
+    row = next(e for e in r.body["engines"] if e["id"] == "sd-cpp")
+    assert row["kind"] == "diffusion"

@@ -348,3 +348,65 @@ def test_config_put_accepts_new_run_setting_keys(tmp_path, monkeypatch):
     data = yaml.safe_load(cfgp.read_text())
     assert data["run_settings"]["speculative_type"] == "auto"
     assert data["run_settings"]["vision"] is True
+
+
+# ============================================================ image settings
+# Diffusion engines (sd-server): per-instance generation defaults instead of
+# the chat sampling knobs. sanitize_image_settings validates; 
+# image_settings_args emits sd-server flags.
+
+def test_sanitize_image_settings_valid_values():
+    from sable.serving.run_args import sanitize_image_settings
+
+    out = sanitize_image_settings({
+        "steps": 24, "cfg_scale": "7.5", "width": 1024, "height": 576,
+        "sampler": "DPM++2M".lower(), "scheduler": "karras",
+        "seed": -1, "batch_count": 2})
+    assert out == {"steps": 24, "cfg_scale": 7.5, "width": 1024,
+                   "height": 576, "sampler": "dpm++2m",
+                   "scheduler": "karras", "seed": -1, "batch_count": 2}
+
+
+def test_sanitize_image_settings_rejects_bad_values():
+    from sable.serving.run_args import sanitize_image_settings
+
+    for bad in ({"top_k": 5},                    # chat knob, not image
+                {"steps": 0}, {"steps": 999},
+                {"cfg_scale": -1}, {"cfg_scale": 31},
+                {"width": 8}, {"height": 99999},
+                {"sampler": "nope"}, {"scheduler": "nope"},
+                {"seed": -2}, {"batch_count": 0}):
+        with pytest.raises(ValueError):
+            sanitize_image_settings(bad)
+
+
+def test_sanitize_image_settings_clears_empty():
+    from sable.serving.run_args import sanitize_image_settings
+
+    assert sanitize_image_settings({"steps": None, "cfg_scale": "",
+                                    "seed": ""}) == {
+        "steps": None, "cfg_scale": None, "seed": None}
+
+
+def test_image_settings_args_emits_sd_server_flags():
+    from sable.serving.run_args import image_settings_args
+
+    args = image_settings_args({
+        "steps": 30, "cfg_scale": 6.5, "width": 768, "height": 1024,
+        "sampler": "euler_a", "scheduler": "sgm_uniform", "seed": 42,
+        "batch_count": 3, "extra_args": "--vae-tiling --offload-to-cpu"})
+    assert args == ["--steps", "30", "--cfg-scale", "6.5",
+                    "-W", "768", "-H", "1024",
+                    "--sampling-method", "euler_a",
+                    "--scheduler", "sgm_uniform",
+                    "-s", "42", "-b", "3",
+                    "--vae-tiling", "--offload-to-cpu"]
+
+
+def test_image_settings_args_empty_is_noop():
+    from sable.serving.run_args import image_settings_args
+
+    assert image_settings_args(None) == []
+    assert image_settings_args({}) == []
+    # seed 0 is a real seed and must still emit; batch_count 1 is the default
+    assert image_settings_args({"seed": 0, "batch_count": 1}) == ["-s", "0"]

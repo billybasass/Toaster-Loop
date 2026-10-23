@@ -7,6 +7,7 @@ non-openai / missing-binary engines) — nothing is launched.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -143,6 +144,25 @@ def test_build_engine_cmd_default_template():
     assert "m.gguf" in cmd and "9" in cmd
 
 
+def test_validate_diffusion_kind_gets_default_template():
+    e = eng_mod.validate_engine_body({"name": "SD", "binary": "sd-server",
+                                      "kind": "diffusion"})
+    assert e["kind"] == "diffusion"
+    # loopback-safe sd-server defaults (no /v1; --listen-ip/--listen-port)
+    assert "--model" in e["args_template"]
+    assert "127.0.0.1" in " ".join(e["args_template"])
+    assert "--listen-port" in e["args_template"]
+
+
+def test_build_engine_cmd_diffusion_default_template():
+    cmd = eng_mod.build_engine_cmd({"kind": "diffusion"}, "/bin/sd-server",
+                                   model="m.gguf", host="127.0.0.1", port=9)
+    assert cmd[0] == "/bin/sd-server"
+    assert "--model" in cmd and "m.gguf" in cmd
+    assert "--listen-ip" in cmd and "127.0.0.1" in cmd
+    assert "--listen-port" in cmd and "9" in cmd
+
+
 def test_engine_env_stringifies():
     assert eng_mod.engine_env({"env": {"A": 1, "B": None}}) == {"A": "1"}
     assert eng_mod.engine_env({}) == {}
@@ -166,6 +186,24 @@ def test_instance_body_keeps_registered_engine():
     inst = srv_inst.validate_instance_body(
         {"name": "s", "gguf": "/tmp/x.gguf", "engine": "vllm"})
     assert inst["engine"] == "vllm"
+
+
+def test_instance_body_image_settings_validated():
+    inst = srv_inst.validate_instance_body({
+        "name": "art", "gguf": "/tmp/sdxl.gguf", "engine": "sd-cpp",
+        "image_settings": {"steps": 28, "cfg_scale": 4.5, "width": 1024,
+                           "height": 1024, "sampler": "euler_a"}})
+    assert inst["image_settings"]["steps"] == 28
+    assert inst["image_settings"]["cfg_scale"] == 4.5
+    assert inst["image_settings"]["sampler"] == "euler_a"
+    with pytest.raises(ServeError):
+        srv_inst.validate_instance_body({
+            "name": "art", "gguf": "/tmp/x.gguf",
+            "image_settings": {"steps": 999}})      # out of range
+    with pytest.raises(ServeError):
+        srv_inst.validate_instance_body({
+            "name": "art", "gguf": "/tmp/x.gguf",
+            "image_settings": {"top_k": 5}})          # not an image knob
 
 
 def test_default_instance_reads_serve_default_engine():
@@ -292,6 +330,87 @@ def test_engine_spawn_non_openai_refuses(home, monkeypatch):
         _engine_spawn_cmd(SableConfig(), {}, "sd", gguf="m.gguf", port=1)
 
 
+def _fake_sd_server(home, monkeypatch):
+    exe = home / "sd-server"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("#!/bin/sh\n")
+    os.chmod(exe, 0o755)
+    e = eng_mod.validate_engine_body({"name": "SD", "binary": str(exe),
+                                      "kind": "diffusion"})
+    e["id"] = "sd-cpp"
+    eng_mod.save_engine(home, e)
+    monkeypatch.setenv("SABLE_HOME", str(home))
+    return exe
+
+
+def test_engine_spawn_diffusion_appends_image_settings(home, monkeypatch):
+    """A diffusion spawn carries the instance's generation defaults as
+    sd-server flags (steps/cfg/size/sampler), not llama.cpp run settings."""
+    from sable.serving.supervisor import _engine_spawn_cmd
+
+    exe = _fake_sd_server(home, monkeypatch)
+    inst = {"image_settings": {"steps": 30, "cfg_scale": 6.5,
+                               "width": 768, "height": 1024,
+                               "sampler": "dpm++2m", "seed": -1}}
+    cmd, env, cwd, kind = _engine_spawn_cmd(
+        SableConfig(), inst, "sd-cpp", gguf="/m/sdxl.gguf", port=1234)
+    assert kind == "diffusion" and cwd is None
+    joined = " ".join(cmd)
+    assert cmd[0] == str(exe)
+    assert "--steps 30" in joined and "--cfg-scale 6.5" in joined
+    assert "-W 768" in joined and "-H 1024" in joined
+    assert "--sampling-method dpm++2m" in joined and "-s -1" in joined
+
+
+def test_engine_spawn_diffusion_without_image_settings(home, monkeypatch):
+    from sable.serving.supervisor import _engine_spawn_cmd
+
+    exe = _fake_sd_server(home, monkeypatch)
+    cmd, env, cwd, kind = _engine_spawn_cmd(
+        SableConfig(), {}, "sd-cpp", gguf="/m/x.gguf", port=1)
+    assert kind == "diffusion"
+    assert "--steps" not in cmd  # nothing set => server defaults
+
+
+def test_engine_spawn_openai_kind_reports_kind(home, monkeypatch):
+    """An openai-kind engine reports its kind so the health wait targets
+    /v1/models (not the diffusion root probe)."""
+    from sable.serving.supervisor import _engine_spawn_cmd
+
+    exe = home / "x-server"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("#!/bin/sh\n")
+    os.chmod(exe, 0o755)
+    e = eng_mod.validate_engine_body({"name": "X", "binary": str(exe),
+                                      "kind": "openai"})
+    e["id"] = "x"
+    eng_mod.save_engine(home, e)
+    monkeypatch.setenv("SABLE_HOME", str(home))
+    _, _, _, kind = _engine_spawn_cmd(SableConfig(), {}, "x",
+                                      gguf="m.gguf", port=1)
+    assert kind == "openai"
+
+
+def test_engine_spawn_uses_engine_cwd(home, monkeypatch):
+    """strata-style engines run from their checkout (cwd on the record)."""
+    from sable.serving.supervisor import _engine_spawn_cmd
+
+    exe = home / "python"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("#!/bin/sh\n")
+    os.chmod(exe, 0o755)
+    e = eng_mod.validate_engine_body({
+        "name": "Strata", "binary": str(exe), "kind": "openai",
+        "args_template": ["-m", "serve.server", "--config", "{model}"],
+        "cwd": str(home)})
+    e["id"] = "strata"
+    eng_mod.save_engine(home, e)
+    monkeypatch.setenv("SABLE_HOME", str(home))
+    _, _, cwd, kind = _engine_spawn_cmd(SableConfig(), {}, "strata",
+                                        gguf="/c/run.json", port=1)
+    assert cwd == str(home) and kind == "openai"
+
+
 def test_engine_spawn_missing_binary_error(home, monkeypatch):
     from sable.serving.supervisor import _engine_spawn_cmd
 
@@ -303,3 +422,20 @@ def test_engine_spawn_missing_binary_error(home, monkeypatch):
     with pytest.raises(ServeError, match="binary not found"):
         _engine_spawn_cmd(SableConfig(), {}, "vllm", gguf="m.gguf",
                           port=1)
+
+
+def test_instance_api_roundtrips_image_settings(app, home):
+    """A diffusion instance stores image_settings through the servers API."""
+    eng = app.handle("POST", "/api/engines", body={
+        "name": "SD", "binary": "sd-server", "kind": "diffusion"})
+    eid = eng.body["engine"]["id"]
+    r = app.handle("POST", "/api/servers", body={
+        "name": "art", "gguf": "/tmp/sdxl.gguf", "engine": eid,
+        "image_settings": {"steps": 28, "cfg_scale": 4.5}})
+    assert r.status == 201, r.body
+    assert r.body["server"]["image_settings"] == {"steps": 28,
+                                                  "cfg_scale": 4.5}
+    upd = app.handle("PUT", "/api/servers/art", body={
+        "image_settings": {"steps": 12}})
+    assert upd.status == 200 and \
+        upd.body["server"]["image_settings"] == {"steps": 12}

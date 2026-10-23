@@ -369,3 +369,138 @@ def sanitize_run_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
             s = str(patch[key] or "").strip()
             out[key] = s or None
     return out
+
+
+# ---------------------------------------------------------------- diffusion
+# Image-generation engines (stable-diffusion.cpp's sd-server) take generation
+# defaults on the command line — steps/CFG/size/sampler, not top_k. Stored
+# per instance as ``image_settings`` (the chat run_settings/sampling maps are
+# meaningless for a diffusion server). Flag names verified against
+# ``sd-server --help``: --steps / --cfg-scale / -W / -H / --sampling-method /
+# --scheduler / -s.
+
+#: Sampler names accepted by sd-server (--sampling-method).
+SD_SAMPLERS = (
+   "euler", "euler_a", "heun", "dpm2", "dpm++2s_a", "dpm++2m", "dpm++2mv2",
+   "ipndm", "ipndm_v", "lcm", "ddim_trailing", "tcd",
+)
+
+#: Sigma schedulers accepted by sd-server (--scheduler).
+SD_SCHEDULERS = (
+   "discrete", "karras", "exponential", "ays", "sgm_uniform", "simple",
+   "smoothstep", "lcm",
+)
+
+
+def sanitize_image_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
+   """Coerce/validate an image_settings patch (diffusion engines). Raises
+   ValueError on unknown keys or out-of-range values; empty clears to None."""
+   out: Dict[str, Any] = {}
+   allowed = {"steps", "cfg_scale", "width", "height", "sampler",
+              "scheduler", "seed", "batch_count", "extra_args"}
+   unknown = [k for k in patch if k not in allowed]
+   if unknown:
+       raise ValueError("unknown image_settings keys: "
+                        + ", ".join(map(str, sorted(unknown))))
+   if "steps" in patch:
+       v = _int(patch["steps"])
+       if patch["steps"] in (None, ""):
+           out["steps"] = None
+       elif v is None or not (1 <= v <= 150):
+           raise ValueError("steps must be 1..150")
+       else:
+           out["steps"] = v
+   if "cfg_scale" in patch:
+       if patch["cfg_scale"] in (None, ""):
+           out["cfg_scale"] = None
+       else:
+           try:
+               f = float(patch["cfg_scale"])
+           except (TypeError, ValueError):
+               raise ValueError("cfg_scale must be a number") from None
+           if not (0.0 <= f <= 30.0):
+               raise ValueError("cfg_scale must be 0..30")
+           out["cfg_scale"] = f
+   for key in ("width", "height"):
+       if key in patch:
+           v = _int(patch[key])
+           if patch[key] in (None, ""):
+               out[key] = None
+           elif v is None or not (64 <= v <= 8192):
+               raise ValueError(f"{key} must be 64..8192")
+           else:
+               out[key] = v
+   for key, options in (("sampler", SD_SAMPLERS),
+                        ("scheduler", SD_SCHEDULERS)):
+       if key in patch:
+           raw = patch[key]
+           if raw is None or not str(raw).strip():
+               out[key] = None
+           else:
+               v = str(raw).strip().lower()
+               if v not in options:
+                   raise ValueError(f"{key} must be one of {options}")
+               out[key] = v
+   if "seed" in patch:
+       v = _int(patch["seed"])
+       if patch["seed"] in (None, ""):
+           out["seed"] = None
+       elif v is None or not (-1 <= v <= 2 ** 31 - 1):
+           raise ValueError("seed must be >= -1 (-1 = random)")
+       else:
+           out["seed"] = v
+   if "batch_count" in patch:
+       v = _int(patch["batch_count"])
+       if patch["batch_count"] in (None, ""):
+           out["batch_count"] = None
+       elif v is None or not (1 <= v <= 16):
+           raise ValueError("batch_count must be 1..16")
+       else:
+           out["batch_count"] = v
+   if "extra_args" in patch:
+       s = str(patch["extra_args"] or "").strip()
+       out["extra_args"] = s or None
+   return out
+
+
+def image_settings_args(image_settings: Optional[Dict[str, Any]]
+                       ) -> List[str]:
+   """sd-server CLI args for an image_settings map (generation defaults the
+   server applies to every request unless overridden). Unknown keys ignored
+   (sanitize_image_settings rejects them upstream)."""
+   im = image_settings or {}
+   args: List[str] = []
+   steps = _int(im.get("steps"))
+   if steps and steps > 0:
+       args += ["--steps", str(steps)]
+   cfg = im.get("cfg_scale")
+   if cfg is not None and cfg != "":
+       try:
+           args += ["--cfg-scale", str(float(cfg))]
+       except (TypeError, ValueError):
+           pass
+   w = _int(im.get("width"))
+   if w and w > 0:
+       args += ["-W", str(w)]
+   h = _int(im.get("height"))
+   if h and h > 0:
+       args += ["-H", str(h)]
+   sampler = str(im.get("sampler") or "").strip()
+   if sampler:
+       args += ["--sampling-method", sampler]
+   scheduler = str(im.get("scheduler") or "").strip()
+   if scheduler:
+       args += ["--scheduler", scheduler]
+   seed = _int(im.get("seed"))
+   if seed is not None and seed >= -1:
+       args += ["-s", str(seed)]
+   batch = _int(im.get("batch_count"))
+   if batch and batch > 1:
+       args += ["-b", str(batch)]
+   extra = str(im.get("extra_args") or "").strip()
+   if extra:
+       try:
+           args += shlex.split(extra)
+       except ValueError:
+           pass  # unbalanced quotes: skip rather than crash the spawn
+   return args
