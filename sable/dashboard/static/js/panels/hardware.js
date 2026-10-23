@@ -152,6 +152,9 @@ export default {
     let runtimeBusy = false;
     let lastRuntime = null;
     let runtimeLines = null; // <pre> owned by the current render (log tail)
+    let lastSetupLog = [];      // cached setup log tail — survives card re-renders
+    let lastRuntimeJson = null; // last rendered payload — skips no-op re-renders
+    let setupTimer = null;      // shared pollSetup timer (prevents stacked chains)
     // Which backend the update-check should follow (kept in sync with the
     // dropdown so the badge matches what Install/Update would act on).
     let runtimeCheckBackend = null;
@@ -169,6 +172,12 @@ export default {
                    : "&backend=" + encodeURIComponent(runtimeCheckBackend))
           : "";
         const d = await api("/api/runtime" + qs + be);
+        // Skip the full re-render when nothing changed. Rebuilding the card
+        // every 3 s destroyed and recreated the log <pre>, blanking it for a
+        // frame each poll (the visible "log flicker").
+        const json = JSON.stringify(d);
+        if (json === lastRuntimeJson) return;
+        lastRuntimeJson = json;
         renderRuntime(d);
       } catch (e) {
         runtimeCard.replaceChildren(el("h3", { text: "llama.cpp runtime" }),
@@ -177,17 +186,28 @@ export default {
     }
 
     // Poll the running/last llama.cpp build; on completion sync engine rows.
+    // One shared timer keeps duplicate poll chains from stacking up when
+    // several callers (click handler + render-time resume check) kick it off.
+    function scheduleSetupPoll() {
+      if (setupTimer) clearTimeout(setupTimer);
+      setupTimer = setTimeout(pollSetup, 2000);
+    }
+
     async function pollSetup() {
       if (!document.body.contains(runtimeCard)) return;
       try {
         const s = await api("/api/runtime/setup");
-        if (s.log?.length && runtimeLines)
-          runtimeLines.textContent = s.log.slice(-15).join("\n");
-        if (s.state === "running") { runtimeBusy = true; setTimeout(pollSetup, 2000); return; }
+        lastSetupLog = s.log || [];
+        if (runtimeLines?.isConnected)
+          runtimeLines.textContent = lastSetupLog.slice(-15).join("\n");
+        if (s.state === "running") { runtimeBusy = true; scheduleSetupPoll(); return; }
         runtimeBusy = false;
         runtimePending = null; // build finished — server state is authoritative again
-        if (s.state === "error" && runtimeLines)
-          runtimeLines.textContent += "\nerror: " + s.error;
+        if (s.state === "error") {
+          lastSetupLog = [...lastSetupLog, "error: " + s.error];
+          if (runtimeLines?.isConnected)
+            runtimeLines.textContent += "\nerror: " + s.error;
+        }
         // A finished build re-registers its engine row; make sure every
         // managed slot has an entry (idempotent, covers older installs too).
         try { await api("/api/runtime/sync", { method: "POST", body: {} }); }
@@ -268,10 +288,15 @@ export default {
 
       runtimeLines = el("pre", { class: "mono hint",
         style: "max-height:10em;overflow:auto" });
+      // Paint the cached log synchronously so a card re-render never blanks
+      // it, then refresh from the server (this also resumes polling for a
+      // build started in another tab or before this page load).
+      runtimeLines.textContent = lastSetupLog.slice(-15).join("\n");
       api("/api/runtime/setup").then((s) => {
-        if (s.log?.length && runtimeLines)
-          runtimeLines.textContent = s.log.slice(-15).join("\n");
-        if (s.state === "running") { runtimeBusy = true; pollSetup(); }
+        lastSetupLog = s.log || [];
+        if (runtimeLines?.isConnected)
+          runtimeLines.textContent = lastSetupLog.slice(-15).join("\n");
+        if (s.state === "running") { runtimeBusy = true; scheduleSetupPoll(); }
       }).catch(() => {});
 
       const status = !inst
@@ -601,6 +626,10 @@ export default {
     poll(); pollGate(); pollRuntime(true); pollEngines(); pollCatalog();
     const offEngines = bus.on("engines.changed", () => pollEngines());
     timer = setInterval(() => { poll(); pollGate(); if (!runtimeBusy) pollRuntime(false); }, POLL_MS);
-    return { destroy() { clearInterval(timer); offEngines(); offInstall(); } };
+    return { destroy() {
+      clearInterval(timer);
+      if (setupTimer) clearTimeout(setupTimer);
+      offEngines(); offInstall();
+    } };
   },
 };
