@@ -76,7 +76,8 @@ def test_upsert_remove_roundtrip(home):
     rec2 = peers_mod.upsert_peer(home, "http://a:1", None)
     assert rec2["id"] == rec["id"]
     assert len(peers_mod.load_peers(home)) == 1
-    assert peers_mod.get_peer(home, rec["id"])["token"] == "tokA"
+    stored = peers_mod.get_peer(home, rec["id"])
+    assert stored is not None and stored["token"] == "tokA"
     assert peers_mod.remove_peer(home, rec["id"]) is True
     assert peers_mod.remove_peer(home, rec["id"]) is False
     assert peers_mod.load_peers(home) == []
@@ -135,7 +136,8 @@ def test_live_reprobe_keeps_last_ok_on_failure(app, home, monkeypatch):
                         lambda url, token: _ok_snapshot())
     pid = app.handle("POST", "/api/remote/probe",
                      body={"url": "http://peer:8765"}).body["peer"]["id"]
-    assert peers_mod.get_peer(home, pid)["last_ok_at"]
+    stored = peers_mod.get_peer(home, pid)
+    assert stored is not None and stored["last_ok_at"]
 
     monkeypatch.setattr(peers_mod, "probe",
                         lambda url, token: _fail_snapshot("down"))

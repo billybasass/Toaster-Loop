@@ -585,10 +585,11 @@ def _name_key() -> Tuple[str, ...]:
 
 
 def _obj_name(obj: Dict[str, Any]) -> Optional[str]:
-    fn = obj.get("function") if isinstance(obj.get("function"), dict) else None
+    f = obj.get("function")
+    fn = f if isinstance(f, dict) else None
     name = (fn or {}).get("name") or next(
-        (obj[k] for k in ("name", "tool", "tool_name")
-         if isinstance(obj.get(k), str) and obj.get(k).strip()), None)
+        (v for k in ("name", "tool", "tool_name")
+         if isinstance((v := obj.get(k)), str) and v.strip()), None)
     return name if isinstance(name, str) and name.strip() else None
 
 
@@ -603,7 +604,8 @@ def _looks_like_call(obj: Any) -> bool:
         return False
     if not _obj_name(obj):
         return False
-    fn = obj.get("function") if isinstance(obj.get("function"), dict) else {}
+    f = obj.get("function")
+    fn = f if isinstance(f, dict) else {}
     return any(k in obj or k in fn
                for k in ("arguments", "parameters", "args"))
 
@@ -1016,10 +1018,11 @@ def _bare_json_candidates(text: str) -> List[Tuple[str, List[str]]]:
     return out
 
 
-def _xml_variants(text: str) -> List[Tuple[str, Optional[str],
+def _xml_variants(text: str) -> List[Tuple[Optional[str], Optional[str],
                                            Optional[str], List[str]]]:
     """(args_raw, name, body, tags) for each XML-ish wrapper candidate."""
-    out: List[Tuple[str, Optional[str], Optional[str], List[str]]] = []
+    out: List[Tuple[Optional[str], Optional[str], Optional[str],
+                    List[str]]] = []
     for m in _XML_TOOL_RE.finditer(text):
         out.append((m.group(2), m.group(1), None, ["xml_tool_wrapper"]))
     for m in _XML_ATTR_RE.finditer(text):
@@ -1110,7 +1113,7 @@ def recover(content: Optional[str],
         # second variant: candidate-internal trailing stop junk (between
         # the closing brace and the fence close, e.g. ``}````) --
         # attributed via the stop_tokens tag.
-        variants = [(raw, ())]
+        variants: List[Tuple[str, Tuple[str, ...]]] = [(raw, ())]
         cleaned = strip_stop_tokens(raw)
         if cleaned != raw:
             variants.append((cleaned, ("stop_tokens",)))

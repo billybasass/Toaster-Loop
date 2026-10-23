@@ -690,6 +690,7 @@ def test_sync_upgrades_legacy_sd_cpp_other_to_diffusion(home):
     refreshed = ei.sync_installed_recipes(home)
     assert refreshed == ["sd-cpp"]
     again = eng_mod.get_engine(home, "sd-cpp")
+    assert again is not None
     assert again["kind"] == "diffusion"
     assert again["binary"] == str(srv)          # promoted to the server binary
     assert "--listen-port" in " ".join(again["args_template"])
@@ -706,7 +707,8 @@ def test_sync_keeps_sd_cpp_inventory_without_server_binary(home):
     eng["id"] = "sd-cpp"
     eng_mod.save_engine(home, eng)
     assert ei.sync_installed_recipes(home) == []
-    assert eng_mod.get_engine(home, "sd-cpp")["kind"] == "other"
+    again = eng_mod.get_engine(home, "sd-cpp")
+    assert again is not None and again["kind"] == "other"
 
 
 def test_sync_upgrades_strata_to_spawnable_openai(home):
@@ -719,6 +721,7 @@ def test_sync_upgrades_strata_to_spawnable_openai(home):
     refreshed = ei.sync_installed_recipes(home)
     assert refreshed == ["strata"]
     again = eng_mod.get_engine(home, "strata")
+    assert again is not None
     assert again["kind"] == "openai"
     assert again["model_kind"] == "json"
     assert again["args_template"][:2] == ["-m", "serve.server"]
@@ -750,6 +753,7 @@ def test_sync_repairs_stale_strata_venv_cwd(home):
     refreshed = ei.sync_installed_recipes(home)
     assert refreshed == ["strata"]
     again = eng_mod.get_engine(home, "strata")
+    assert again is not None
     assert again["cwd"] == str(src)  # repaired to the checkout
     # second pass is a no-op
     assert ei.sync_installed_recipes(home) == []
@@ -768,7 +772,8 @@ def test_sync_skips_engines_not_matching_install_state(home):
     eng["id"] = "sd-cpp"
     eng_mod.save_engine(home, eng)
     assert ei.sync_installed_recipes(home) == []
-    assert eng_mod.get_engine(home, "sd-cpp")["binary"] == str(other)
+    again = eng_mod.get_engine(home, "sd-cpp")
+    assert again is not None and again["binary"] == str(other)
 
 
 def test_engines_list_endpoint_syncs_installed_recipes(app, home):

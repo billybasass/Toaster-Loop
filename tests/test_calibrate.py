@@ -219,13 +219,18 @@ def test_profile_save_load_roundtrip_keyed_by_machine_and_model(cal_dirs, gguf):
     }
     p = cal.save_profile(prof)
     assert p.is_file() and str(cal_dirs / "cal") in str(p)
-    loaded = cal.load_profile(cal.machine_id(), cal.model_hash(gguf))
+    mhash = cal.model_hash(gguf)
+    assert mhash is not None
+    loaded = cal.load_profile(cal.machine_id(), mhash)
+    assert loaded is not None
     assert loaded["adopted_settings"] == {"kv_cache_type": "q8_0"}
     # different machine or model -> no match
-    assert cal.load_profile("other-machine", cal.model_hash(gguf)) is None
+    assert cal.load_profile("other-machine", mhash) is None
     other = Path(cal_dirs / "other.gguf")
     other.write_bytes(b"different bytes entirely")
-    assert cal.load_profile(cal.machine_id(), cal.model_hash(other)) is None
+    mhash_other = cal.model_hash(other)
+    assert mhash_other is not None
+    assert cal.load_profile(cal.machine_id(), mhash_other) is None
     listing = cal.list_profiles()
     assert len(listing) == 1 and listing[0]["machine_id"] == "test-machine"
     assert cal.clear_profiles() == 1

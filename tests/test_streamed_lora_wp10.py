@@ -371,7 +371,9 @@ def test_recompute_matches_dense_reference():
     # Identical weights (seeded copy).
     torch.manual_seed(4)
     for a, b in zip(dense, streamed):
-        b[0].weight.data.copy_(a[0].weight.data)
+        wa: "torch.nn.Parameter" = a[0].weight  # type: ignore[index]
+        wb: "torch.nn.Parameter" = b[0].weight  # type: ignore[index]
+        wb.data.copy_(wa.data)
 
     x = torch.randn(5, 8, dtype=torch.float64)
     target = torch.randn(5, 4, dtype=torch.float64)
@@ -399,8 +401,8 @@ def test_recompute_matches_dense_reference():
 
     assert math.isclose(float(loss_val), float(ld.detach()), rel_tol=1e-9)
     for mdense, mstream in zip(dense, streamed):
-        pd = mdense[0].weight.grad
-        ps = mstream[0].weight.grad
+        pd = mdense[0].weight.grad  # type: ignore[index]
+        ps = mstream[0].weight.grad  # type: ignore[index]
         assert pd is not None and ps is not None
         assert torch.allclose(pd, ps, atol=1e-8), \
             f"grad mismatch: max diff {(pd - ps).abs().max()}"

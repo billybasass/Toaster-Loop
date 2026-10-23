@@ -38,6 +38,7 @@ that isn't a dict simply diffs as "unset" and merges server-side.
 from __future__ import annotations
 
 import shutil
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # ------------------------------------------------------------------- preset
@@ -86,7 +87,7 @@ def calibration_ready(home: Optional[str] = None) -> bool:
     try:
         from ..serving.calibrate import calibrate_dir, machine_id
 
-        d = calibrate_dir(home)
+        d = calibrate_dir(Path(home) if home is not None else None)
         if not d.is_dir():
             return False
         mid = machine_id()

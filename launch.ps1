@@ -14,6 +14,14 @@
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
+# Windows PowerShell 5.1 turns any text a native command writes to stderr into
+# a NativeCommandError, which is terminating under $ErrorActionPreference =
+# "Stop"; pwsh 7 does not do this. sable logs progress to stderr, so run it in
+# a child scope pinned to Continue and rely on $LASTEXITCODE for failures.
+function Native([scriptblock]$Body) {
+    & { $ErrorActionPreference = "Continue"; . $Body }
+}
+
 $sable = Join-Path $PSScriptRoot ".venv\Scripts\sable.exe"
 if (-not (Test-Path $sable)) {
     Write-Host "sable is not set up yet - running setup.ps1 first."
@@ -24,5 +32,8 @@ if (-not (Test-Path $sable)) {
     }
 }
 
-& $sable launch @args
+# NOTE: `$args` inside the Native scriptblock would resolve to that block's own
+# (empty) automatic variable, so capture the launcher arguments first.
+$LaunchArgs = $args
+Native { & $sable launch @LaunchArgs }
 exit $LASTEXITCODE

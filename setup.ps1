@@ -48,23 +48,32 @@ while ($i -lt $args.Count) {
 function Say([string]$m)  { Write-Host "`n==> $m" -ForegroundColor Cyan }
 function Warn([string]$m) { Write-Host "warning: $m" -ForegroundColor Yellow }
 
+# Windows PowerShell 5.1 turns any text a native command writes to stderr into
+# a NativeCommandError, which is terminating under $ErrorActionPreference =
+# "Stop" (even when redirected with 2>$null); pwsh 7 does not do this. Run every
+# native tool inside a child scope pinned to Continue so stderr stays plain
+# progress text, and check $LASTEXITCODE for real failures.
+function Native([scriptblock]$Body) {
+    & { $ErrorActionPreference = "Continue"; . $Body }
+}
+
 $HasUv = [bool](Get-Command uv -ErrorAction SilentlyContinue)
 
 # ------------------------------------------------------------- 1. interpreter
 Say "1/4 locating a Python (3.11-3.13)"
 $Py = $null
 if ($HasUv) {
-    $Py = (& uv python find ">=3.11,<3.14" 2>$null) | Select-Object -First 1
+    $Py = (Native { & uv python find ">=3.11,<3.14" }) | Select-Object -First 1
     if (-not $Py) {
         Say "no suitable interpreter found - installing one with uv"
-        & uv python install 3.13 2>$null | Out-Null
-        $Py = (& uv python find ">=3.11,<3.14") | Select-Object -First 1
+        Native { & uv python install 3.13 } | Out-Null
+        $Py = (Native { & uv python find ">=3.11,<3.14" }) | Select-Object -First 1
     }
 } else {
     foreach ($c in "python3.13", "python3.12", "python3.11", "python") {
         $cmd = Get-Command $c -ErrorAction SilentlyContinue
         if (-not $cmd) { continue }
-        & $cmd.Source -c "import sys; raise SystemExit(not (3,11) <= sys.version_info < (3,14))" 2>$null
+        Native { & $cmd.Source -c "import sys; raise SystemExit(not (3,11) <= sys.version_info < (3,14))" } 2>$null
         if ($LASTEXITCODE -eq 0) { $Py = $cmd.Source; break }
     }
 }
@@ -72,34 +81,79 @@ if (-not $Py) {
     Write-Error "error: need Python 3.11-3.13 (or install uv: https://docs.astral.sh/uv/)"
     exit 1
 }
-Write-Host "interpreter: $Py ($(& $Py --version 2>&1))"
+$PyVersion = (Native { & $Py --version }) -join " "
+Write-Host "interpreter: $Py ($PyVersion)"
 
 # ------------------------------------------------------------------- 2. venv
 Say "2/4 creating venv + installing sable"
 $Extras = if ($Training) { "dev,training" } else { "dev" }
 if ($HasUv) {
-    & uv venv $Venv --python $Py 2>$null | Out-Null
-    & uv pip install --python (Join-Path $Venv "Scripts\python.exe") -q "-e" "${Repo}[$Extras]"
+    Native { & uv venv $Venv --python $Py } 2>$null | Out-Null
+    Native { & uv pip install --python (Join-Path $Venv "Scripts\python.exe") -q "-e" "${Repo}[$Extras]" }
     if ($LASTEXITCODE -ne 0) { Warn "uv pip install failed"; exit 1 }
 } else {
     $venvPy = Join-Path $Venv "Scripts\python.exe"
-    if (-not (Test-Path $venvPy)) { & $Py -m venv $Venv }
-    & $venvPy -m pip install -q --upgrade pip setuptools wheel
-    & $venvPy -m pip install -q "-e" "${Repo}[$Extras]"
+    if (-not (Test-Path $venvPy)) { Native { & $Py -m venv $Venv } }
+    Native { & $venvPy -m pip install -q --upgrade pip setuptools wheel }
+    Native { & $venvPy -m pip install -q "-e" "${Repo}[$Extras]" }
     if ($LASTEXITCODE -ne 0) { Warn "package install failed (check network/disk)"; exit 1 }
 }
 $Sable = Join-Path $Venv "Scripts\sable.exe"
 if (-not (Test-Path $Sable)) { Write-Error "error: venv install failed - no .venv\Scripts\sable.exe"; exit 1 }
-Write-Host "installed  : $(& $Sable --version)"
+$SableVersion = (Native { & $Sable --version }) -join " "
+Write-Host "installed  : $SableVersion"
 
 # --------------------------------------------------------------- 3. llama.cpp
 Say "3/4 building llama.cpp for this machine (GPU autodetect)"
-$Toolchain = @("git", "cmake") | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) }
-if ($Toolchain) {
-    Warn "missing toolchain: $($Toolchain -join ', ') - skipping llama.cpp build."
-    Warn "install them (e.g. winget install Kitware.Cake Git) plus a C/C++ compiler and re-run setup.ps1"
+
+# Offer to install missing build prerequisites via winget. winget handles its
+# own elevation prompt; PATH is refreshed afterwards so the new tools are
+# visible without opening a fresh terminal.
+function Refresh-Path {
+    $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" +
+                [Environment]::GetEnvironmentVariable("Path", "User")
+}
+function Ensure-Tool([string]$name, [string]$wingetId) {
+    if (Get-Command $name -ErrorAction SilentlyContinue) { return $true }
+    Warn "$name not found."
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Warn "winget unavailable - install $name manually ($wingetId) and re-run setup.ps1"
+        return $false
+    }
+    $ans = Read-Host "Install $name via winget ($wingetId)? [Y/n]"
+    if ($ans -in @("", "y", "Y", "yes", "YES")) {
+        Native { & winget install --id $wingetId -e --accept-source-agreements --accept-package-agreements }
+        Refresh-Path
+        if (Get-Command $name -ErrorAction SilentlyContinue) { return $true }
+        Warn "$name installed but not on PATH yet - close and reopen this terminal, then re-run setup.ps1"
+    }
+    return $false
+}
+
+# NVIDIA CUDA toolkit: needed only when an NVIDIA GPU is present and nvcc is
+# absent. Note VS 2026 + CUDA requires the *newest* toolkit (12.8 cannot build
+# against a VS 2026 host compiler); sable's build pins the newest installed one.
+$HasNvGpu = [bool](Get-Command nvidia-smi -ErrorAction SilentlyContinue)
+$HasNvcc = [bool](Get-Command nvcc -ErrorAction SilentlyContinue) -or
+          [bool]$env:CUDA_PATH -and (Test-Path (Join-Path $env:CUDA_PATH "bin\nvcc.exe"))
+if ($HasNvGpu -and -not $HasNvcc) {
+    Warn "NVIDIA GPU detected but no CUDA toolkit (nvcc) found."
+    $null = Ensure-Tool nvcc "Nvidia.CUDA"
+    # winget puts nvcc under the toolkit dir, not PATH; accept either.
+    if (-not ((Get-Command nvcc -ErrorAction SilentlyContinue) -or
+              (Test-Path "$env:ProgramFiles\NVIDIA GPU Computing Toolkit\CUDA\*\bin\nvcc.exe"))) {
+        Warn "continuing without CUDA - sable setup will fall back to another backend"
+    }
+}
+
+$ToolchainOk = $true
+foreach ($t in @("git", "Git.Git"), @("cmake", "Kitware.CMake")) {
+    if (-not (Ensure-Tool $t[0] $t[1])) { $ToolchainOk = $false }
+}
+if (-not $ToolchainOk) {
+    Warn "toolchain incomplete - skipping llama.cpp build; re-run setup.ps1 after installing git/cmake"
 } else {
-    & $Sable setup @BackendArgs
+    Native { & $Sable setup @BackendArgs }
     if ($LASTEXITCODE -ne 0) {
         Warn "llama.cpp setup failed - serving/training may be limited; re-run setup.ps1 or 'sable setup' after fixing the toolchain"
     }
@@ -107,7 +161,7 @@ if ($Toolchain) {
 
 # ------------------------------------------------------- 4. screenshot backend
 Say "4/4 checking screen-capture backend for take_screenshot"
-& (Join-Path $Venv "Scripts\python.exe") -c "import PIL.ImageGrab" 2>$null
+Native { & (Join-Path $Venv "Scripts\python.exe") -c "import PIL.ImageGrab" } 2>$null
 if ($LASTEXITCODE -eq 0) {
     Write-Host "capture    : Pillow ImageGrab - OK (Windows native)"
 } else {

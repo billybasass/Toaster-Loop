@@ -33,6 +33,14 @@ foreach ($a in $args) {
     }
 }
 
+# Windows PowerShell 5.1 turns any text a native command writes to stderr into
+# a NativeCommandError, which is terminating under $ErrorActionPreference =
+# "Stop"; pwsh 7 does not do this. Run native tools inside a child scope pinned
+# to Continue so stderr stays plain progress text.
+function Native([scriptblock]$Body) {
+    & { $ErrorActionPreference = "Continue"; . $Body }
+}
+
 $SableBin = Join-Path $Repo ".venv\Scripts\sable.exe"
 
 Write-Host "This returns sable to a freshly-downloaded state:"
@@ -51,7 +59,7 @@ if (-not $AssumeYes) {
 #    guarded to look like an sable home, same refusal as cleanup.sh.
 if (Test-Path $SableBin) {
     Write-Host "== wiping runtime home =="
-    & $SableBin reset --yes @KeepModelsArgs
+    Native { & $SableBin reset --yes @KeepModelsArgs }
     if ($LASTEXITCODE -ne 0) {
         Write-Host "warning: 'sable reset' failed; continuing with repo cleanup"
     }

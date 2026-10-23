@@ -367,7 +367,7 @@ def test_train_enqueue_conflict_surfaces_as_error(home, monkeypatch):
                            "one GPU, one job"}})
         return FakeResponse(200, {"ok": True})
 
-    a.handle = fake_handle
+    a.handle = fake_handle  # type: ignore[assignment]
     a.home = home
     srv = McpServer(app=a)
     init(srv)
@@ -422,6 +422,9 @@ def test_mcp_package_is_stdlib_only():
             elif isinstance(node, ast.ImportFrom) and node.module \
                     and node.level == 0:
                 names = [node.module]
+            if not names:
+                continue
+            assert isinstance(node, (ast.Import, ast.ImportFrom))
             for n in names:
                 if n.split(".")[0] not in allowed_roots:
                     offenders.append(f"{py.name}:{node.lineno}: {n}")

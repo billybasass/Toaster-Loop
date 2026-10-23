@@ -5,6 +5,7 @@ real-GPU repro in CI)."""
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
 import threading
@@ -200,6 +201,7 @@ def test_idle_unload_fires_once_per_idle_period(home, monkeypatch):
 
     # state file is now an `unloaded` tomb and the event fired exactly once
     st = srv_inst.read_state(Path(home), "alpha")
+    assert st is not None
     assert st["unloaded"] is True and st["unload_reason"] == "idle"
     assert "pid" not in st
     kinds = [p["event"] for k, p in events if p.get("event")]
@@ -251,7 +253,8 @@ def test_lazy_load_via_resolve_named_instance(home, monkeypatch):
     assert base == URL and model == "alpha-model"
     assert ("spawn", "alpha") in spawns
     # the tomb was replaced by a live record
-    assert srv_inst.read_state(Path(home), "alpha").get("pid") == os.getpid()
+    st = srv_inst.read_state(Path(home), "alpha")
+    assert st is not None and st.get("pid") == os.getpid()
 
 
 def test_lazy_off_unloaded_gets_clear_error(home):
@@ -434,8 +437,9 @@ def test_cli_instances_actions_round_trip(home, monkeypatch, capsys):
     assert cmd_instances_unload(_Args("unload", "nope")) == 1   # unknown id
 
 
-class _Args:
+class _Args(argparse.Namespace):
     def __init__(self, command, instance_id=None):
+        super().__init__()
         self.command = command
         self.instances_command = command
         self.instance_id = instance_id
