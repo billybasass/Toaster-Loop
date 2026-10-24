@@ -56,17 +56,17 @@ Endpoint catalog:
   GET    /api/models                        rows + lineage edges + active
   GET    /api/model_catalog                 models discovered under the base
                                             model folder (?dir= override)
-  GET    /api/hub/search?q=                 HF Hub text search (popular first)
-                                            ?gguf=1&capability=&sort= filters
-  GET    /api/hub/feed        latest GGUF models rail (discover page)
+  GET    /api/hub/search?q=                 Resource Hub search (popular first)
+                                            ?kind=&gguf=1&capability=&sort=
+  GET    /api/hub/feed        latest resources rail (discover page)
   GET    /api/hub/detail?repo=              card metadata + variants + README
-  GET    /api/hub/variants?repo=            GGUF quant variants for a repo
+  GET    /api/hub/variants?repo=            quant variants for a repo
   GET    /api/hub/installed                 downloaded repos + download jobs
-  POST   /api/hub/download                  {repo, variant?} -> 202 {job_id}
+  POST   /api/hub/download                  {repo, variant?, kind?} -> 202
   GET    /api/hub/downloads                 all hub download jobs
   GET    /api/hub/downloads/<job_id>        one job (progress polling)
   POST   /api/hub/cancel                    {job_id}
-  POST   /api/hub/delete                    {repo} -> remove downloaded repo
+  POST   /api/hub/delete                    {repo, kind?} -> remove downloaded
   POST   /api/models/promote                {model_id}
   POST   /api/models/rollback               {base_model?}
   GET    /api/models/<id>                   one model (+validation report)
@@ -683,9 +683,11 @@ class DashboardApp:
         # vision projector (mmproj): status + download into the GGUF's folder
         ("GET", "/api/mmproj", "h_mmproj_status"),
         ("POST", "/api/mmproj/download", "h_mmproj_download"),
-        # model hub: search / download / manage (core/modelhub.py)
+        # resource hub: models/datasets/MCP search, download, manage
+        # (core/modelhub.py)
         ("GET", "/api/hub/search", "h_hub_search"),
         ("GET", "/api/hub/feed", "h_hub_feed"),
+        ("GET", "/api/hub/mcp_dir", "h_hub_mcp_dir"),
         ("GET", "/api/hub/detail", "h_hub_detail"),
         ("GET", "/api/hub/image", "h_hub_image"),
         ("GET", "/api/hub/variants", "h_hub_variants"),
@@ -4615,10 +4617,11 @@ class DashboardApp:
         return {"ok": True, "note": "mmproj download started; poll "
                                     "GET /api/mmproj?gguf= for completion"}
 
-    # ------------------------------------------------------------- model hub
-    # Search / download / manage remote models (core/modelhub.py). One shared
-    # ModelHub per dashboard process so background download jobs + progress
-    # survive across requests (download-registry pattern).
+    # ------------------------------------------------------------- resource hub
+    # Search / download / manage remote models, datasets and MCP servers
+    # (core/modelhub.py). One shared ModelHub per dashboard process so
+    # background download jobs + progress survive across requests
+    # (download-registry pattern). Every route takes ?kind= (default models).
 
     def _modelhub(self):
         from ..core.modelhub import ModelHub
@@ -4652,7 +4655,7 @@ class DashboardApp:
             self._modelhub().search, q.get("q", ""), limit,
             gguf_only=q.get("gguf", "") in ("1", "true", "yes"),
             capability=q.get("capability", ""),
-            sort=q.get("sort", "downloads"))
+            sort=q.get("sort", "downloads"), kind=q.get("kind", "models"))
         return {"query": q.get("q", ""), "results": results}
 
     def h_hub_feed(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
@@ -4661,31 +4664,58 @@ class DashboardApp:
             limit = int(q.get("limit", "15"))
         except ValueError:
             pass
-        return {"models": self._hub_call(self._modelhub().feed, limit)}
+        return {"models": self._hub_call(
+            self._modelhub().feed, limit, kind=q.get("kind", "models"))}
+
+    def h_hub_mcp_dir(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
+        """MCP registries — catalogues besides HF Spaces. ?source=registry
+        (official MCP Registry, no auth; default) or pulsemcp (needs
+        PULSEMCP_API_KEY). ?q= searches; ?server=<id> fetches one card."""
+        from ..core.modelhub import (mcp_dir_detail, mcp_registry_detail,
+                                     search_mcp_dir, search_mcp_registry)
+
+        limit = 40
+        try:
+            limit = int(q.get("limit", "40"))
+        except ValueError:
+            pass
+        server = q.get("server", "")
+        if q.get("source", "registry") == "pulsemcp":
+            if server:
+                return self._hub_call(mcp_dir_detail, server)
+            rows = self._hub_call(search_mcp_dir, q.get("q", ""), limit)
+        else:
+            if server:
+                return self._hub_call(mcp_registry_detail, server)
+            rows = self._hub_call(search_mcp_registry, q.get("q", ""), limit)
+        return {"results": rows}
 
     def h_hub_detail(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         repo = q.get("repo", "")
-        return self._hub_call(self._modelhub().detail, repo)
+        return self._hub_call(self._modelhub().detail, repo,
+                              kind=q.get("kind", "models"))
 
     def h_hub_image(self, q: Dict[str, str], b: Dict[str, Any]) -> ApiResponse:
-        """Same-origin image proxy for model cards (CSP is default-src 'self').
-        ?repo=<id>&path=<repo-relative> or ?url=<allow-listed https url>."""
+        """Same-origin image proxy for resource cards (CSP is default-src 'self').
+        ?repo=<id>&path=<repo-relative> or ?url=<public https url>;
+        ?kind= routes repo-relative fetches to datasets/spaces."""
         from ..core.modelhub import fetch_image
 
         data, ctype = self._hub_call(
             fetch_image, repo_id=q.get("repo", ""), path=q.get("path", ""),
-            url=q.get("url", ""))
+            url=q.get("url", ""), kind=q.get("kind", "models"))
         return ApiResponse(200, raw=data, content_type=ctype)
 
     def h_hub_variants(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         repo = q.get("repo", "")
-        return self._hub_call(self._modelhub().variants, repo)
+        return self._hub_call(self._modelhub().variants, repo,
+                              kind=q.get("kind", "models"))
 
     def h_hub_installed(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         hub = self._modelhub()
         hub.prune_finished()
         return {"models_dir": str(hub.base_dir()),
-                "installed": self._hub_call(hub.installed),
+                "installed": self._hub_call(hub.installed_all),
                 "downloads": hub.jobs()}
 
     def h_hub_download(self, q: Dict[str, str], b: Dict[str, Any]) -> ApiResponse:
@@ -4693,7 +4723,9 @@ class DashboardApp:
         # cache layout; progress via GET /api/hub/downloads/<job_id>.
         repo = str(b.get("repo") or "")
         variant = str(b.get("variant") or "")
-        job_id = self._hub_call(self._modelhub().start_download, repo, variant)
+        kind = str(b.get("kind") or "models")
+        job_id = self._hub_call(self._modelhub().start_download, repo,
+                                variant, kind)
         return ApiResponse(202, {"ok": True, "job_id": job_id,
                                  "state": "queued"})
 
@@ -4710,7 +4742,8 @@ class DashboardApp:
 
     def h_hub_delete(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         repo = str(b.get("repo") or "")
-        out = self._hub_call(self._modelhub().delete, repo)
+        kind = str(b.get("kind") or "models")
+        out = self._hub_call(self._modelhub().delete, repo, kind)
         self.bus.publish("model.deleted", out)
         return out
 

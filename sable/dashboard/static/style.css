@@ -523,6 +523,14 @@ input[type="search"], input[type="date"] {
   border-radius: 0; cursor: pointer; }
 .hub-tab.active { background: var(--panel2); color: var(--fg);
   font-weight: 600; box-shadow: inset 0 -2px 0 var(--accent); }
+/* Resource-kind segmented control (Models / Datasets / MCP Servers). */
+.hub-kindtabs { display: inline-flex; gap: 4px; padding: 3px;
+  background: var(--inset-bg); border: 1px solid var(--line);
+  border-radius: 8px; }
+.hub-kindtab { border: none; background: transparent; padding: 4px 12px;
+  border-radius: 6px; cursor: pointer; font-size: 12.5px; }
+.hub-kindtab.active { background: var(--panel2); color: var(--fg);
+  font-weight: 600; box-shadow: inset 0 0 0 1px var(--accent); }
 .hub-search { flex: 1; min-width: 180px; padding: 7px 12px; border-radius: 18px;
   background: var(--panel); border: 1px solid var(--line); color: var(--fg); }
 .hub-search:focus { outline: none; border-color: var(--accent); }

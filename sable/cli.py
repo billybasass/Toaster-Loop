@@ -477,42 +477,54 @@ def build_parser() -> argparse.ArgumentParser:
     # ------------------------------------------------------------------ hub
     hb = sub.add_parser(
         "hub",
-        help="Model hub: search / download / list / delete models (Hugging Face)",
+        help="Resource hub: search / download / list / delete models, "
+             "datasets and MCP servers (Hugging Face)",
         description=(
-            "Search Hugging Face, browse GGUF quant variants, download into "
-            "the models folder (HF hub-cache layout, resumable) and manage "
+            "Search Hugging Face across models, datasets and MCP servers "
+            "(Spaces), browse GGUF quant variants, download into the models "
+            "folder or hub roots (HF hub-cache layout, resumable) and manage "
             "what's installed. Gated repos: set HF_TOKEN."
         ),
     )
     hbsub = hb.add_subparsers(dest="hub_command", required=True)
 
-    hsearch = hbsub.add_parser("search", help="Search the hub by text")
+    def _kind_arg(p):
+        p.add_argument("--kind", default="models",
+                       choices=["models", "datasets", "spaces", "mcp"],
+                       help="Resource kind (mcp is an alias for spaces)")
+        return p
+
+    hsearch = _kind_arg(hbsub.add_parser(
+        "search", help="Search the hub by text"))
     _add_common(hsearch)
     hsearch.add_argument("query", nargs="*", help="Search terms (empty = popular)")
     hsearch.add_argument("--limit", type=int, default=20)
     hsearch.set_defaults(func=cmd_hub_search)
 
-    hvar = hbsub.add_parser("variants",
-                            help="List quant variants for a repo")
+    hvar = _kind_arg(hbsub.add_parser(
+        "variants", help="List quant variants for a repo"))
     _add_common(hvar)
     hvar.add_argument("repo", help="Repo id (e.g. testorg/Qwen3-8B-GGUF)")
     hvar.set_defaults(func=cmd_hub_variants)
 
-    hdl = hbsub.add_parser("download",
-                           help="Download a model (default quant variant)")
+    hdl = _kind_arg(hbsub.add_parser(
+        "download",
+        help="Download a resource (models: default quant variant)"))
     _add_common(hdl)
     hdl.add_argument("repo", help="Repo id")
     hdl.add_argument("--variant", default="",
                      help="Quant variant name (see `sable hub variants`)")
     hdl.set_defaults(func=cmd_hub_download)
 
-    hls = hbsub.add_parser("list", help="List models downloaded via the hub")
+    hls = _kind_arg(hbsub.add_parser(
+        "list", help="List resources downloaded via the hub"))
     _add_common(hls)
     hls.set_defaults(func=cmd_hub_list)
 
-    hrmdir = hbsub.add_parser("delete", help="Delete a downloaded hub model")
+    hrmdir = _kind_arg(hbsub.add_parser(
+        "delete", help="Delete a downloaded hub resource"))
     _add_common(hrmdir)
-    hrmdir.add_argument("repo", help="Repo id to remove from the models folder")
+    hrmdir.add_argument("repo", help="Repo id to remove from the hub folder")
     hrmdir.set_defaults(func=cmd_hub_delete)
 
     # ---------------------------------------------------------------- train
@@ -2776,7 +2788,8 @@ def cmd_hub_search(args: argparse.Namespace) -> int:
 
     try:
         results = _hub_for(cfg).search(" ".join(args.query or []),
-                                       limit=args.limit)
+                                       limit=args.limit,
+                                       kind=getattr(args, "kind", "models"))
     except HubError as e:
         print(f"hub error: {e}", file=sys.stderr)
         return 1
@@ -2784,7 +2797,8 @@ def cmd_hub_search(args: argparse.Namespace) -> int:
         print("no results")
         return 0
     for m in results:
-        tag = "gguf" if m["gguf"] else "hf  "
+        tag = "gguf" if m.get("gguf") else (
+            m.get("sdk") or "hf")[:4].ljust(4)
         print(f"{tag}  {m['repo_id']:<55} "
               f"dl={m['downloads']:<9} likes={m['likes']}")
     print("\nnext: sable hub variants <repo>   then   sable hub download <repo>")
@@ -2797,7 +2811,8 @@ def cmd_hub_variants(args: argparse.Namespace) -> int:
     from .core.modelhub import HubError
 
     try:
-        info = _hub_for(cfg).variants(args.repo)
+        info = _hub_for(cfg).variants(args.repo,
+                                      kind=getattr(args, "kind", "models"))
     except HubError as e:
         print(f"hub error: {e}", file=sys.stderr)
         return 1
@@ -2824,12 +2839,13 @@ def cmd_hub_download(args: argparse.Namespace) -> int:
     from .core.modelhub import HubError
 
     hub = _hub_for(cfg)
+    kind = getattr(args, "kind", "models")
     print(f"downloading {args.repo}"
           + (f" [{args.variant}]" if args.variant else "")
-          + f" -> {hub.base_dir()}")
+          + f" -> {hub.kind_base(kind)}")
     try:
         job = hub.download_sync(args.repo, args.variant,
-                                progress_cb=lambda d: None)
+                                progress_cb=lambda d: None, kind=kind)
     except HubError as e:  # download_sync doesn't raise; belt & braces
         print(f"hub error: {e}", file=sys.stderr)
         return 1
@@ -2849,13 +2865,14 @@ def cmd_hub_list(args: argparse.Namespace) -> int:
     _setup_logging(args.verbose, args.config)
     cfg = load_config(args.config)
     hub = _hub_for(cfg)
-    items = hub.installed()
-    print(f"models folder: {hub.base_dir()}")
+    kind = getattr(args, "kind", "models")
+    items = hub.installed(kind)
+    print(f"{kind} folder: {hub.kind_base(kind)}")
     if not items:
         print("nothing downloaded via the hub yet — try `sable hub search`")
         return 0
     for m in items:
-        quants = ",".join(m["quants"][:4]) or "full"
+        quants = ",".join((m.get("quants") or [])[:4]) or "full"
         print(f"{m['repo_id']:<55} {_fmt_bytes(m['size_bytes']):>9}  {quants}")
     return 0
 
@@ -2866,7 +2883,8 @@ def cmd_hub_delete(args: argparse.Namespace) -> int:
     from .core.modelhub import HubError
 
     try:
-        out = _hub_for(cfg).delete(args.repo)
+        out = _hub_for(cfg).delete(args.repo,
+                                   kind=getattr(args, "kind", "models"))
     except HubError as e:
         print(f"hub error: {e}", file=sys.stderr)
         return 1

@@ -30,7 +30,7 @@ import options from "./js/panels/options.js";
 const NAV_GROUPS = [
   ["Loop", [["overview", "Overview", overview], ["chat", "Chat", chat]]],
   ["Serving", [["serve", "Serve", serve], ["models", "Models", models],
-    ["hub", "Model Hub", hub]]],
+    ["hub", "Resource Hub", hub]]],
   ["Data", [["traces", "Traces", traces], ["datasets", "Datasets", datasets]]],
   ["Training", [["easy", "Easy", easy], ["train", "Train", train],
     ["iterate", "Iterate", iterate],

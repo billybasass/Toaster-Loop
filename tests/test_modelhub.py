@@ -36,6 +36,15 @@ SEARCH_RESULT = [
     {"id": "org/Plain", "downloads": 5, "likes": 0,
      "lastModified": "", "tags": ["safetensors"]},
 ]
+DATASET_RESULT = [
+    {"id": "testds/Test-Dataset", "downloads": 10, "likes": 2,
+     "lastModified": "2026-04-01T00:00:00.000Z", "tags": ["size_categories:n<1K"]},
+]
+SPACE_RESULT = [
+    {"id": "testspace/mcp-weather", "likes": 42,
+     "createdAt": "2026-03-01T00:00:00.000Z", "sdk": "docker",
+     "tags": ["mcp", "mcp-server"]},
+]
 
 
 class _FakeHubHandler(BaseHTTPRequestHandler):
@@ -58,6 +67,59 @@ class _FakeHubHandler(BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         if p == "/api/models":
             self._json(SEARCH_RESULT)
+        elif p == "/api/datasets":
+            self._json(DATASET_RESULT)
+        elif p == "/api/spaces":
+            self._json(SPACE_RESULT)
+        elif p == "/api/datasets/testds/Test-Dataset":
+            self._json({
+                "id": "testds/Test-Dataset", "sha": "ds-sha",
+                "author": "testds", "downloads": 10, "likes": 2,
+                "lastModified": "2026-04-01T00:00:00.000Z",
+                "cardData": {"license": "cc-by-4.0"},
+                "siblings": [
+                    {"rfilename": "train.jsonl", "size": len(FILE_A)},
+                    {"rfilename": "README.md", "size": 9}],
+            })
+        elif p.startswith("/datasets/testds/Test-Dataset/resolve/"):
+            rel = p.split("/resolve/")[1].split("/", 1)[1]
+            data = FILE_A if rel == "train.jsonl" else b"# ds card"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        elif p == "/datasets/testds/Test-Dataset/raw/main/README.md":
+            body = b"# Test dataset\ncorpus for tests\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif p == "/api/spaces/testspace/mcp-weather":
+            self._json({
+                "id": "testspace/mcp-weather", "sha": "sp-sha",
+                "author": "testspace", "likes": 42,
+                "createdAt": "2026-03-01T00:00:00.000Z",
+                "sdk": "docker", "tags": ["mcp", "mcp-server"],
+                "cardData": {"license": "mit"},
+                "siblings": [
+                    {"rfilename": "app.py", "size": 3},
+                    {"rfilename": "Dockerfile", "size": len(FILE_A)}],
+            })
+        elif p.startswith("/spaces/testspace/mcp-weather/resolve/"):
+            rel = p.split("/resolve/")[1].split("/", 1)[1]
+            data = b"py\n" if rel == "app.py" else FILE_A
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        elif p == "/spaces/testspace/mcp-weather/raw/main/README.md":
+            body = b"# mcp-weather\nA weather MCP server.\n"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif p == "/testorg/Test-GGUF/raw/main/README.md":
             body = b"---\nlicense: apache-2.0\n---\n# Test card\nHello **world**\n"
             self.send_response(200)
@@ -141,7 +203,9 @@ def hub_server(monkeypatch, tmp_path):
 
 @pytest.fixture()
 def hub(tmp_path, hub_server):
-    return ModelHub(models_dir=str(tmp_path / "models"))
+    # home matters: datasets/spaces roots live under <home>/hub.
+    return ModelHub(models_dir=str(tmp_path / "models"),
+                    home=tmp_path / "home")
 
 
 # ---------------------------------------------------------------- validation
@@ -398,9 +462,11 @@ def test_hub_image_proxy_and_card_image(hub_server, hub):
     data, ctype = fetch_image(repo_id="testorg/Test-GGUF", path="a.png")
     assert ctype == "image/png" and data
 
-    # Absolute URLs: allow-listed hosts only.
+    # Absolute URLs: https + public hosts only (SSRF screen, no network).
     with pytest.raises(_HE):
-        fetch_image(url="https://evil.example.com/x.png")
+        fetch_image(url="https://127.0.0.1:9/x.png")
+    with pytest.raises(_HE):
+        fetch_image(url="http://cdn.example.com/x.png")
     with pytest.raises(_HE):
         fetch_image(repo_id="testorg/Test-GGUF", path="../secrets.png")
 
@@ -414,8 +480,13 @@ def test_dashboard_hub_image_route(app, hub_server):
     r = app.handle("GET", "/api/hub/image",
                    query={"repo": "testorg/Test-GGUF", "path": "a.png"})
     assert r.status == 200 and r.raw and r.content_type == "image/png"
+    # Private/loopback targets stay blocked (SSRF screen); arbitrary public
+    # https hosts are now allowed so card art on third-party CDNs renders.
     r = app.handle("GET", "/api/hub/image",
-                   query={"url": "https://evil.example.com/x.png"})
+                   query={"url": "https://127.0.0.1:9/x.png"})
+    assert r.status == 400
+    r = app.handle("GET", "/api/hub/image",
+                   query={"url": "http://example.com/x.png"})  # not https
     assert r.status == 400
 
 
@@ -426,3 +497,232 @@ def test_dashboard_hub_errors(app):
     assert r.status in (400, 404)
     r = app.handle("GET", "/api/hub/downloads/does-not-exist")
     assert r.status == 400
+
+
+# ------------------------------------------------------------- kinds: datasets
+
+def test_normalize_kind():
+    from sable.core.modelhub import normalize_kind
+
+    assert normalize_kind("") == "models"
+    assert normalize_kind("model") == "models"
+    assert normalize_kind("dataset") == "datasets"
+    assert normalize_kind("mcp") == "spaces"      # MCP servers live in Spaces
+    with pytest.raises(HubError):
+        normalize_kind("widgets")
+
+
+def test_search_datasets_and_spaces(hub_server, hub):
+    ds = hub.search("corpus", kind="datasets")
+    assert ds[0]["repo_id"] == "testds/Test-Dataset"
+    assert ds[0]["kind"] == "datasets"
+
+    sp = hub.search("", kind="spaces")
+    assert sp[0]["repo_id"] == "testspace/mcp-weather"
+    assert sp[0]["sdk"] == "docker"
+    # Spaces have no download counter; likes still surface.
+    assert sp[0]["likes"] == 42
+
+
+def test_dataset_detail_and_download(hub_server, hub, tmp_path):
+    d = hub.detail("testds/Test-Dataset", kind="datasets")
+    assert d["kind"] == "datasets"
+    assert d["variants"][0]["variant"] == "full"
+    assert "corpus for tests" in d["readme"]
+
+    job = hub.download_sync("testds/Test-Dataset", kind="datasets")
+    assert job.state == "done", job.error
+    # Datasets land under <home>/hub/datasets, never the models dir.
+    ds_base = hub.kind_base("datasets")
+    assert ds_base == tmp_path / "home" / "hub" / "datasets"
+    snap = ds_base / "datasets--testds--Test-Dataset" / "snapshots" / "ds-sha"
+    assert (snap / "train.jsonl").read_bytes() == FILE_A
+    # Model discovery inventory must not see datasets.
+    assert hub.installed("models") == []
+    inst = hub.installed("datasets")
+    assert inst and inst[0]["repo_id"] == "testds/Test-Dataset"
+
+    out = hub.delete("testds/Test-Dataset", kind="datasets")
+    assert out["freed_bytes"] > 0
+    assert hub.installed("datasets") == []
+
+
+def test_mcp_space_detail_and_download(hub_server, hub):
+    d = hub.detail("testspace/mcp-weather", kind="spaces")
+    assert d["kind"] == "spaces" and d["sdk"] == "docker"
+    assert "weather MCP server" in d["readme"]
+
+    job = hub.download_sync("testspace/mcp-weather", kind="spaces")
+    assert job.state == "done", job.error
+    snap = (hub.kind_base("spaces") / "spaces--testspace--mcp-weather"
+            / "snapshots" / "sp-sha")
+    assert (snap / "Dockerfile").read_bytes() == FILE_A
+
+    # installed_all spans every kind.
+    rows = hub.installed_all()
+    assert {r["kind"] for r in rows} == {"spaces"}
+
+
+def test_dashboard_hub_kind_routes(app):
+    r = app.handle("GET", "/api/hub/search", query={"q": "x", "kind": "datasets"})
+    assert r.status == 200
+    assert r.body["results"][0]["repo_id"] == "testds/Test-Dataset"
+
+    r = app.handle("GET", "/api/hub/feed", query={"kind": "spaces"})
+    assert r.status == 200
+    assert r.body["models"][0]["repo_id"] == "testspace/mcp-weather"
+
+    r = app.handle("GET", "/api/hub/detail",
+                   query={"repo": "testds/Test-Dataset", "kind": "datasets"})
+    assert r.status == 200 and r.body["kind"] == "datasets"
+
+    r = app.handle("POST", "/api/hub/download",
+                   body={"repo": "testds/Test-Dataset", "kind": "datasets"})
+    assert r.status == 202
+    import time
+    jid = r.body["job_id"]
+    j = app.handle("GET", f"/api/hub/downloads/{jid}")
+    for _ in range(100):
+        if j.body["state"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+        j = app.handle("GET", f"/api/hub/downloads/{jid}")
+    assert j.body["state"] == "done", j.body["error"]
+
+    r = app.handle("POST", "/api/hub/delete",
+                   body={"repo": "testds/Test-Dataset", "kind": "datasets"})
+    assert r.status == 200 and r.body["freed_bytes"] > 0
+
+    r = app.handle("GET", "/api/hub/search", query={"kind": "bogus"})
+    assert r.status == 400
+
+
+# ------------------------------------------------------------- PulseMCP dir
+
+def test_mcp_dir_requires_key(monkeypatch):
+    from sable.core.modelhub import HubError as _HE, search_mcp_dir
+
+    monkeypatch.delenv("PULSEMCP_API_KEY", raising=False)
+    with pytest.raises(_HE, match="PULSEMCP_API_KEY"):
+        search_mcp_dir("github")
+
+
+def test_mcp_dir_search_and_detail(monkeypatch):
+    import httpx
+
+    from sable.core.modelhub import mcp_dir_detail, search_mcp_dir
+
+    monkeypatch.setenv("PULSEMCP_API_KEY", "test-key")
+    seen = {}
+
+    def fake_get(url, params=None, headers=None, **kw):
+        seen["url"] = url
+        seen["params"] = dict(params or {})
+        seen["key"] = (headers or {}).get("X-API-Key")
+
+        class R:
+            status_code = 200
+
+            def json(self_inner):
+                if url.endswith("/servers"):
+                    return {"data": [{"id": "github", "name": "GitHub",
+                                      "author": "github",
+                                      "description": "repos & PRs",
+                                      "downloads": 1234,
+                                      "github_stars": 900,
+                                      "categories": ["Development"]},
+                                     ]}
+                return {"data": {"id": "github", "name": "GitHub",
+                                 "readme": "# GitHub MCP",
+                                 "transports": {"stdio": True,
+                                                "streamable-http": False}}}
+        return R()
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    rows = search_mcp_dir("git hub", limit=10)
+    assert seen["key"] == "test-key"
+    assert seen["params"]["search_query"] == "git hub"
+    assert rows[0]["kind"] == "mcp-dir"
+    assert rows[0]["url"].endswith("/servers/github")
+
+    d = mcp_dir_detail("github")
+    assert d["readme"] == "# GitHub MCP"
+    assert d["transports"] == ["stdio"]
+    with pytest.raises(modelhub.HubError):
+        mcp_dir_detail("../etc/passwd")
+
+
+def test_dashboard_mcp_dir_route(app, monkeypatch):
+    # PulseMCP source without a key -> 400 with the signup hint; the default
+    # registry source no longer touches that key at all.
+    monkeypatch.delenv("PULSEMCP_API_KEY", raising=False)
+    r = app.handle("GET", "/api/hub/mcp_dir",
+                   query={"q": "x", "source": "pulsemcp"})
+    assert r.status == 400 and "PULSEMCP_API_KEY" in r.body["error"]["message"]
+
+
+def test_mcp_registry_search_and_detail(monkeypatch):
+    import httpx
+
+    from sable.core.modelhub import mcp_registry_detail, search_mcp_registry
+
+    def fake_get(url, params=None, headers=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self_inner):
+                if url.endswith("/servers"):
+                    return {"servers": [
+                        {"server": {"name": "io.github.foo/weather",
+                                    "title": "Weather",
+                                    "description": "forecast server",
+                                    "version": "1.2.0",
+                                    "repository": {"url": "https://github.com/foo/weather"},
+                                    "remotes": [{"type": "streamable-http",
+                                                 "url": "https://x/mcp"}]}},
+                        # older non-latest duplicate must be dropped
+                        {"server": {"name": "io.github.bar/old",
+                                    "version": "1.0.0"},
+                         "_meta": {"io.modelcontextprotocol.registry/official":
+                                   {"isLatest": False}}},
+                    ]}
+                return {"server": {"name": "io.github.foo/weather",
+                                   "description": "forecast server",
+                                   "version": "1.2.0",
+                                   "packageVersions": [
+                                       {"registryType": "npm",
+                                        "identifier": "@foo/weather"}],
+                                   "repository": {
+                                       "url": "https://github.com/foo/weather"}}}
+        return R()
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    rows = search_mcp_registry("weather", limit=10)
+    assert len(rows) == 1  # non-latest row filtered
+    assert rows[0]["kind"] == "mcp-registry"
+    assert rows[0]["github_url"] == "https://github.com/foo/weather"
+    assert rows[0]["transports"] == ["streamable-http"]
+
+    d = mcp_registry_detail("io.github.foo/weather")
+    assert "@foo/weather" in d["readme"]
+    with pytest.raises(modelhub.HubError):
+        mcp_registry_detail("../etc/passwd")
+
+
+def test_dashboard_mcp_registry_route(app, monkeypatch):
+    import httpx
+
+    def fake_get(url, params=None, headers=None, **kw):
+        class R:
+            status_code = 200
+
+            def json(self_inner):
+                return {"servers": [{"server": {
+                    "name": "io.github.foo/weather", "version": "1.0",
+                    "description": "d"}}]}
+        return R()
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    r = app.handle("GET", "/api/hub/mcp_dir", query={"q": "weather"})
+    assert r.status == 200
+    assert r.body["results"][0]["repo_id"] == "io.github.foo/weather"
