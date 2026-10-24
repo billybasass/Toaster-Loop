@@ -1159,6 +1159,25 @@ export default {
     async function runAgent(promptText, imgs = []) {
       const session = viewSession;   // guards the tail against thread switches
       setRunning(true);
+      // A brand-new thread gets its id BEFORE the run starts, and the thread
+      // file is created immediately (fire-and-forget initial save). The old
+      // flow assigned ids only when the finished run was saved, so a fresh
+      // chat existed nowhere but in this page's memory mid-run: navigating
+      // away left no `thread` on the run (the server persisted nothing for
+      // thread-less runs) and no last-thread to reopen — the thread simply
+      // vanished while the agent kept executing. With the id fixed up front:
+      // the run carries it, the worker persists the transcript when done,
+      // and returning to chat reopens the thread and re-attaches live.
+      let freshThread = false;
+      if (!threadId) {
+        threadId = newId();
+        freshThread = true;
+        sset(skey("ui", "", "last-thread"), threadId);
+        // Awaited: the file must exist before the run can persist into it,
+        // and a late-resolving empty save could otherwise clobber a very
+        // fast worker-persisted transcript.
+        await saveThread(profileSel.value || null);  // <home>/chat/<id>.json
+      }
       messages.push({ role: "user", content: promptText,
         ...(imgs.length ? { images: imgs.map((i) => i.name) } : {}) });
       renderMsgs();
@@ -1322,6 +1341,18 @@ export default {
         // in-memory view as-is; returning to chat reloads from disk.
       } else if (errored && !content && !toolRecs.length) {
         messages.pop(); // dangling user msg
+        if (freshThread) {
+          // Nothing ever ran on the thread we just created for this turn —
+          // remove the empty file so a dead "0 msg" thread does not linger
+          // in the list, and fall back to a clean draft state.
+          try {
+            await api("/api/chat/threads/" + encodeURIComponent(threadId),
+              { method: "DELETE" });
+          } catch { /* best effort */ }
+          threadId = null;
+          sdel(skey("ui", "", "last-thread"));
+          threadWasProjectless = true;
+        }
       } else if (!errored) {
         saveThread(profileSel.value || null);
       } else {
