@@ -32,7 +32,9 @@ Endpoint catalog:
   POST   /api/proxy/chat                    raw passthrough (SSE when stream=true)
    POST   /api/chat/stream                   agent run -> SSE event protocol (stream)
    POST   /api/chat/cancel                   {run_id}
-   GET    /api/chat/runs                     in-flight runs (adopt-orphans)  GET    /api/chat/threads                  thread summaries
+   GET    /api/chat/runs                     in-flight runs (adopt-orphans)
+   GET    /api/chat/runs/<run_id>/stream     re-attach to a run's live stream
+   GET    /api/chat/threads                  thread summaries
   GET    /api/chat/threads/<id>             full thread JSON
   PUT    /api/chat/threads/<id>             upsert thread JSON
   DELETE /api/chat/threads/<id>             delete thread
@@ -170,6 +172,12 @@ logger = logging.getLogger("sable.dashboard")
 DEFAULT_JOB_LOG_TAIL = 40
 ROW_PREVIEW_CHARS = 800          # per-string truncation cap in row previews
 SSE_HEARTBEAT_S = 15.0
+#: Replay-buffer ceiling per chat run (frames). A client that navigates away
+#: no longer kills the run; frames keep accumulating so a later re-attach
+#: (GET /api/chat/runs/<id>/stream) can replay it live. On overflow the
+#: oldest frames are dropped — only the earliest deltas of a runaway stream
+#: are lost to a re-attaching viewer; the persisted transcript is unaffected.
+MAX_CHAT_RUN_FRAMES = 5000
 ITERATE_RUNS_DIRNAME = "iterate_runs"
 CHAT_DIRNAME = "chat"
 PROJECTS_DIRNAME = "projects"
@@ -507,6 +515,48 @@ def _compile_route(pattern: str) -> "re.Pattern[str]":
 Route = Tuple[str, "re.Pattern[str]", str]  # (method, regex, handler attr name)
 
 
+def _follow_chat_run(run: Dict[str, Any]) -> Iterator[str]:
+    """Reader over a chat run's frame buffer, from a fresh cursor.
+
+    Replays every buffered frame (the oldest may have been dropped past
+    MAX_CHAT_RUN_FRAMES), then blocks on the run's condition variable until
+    new frames arrive or the run finishes. Generators dropped mid-follow
+    (client navigated away / broken pipe) simply stop reading — the run and
+    its buffer are untouched, so another reader can attach later from zero.
+
+    Entries without a live buffer (seeded stubs in tests, legacy shapes) end
+    the stream immediately.
+    """
+    cond = run.get("cond")
+    frames = run.get("frames")
+    if not isinstance(cond, threading.Condition) or frames is None:
+        return
+    cursor = 0
+    idle_s = 0.0
+    while True:
+        with cond:
+            base = int(run.get("dropped") or 0)
+            if cursor < base:      # buffer rolled over: skip what we missed
+                cursor = base
+            batch = list(frames[cursor - base:])
+            if batch:
+                cursor += len(batch)
+            finished = bool(run.get("done"))
+            if not batch and not finished:
+                cond.wait(timeout=1.0)
+                idle_s += 1.0
+        for frame in batch:
+            yield frame
+        if batch:
+            idle_s = 0.0
+        elif not finished and idle_s >= SSE_HEARTBEAT_S:
+            idle_s = 0.0
+            yield ": ping\n\n"    # keep the connection warm on quiet runs
+        # Exit only after the final frames (run.done / run.error) were read.
+        if finished and not batch:
+            return
+
+
 class DashboardApp:
     """JSON API over the sable home. One instance per server process."""
 
@@ -643,6 +693,7 @@ class DashboardApp:
         ("POST", "/api/chat/stream", "h_chat_stream"),
         ("POST", "/api/chat/cancel", "h_chat_cancel"),
         ("GET", "/api/chat/runs", "h_chat_runs"),
+        ("GET", "/api/chat/runs/<run_id>/stream", "h_chat_run_stream"),
         ("GET", "/api/chat/threads", "h_threads_list"),
         ("GET", "/api/chat/threads/<thread_id>", "h_thread_get"),
         ("PUT", "/api/chat/threads/<thread_id>", "h_thread_put"),
@@ -3353,42 +3404,63 @@ class DashboardApp:
                                  project=project_id, profile=rec_profile)
 
         def gen() -> Iterator[str]:
-            import queue as _queue
-
             # First iteration = the stream was admitted: register now so a
             # rejected (never-started) stream leaves no phantom run behind.
+            # Run lifecycle: the registry entry owns a frame buffer + a
+            # condition variable. The worker thread publishes every SSE frame
+            # into it; readers (this generator, or a panel re-attaching via
+            # GET /api/chat/runs/<id>/stream) follow from any cursor and may
+            # come and go freely — a reader leaving NEVER stops the run and
+            # never marks it done. Only the worker marks done, after it has
+            # persisted the complete transcript.
+            run: Dict[str, Any] = {
+                "cancel": cancel, "done": False, "thread": thread_id,
+                "model": model, "profile": prof.get("name") if prof else None,
+                # Re-attaching panels render the in-flight user turn from the
+                # registry (the transcript is only persisted when the run
+                # ends), so the prompt travels with the run record.
+                "prompt": prompt,
+                "status": "running",
+                "frames": [], "dropped": 0, "cond": threading.Condition(),
+            }
             with self._chat_runs_lock:
-                self._chat_runs[run_id] = {
-                    "cancel": cancel, "done": False, "thread": thread_id,
-                    "model": model, "profile": prof.get("name") if prof else None,
-                    "status": "running",
-                }
-            t0 = time.monotonic()
-            yield sse_frame("run.started", {"run_id": run_id, "model": model,
-                                            "profile": prof.get("name") if prof
-                                            else None,
-                                            # Context tracker: the window the
-                                            # chat UI renders usage against.
-                                            "context_window": ctx_window})
-            if cancel.is_set():
-                yield sse_frame("run.error", {"message": "cancelled"})
-                return
+                self._chat_runs[run_id] = run
 
-            # reference-style live streaming: the runner executes on a
-            # worker thread and forwards token/reasoning/tool events through
-            # this queue while it runs; the generator drains it so deltas
-            # reach the browser as they are generated instead of after the
-            # whole run. Runners without streaming support (test stubs, CLI
-            # shims) produce no live events — we synthesize the protocol from
-            # the returned message list afterwards, exactly like before.
-            evq: "_queue.Queue[Any]" = _queue.Queue()
+            def _emit(frame: str) -> None:
+                with run["cond"]:
+                    frames = run["frames"]
+                    frames.append(frame)
+                    if len(frames) > MAX_CHAT_RUN_FRAMES:
+                        frames.pop(0)
+                        run["dropped"] += 1
+                    run["cond"].notify_all()
+
+            def _finish() -> None:
+                with run["cond"]:
+                    if run.get("status") != "cancelling":
+                        run["status"] = "completed"
+                    run["done"] = True
+                    run["cond"].notify_all()
+
+            t0 = time.monotonic()
+            _emit(sse_frame("run.started",
+                            {"run_id": run_id, "model": model,
+                             "profile": prof.get("name") if prof
+                             else None,
+                             # Context tracker: the window the
+                             # chat UI renders usage against.
+                             "context_window": ctx_window}))
+
+            # reference-style live streaming: the runner executes on a worker
+            # thread and forwards token/reasoning/tool events through _sink.
+            # Navigation resilience: the whole turn is accumulated here (the
+            # sink runs on the worker thread, so no locking is needed) so the
+            # transcript can be persisted server-side when the run finishes —
+            # regardless of who is still reading the stream. Runners without
+            # streaming support (test stubs, CLI shims) produce no live
+            # events; the worker synthesizes the protocol from the returned
+            # message list, exactly like before.
             live = {"n": 0}
-            # Navigation resilience: accumulate the whole turn here (the sink
-            # runs on THIS worker thread, so no locking is needed) so the
-            # transcript can be persisted server-side when the run finishes.
-            # Previously persistence was client-only: navigating away aborted
-            # the SSE stream, the panel saved only its partial buffer, and the
-            # finished reply was never written to the thread at all.
             acc: Dict[str, Any] = {"text": "", "reasoning": "", "tools": []}
 
             def _sink(kind: str, data: Dict[str, Any]) -> None:
@@ -3418,10 +3490,17 @@ class DashboardApp:
                                 break
                 except Exception:  # accumulation must never kill the run
                     pass
-                evq.put(("event", kind, data))
+                _emit(sse_frame(kind, data))
 
             def _worker() -> None:
                 try:
+                    runner = _make_runner()
+                    # Attach the live sink (plain attribute on the built-in
+                    # runner; harmless for stubs that never call it).
+                    try:
+                        runner.on_event = _sink
+                    except Exception:
+                        pass
                     res = (runner.run(prompt, history=history,
                                       previous_summary=previous_summary)
                            if previous_summary else
@@ -3444,9 +3523,63 @@ class DashboardApp:
                             logging.getLogger("sable.dashboard").debug(
                                 "chat transcript persist failed for thread %s",
                                 thread_id, exc_info=True)
-                    evq.put(("done", res))
-                except Exception as e:  # surfaced as run.error by the drainer
-                    evq.put(("error", e))
+                    if live["n"] == 0:
+                        # Runner without streaming support (stubs/CLI shims):
+                        # synthesize the event protocol from the message list.
+                        for m in res.messages:
+                            role = m.get("role")
+                            if role == "assistant":
+                                content = m.get("content")
+                                if isinstance(content, str) and content:
+                                    _emit(sse_frame("message.delta",
+                                                    {"text": content}))
+                                for tc in (m.get("tool_calls") or []):
+                                    fn = tc.get("function") or {}
+                                    try:
+                                        args = json.loads(
+                                            fn.get("arguments") or "{}")
+                                    except json.JSONDecodeError:
+                                        args = {"raw": fn.get("arguments")}
+                                    _emit(sse_frame("tool.call", {
+                                        "id": tc.get("id", ""),
+                                        "name": fn.get("name", ""),
+                                        "args": args}))
+                            elif role == "tool":
+                                content = m.get("content")
+                                if not isinstance(content, str):
+                                    content = json.dumps(content, default=str)
+                                preview = content[:8000]
+                                _emit(sse_frame("tool.result", {
+                                    "id": m.get("tool_call_id", ""),
+                                    "name": m.get("name"),
+                                    "ok": not _looks_like_error(content),
+                                    "preview": preview,
+                                    "truncated": len(content) > 8000,
+                                }))
+                    _emit(sse_frame("turn.done",
+                                    {"completed": res.completed}))
+                    _emit(sse_frame("run.done", {
+                        "trace_id": res.trace_id,
+                        "tokens_in": res.tokens_in,
+                        "tokens_out": res.tokens_out,
+                        "duration_s": round(time.monotonic() - t0, 3),
+                        "backend": res.backend,
+                        # Why a controlled stop happened ("max_iterations",
+                        # "guardrail_halt:<code>", "backend_error:<reason>");
+                        # null on success. The chat footer renders this so the
+                        # user never has to guess why the agent stopped.
+                        "failure_reason": res.failure_reason,
+                        # Backlog #6: rolling compaction summary (None when no
+                        # compression ran); the client persists it with the thread.
+                        "summary": res.summary,
+                        # Context tracker: final window usage for the footer.
+                        "context_window": ctx_window,
+                    }))
+                except Exception as e:  # surfaced to every reader as run.error
+                    _emit(sse_frame("run.error", {
+                        "message": f"{type(e).__name__}: {e}"}))
+                finally:
+                    _finish()
 
             def _make_runner():
                 from ..core.agent_runner import create_runner
@@ -3500,100 +3633,29 @@ class DashboardApp:
                                       # boundaries and stops cleanly with
                                       # failure_reason="cancelled".
                                       cancel_event=cancel)
-            try:
-                runner = _make_runner()
-                # Attach the live sink (plain attribute on the built-in
-                # runner; harmless for stubs that never call it).
-                try:
-                    runner.on_event = _sink
-                except Exception:
-                    pass
-            except Exception as e:
-                yield sse_frame("run.error", {"message": f"{type(e).__name__}: {e}"})
-                self._chat_runs[run_id]["done"] = True
-                self._chat_runs[run_id]["status"] = "completed"
-                return
-
+            # The worker owns the run's whole lifecycle (create -> stream ->
+            # persist -> finish). This generator is ONLY a reader: dropping it
+            # (client navigated away, broken pipe) never affects the run.
             threading.Thread(target=_worker, daemon=True).start()
-            res = None
-            run_exc: Optional[Exception] = None
-            try:
-                while True:
-                    try:
-                        item = evq.get(timeout=0.25)
-                    except _queue.Empty:
-                        continue
-                    tag = item[0]
-                    if tag == "event":
-                        yield sse_frame(item[1], item[2])
-                    elif tag == "done":
-                        res = item[1]
-                        break
-                    else:  # ("error", exc)
-                        run_exc = item[1]
-                        break
-
-                if run_exc is not None:
-                    yield sse_frame("run.error", {
-                        "message": f"{type(run_exc).__name__}: {run_exc}"})
-                elif res is not None:
-                    if live["n"] == 0:
-                        # Runner without streaming support (stubs/CLI shims):
-                        # synthesize the event protocol from the message list.
-                        for m in res.messages:
-                            role = m.get("role")
-                            if role == "assistant":
-                                content = m.get("content")
-                                if isinstance(content, str) and content:
-                                    yield sse_frame("message.delta",
-                                                    {"text": content})
-                                for tc in (m.get("tool_calls") or []):
-                                    fn = tc.get("function") or {}
-                                    try:
-                                        args = json.loads(
-                                            fn.get("arguments") or "{}")
-                                    except json.JSONDecodeError:
-                                        args = {"raw": fn.get("arguments")}
-                                    yield sse_frame("tool.call", {
-                                        "id": tc.get("id", ""),
-                                        "name": fn.get("name", ""),
-                                        "args": args})
-                            elif role == "tool":
-                                content = m.get("content")
-                                if not isinstance(content, str):
-                                    content = json.dumps(content, default=str)
-                                preview = content[:8000]
-                                yield sse_frame("tool.result", {
-                                    "id": m.get("tool_call_id", ""),
-                                    "name": m.get("name"),
-                                    "ok": not _looks_like_error(content),
-                                    "preview": preview,
-                                    "truncated": len(content) > 8000,
-                                })
-                    yield sse_frame("turn.done", {"completed": res.completed})
-                    yield sse_frame("run.done", {
-                        "trace_id": res.trace_id,
-                        "tokens_in": res.tokens_in,
-                        "tokens_out": res.tokens_out,
-                        "duration_s": round(time.monotonic() - t0, 3),
-                        "backend": res.backend,
-                        # Why a controlled stop happened ("max_iterations",
-                        # "guardrail_halt:<code>", "backend_error:<reason>");
-                        # null on success. The chat footer renders this so the
-                        # user never has to guess why the agent stopped.
-                        "failure_reason": res.failure_reason,
-                        # Backlog #6: rolling compaction summary (None when no
-                        # compression ran); the client persists it with the thread.
-                        "summary": res.summary,
-                        # Context tracker: final window usage for the footer.
-                        "context_window": ctx_window,
-                    })
-            finally:
-                self._chat_runs[run_id]["done"] = True
-                if self._chat_runs[run_id].get("status") != "cancelling":
-                    self._chat_runs[run_id]["status"] = "completed"
+            yield from _follow_chat_run(run)
 
         return ApiResponse(200, stream=gen())
+
+    def h_chat_run_stream(self, q: Dict[str, str], b: Dict[str, Any],
+                          run_id: str = "") -> ApiResponse:
+        """Re-attach to an in-flight chat run's live SSE stream.
+
+        The chat panel calls this when it reopens a thread whose run is still
+        executing (the user navigated away mid-run). The response replays the
+        frames buffered so far — the viewer sees everything produced while
+        nobody was watching — then follows live until the run finishes.
+        Multiple readers may follow one run concurrently; leaving again never
+        touches the run itself.
+        """
+        run = self._chat_runs.get(str(run_id or ""))
+        if run is None:
+            raise HttpError(404, f"no chat run {run_id}", code="no_such_run")
+        return ApiResponse(200, stream=_follow_chat_run(run))
 
     def h_chat_cancel(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         run_id = str(b.get("run_id", ""))
@@ -3625,6 +3687,9 @@ class DashboardApp:
                 "thread": v.get("thread"),
                 "model": v.get("model"),
                 "profile": v.get("profile"),
+                # The re-attaching panel renders the in-flight user turn from
+                # this (the transcript file only gets it when the run ends).
+                "prompt": v.get("prompt"),
                 "status": v.get("status", "running"),
             } for rid, v in self._chat_runs.items()
                     if not v.get("done")]

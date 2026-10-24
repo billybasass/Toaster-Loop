@@ -97,25 +97,8 @@ export function sseUrl(path) {
   return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(t);
 }
 
-/**
- * POST a JSON body and consume the SSE response stream. Callback signature:
- * onEvent(kind, data). Handles both our own `event:`/`data:` protocol and raw
- * OpenAI-style passthrough (kind defaults to "message"; "[DONE]" arrives as
- * {raw:"[DONE]"}). Throws ApiError on non-200 JSON error envelopes.
- */
-export async function streamSSE(path, body, onEvent, signal) {
-  let res = await fetch(path, {
-    method: "POST", headers: headers(), body: JSON.stringify(body), signal,
-  });
-  if (res.status === 401 && (await promptToken())) {
-    res = await fetch(path, {
-      method: "POST", headers: headers(), body: JSON.stringify(body), signal,
-    });
-  }
-  if (!res.ok) {
-    const text = await res.text();
-    parseEnvelope(text, res.status); // throws ApiError
-  }
+/** Consume an SSE response body, dispatching (kind, data) to onEvent. */
+async function consumeSSE(res, onEvent) {
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
@@ -140,4 +123,45 @@ export async function streamSSE(path, body, onEvent, signal) {
       }
     }
   }
+}
+
+/**
+ * POST a JSON body and consume the SSE response stream. Callback signature:
+ * onEvent(kind, data). Handles both our own `event:`/`data:` protocol and raw
+ * OpenAI-style passthrough (kind defaults to "message"; "[DONE]" arrives as
+ * {raw:"[DONE]"}). Throws ApiError on non-200 JSON error envelopes.
+ */
+export async function streamSSE(path, body, onEvent, signal) {
+  let res = await fetch(path, {
+    method: "POST", headers: headers(), body: JSON.stringify(body), signal,
+  });
+  if (res.status === 401 && (await promptToken())) {
+    res = await fetch(path, {
+      method: "POST", headers: headers(), body: JSON.stringify(body), signal,
+    });
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    parseEnvelope(text, res.status); // throws ApiError
+  }
+  await consumeSSE(res, onEvent);
+}
+
+/**
+ * GET an SSE stream (e.g. re-attaching to an in-flight chat run via
+ * /api/chat/runs/<id>/stream). Same frame protocol as streamSSE; throws
+ * ApiError on non-200 JSON error envelopes (404 no_such_run when the run
+  * finished and was pruned — callers should then reload their state).
+ */
+export async function streamSSEGet(path, onEvent, signal) {
+  const init = { method: "GET", headers: headers(false), signal };
+  let res = await fetch(path, init);
+  if (res.status === 401 && (await promptToken())) {
+    res = await fetch(path, { ...init, headers: headers(false) });
+  }
+  if (!res.ok) {
+    const text = await res.text();
+    parseEnvelope(text, res.status); // throws ApiError
+  }
+  await consumeSSE(res, onEvent);
 }

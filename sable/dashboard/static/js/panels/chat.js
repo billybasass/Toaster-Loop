@@ -5,7 +5,7 @@
 // Threads persist via /api/chat/threads*. All model output is rendered through
 // textContent / the sanitized markdown renderer — never innerHTML.
 
-import { api, streamSSE } from "../api.js";
+import { api, streamSSE, streamSSEGet } from "../api.js";
 import { bus } from "../bus.js";
 import { skey, sget, sset, sdel, janitorKeys } from "../state.js";
 import { el, toast, empty, confirmDialog, renderMarkdown, fmtNum } from "../ui.js";
@@ -35,15 +35,22 @@ export default {
     let activeProject = sget(skey("ui", "", "active-project")) || null;
     const collapsed = new Set(
       JSON.parse(sget(skey("ui", "", "collapsed-projects"), "[]")));
-    let running = false;
+    let running = false;         // a stream is attached in THIS view
     let runId = null;            // active agent run (for cancel)
     let abort = null;            // AbortController for the response stream
-    // Run lifecycle: an ADOPTED run is one that started in a previous panel
-    // instance (the user navigated away mid-run; the run kept executing on
-    // its worker thread). We have no live stream for it — just its run_id —
-    // so the Stop button works on it and a light poll watches for completion.
-    let adoptedRun = null;       // {runId, thread}
-    let adoptTimer = null;       // poll interval while adopted
+    // Run lifecycle: leaving the chat panel (or switching threads) only stops
+    // READING the stream — the run keeps executing on the server, which
+    // buffers every frame and persists the transcript itself. Coming back
+    // re-attaches to the live stream (GET /api/chat/runs/<id>/stream): the
+    // viewer sees everything produced while away, then follows live tokens.
+    // Different threads run independently: open one thread mid-run, switch
+    // to another and start a second agent — both keep going server-side.
+    let adoptedRun = null;       // {runId, thread} currently re-attached
+    let adoptTimer = null;       // legacy poll handle (cleared defensively)
+    // View generation: bumped on every thread switch / new thread so the
+    // async tail of an aborted run can detect that the user moved on and
+    // must not mutate the (now different) view's messages.
+    let viewSession = 0;
     const unsubs = [];
 
     function setActiveProject(id) {
@@ -566,7 +573,12 @@ export default {
     });
 
     function newThread() {
-      if (running) return toast("stop the current run first", "error");
+      // Switching away from a running thread is NOT stopping it: we drop the
+      // local stream reader only — the run keeps executing server-side and
+      // re-attaches when the thread is reopened. (The server enforces one
+      // run per thread; different threads may run concurrently.)
+      detachStream();
+      viewSession++;
       threadId = null;
       sdel(skey("ui", "", "last-thread")); // don't reopen a discarded draft
       threadWasProjectless = true; // fresh thread adopts the active project
@@ -575,6 +587,18 @@ export default {
       renderMsgs();
       renderThreadList();
       input.focus();
+    }
+
+    // Drop the local reader for whatever stream this view is attached to.
+    // The server-side run is untouched (its frames keep buffering and the
+    // worker persists the transcript when it finishes).
+    function detachStream() {
+      if (abort) abort.abort();          // stops READING only
+      if (adoptTimer) { clearInterval(adoptTimer); adoptTimer = null; }
+      adoptedRun = null;
+      runId = null;
+      setRunning(false);
+      hint.textContent = "";
     }
 
     async function fetchActiveRuns() {
@@ -588,33 +612,99 @@ export default {
       runId = null;
     }
 
-    // Adopt an orphaned in-flight run for the open thread: the Stop button
-    // reappears (pointing at the REAL run_id) and a poll watches for the run
-    // leaving the registry — the starting panel persists the thread when its
-    // stream ends, so a re-read after completion shows the full transcript.
-    function adoptRun(run, forThread) {
+    // Re-attach to a run that is still executing on the server (the user
+    // navigated away mid-run and came back). Streams every frame buffered
+    // so far — everything produced while nobody was watching — then follows
+    // live until run.done/run.error. The Stop button points at the real
+    // run_id. Leaving again just drops this reader; a 404 means the run
+    // finished and was pruned between listing and attaching -> reload.
+    async function attachRun(run, forThread) {
+      if (abort) abort.abort();
       if (adoptTimer) { clearInterval(adoptTimer); adoptTimer = null; }
       adoptedRun = { runId: run.run_id, thread: forThread };
       runId = run.run_id;
+      const session = viewSession;
       setRunning(true);
-      hint.textContent =
-        "run in progress — started before this view (Stop works)";
-      adoptTimer = setInterval(async () => {
-        const runs = await fetchActiveRuns();
-        if (!runs.some((r) => r.run_id === runId)) {
+      hint.textContent = "run in progress — started before this view";
+
+      // Replay the turn locally. The server persists the transcript only
+      // when the run ends, so render the prompt (registry carries it) plus
+      // a live streaming bubble fed by the frame replay.
+      if (run.prompt && !messages.some((m) => m.role === "user"
+          && m.content === run.prompt)) {
+        messages.push({ role: "user", content: run.prompt });
+        renderMsgs();
+      }
+      stick = true;
+      const bubble = streamingBubble();
+      msgHost.appendChild(bubble.node);
+      const cards = new Map(); // tool call id -> card
+
+      abort = new AbortController();
+      let ended = false;
+      try {
+        await streamSSEGet(
+          "/api/chat/runs/" + encodeURIComponent(run.run_id) + "/stream",
+          (kind, d) => {
+            if (kind === "run.started") {
+              ctxWindow = d.context_window || 0; renderCtxChip();
+            }
+            else if (kind === "message.delta") bubble.append(d.text || "");
+            else if (kind === "message.reset") bubble.reset(d.text || "");
+            else if (kind === "reasoning.delta") bubble.appendReasoning(d.text || "");
+            else if (kind === "context.usage") {
+              ctxUsed = d.prompt_tokens || ctxUsed; renderCtxChip();
+            }
+            else if (kind === "tool.call") {
+              const card = toolCard(d);
+              cards.set(d.id, card);
+              bubble.addCard(card.node);
+              scrollDown();
+            }
+            else if (kind === "tool.result") {
+              const entry = cards.get(d.id);
+              if (entry) entry.result(d);
+              scrollDown();
+            }
+            else if (kind === "run.done") {
+              ended = true;
+              if (!bubble.text() && !cards.size) bubble.node.remove();
+              else bubble.finish(runFooter(d)); // stop reason shows here too
+            }
+            else if (kind === "run.error") {
+              ended = true;
+              bubble.node.classList.add("errored");
+              if (!bubble.text()) bubble.append("⚠ " + (d.message || "error"));
+            }
+          }, abort.signal);
+      } catch (e) {
+        if (e.name === "AbortError") return;   // detached: the view moved on
+        if (e.code !== "no_such_run") toast(e.message, "error");
+        ended = true;  // run already gone: reload shows the final transcript
+      } finally {
+        if (session === viewSession) {
           clearAdopt();
           setRunning(false);
           hint.textContent = "";
-          // Small grace: the starting panel saves the thread a beat after
-          // its stream ends; give it a moment before re-reading.
-          setTimeout(() => { toast("the run finished — thread reloaded", "ok");
-                             openThread(forThread); }, 700);
         }
-      }, 3000);
+      }
+      // The run finished while we watched: the server persisted the complete
+      // transcript — reload so the canonical version replaces our replay.
+      if (session === viewSession && ended) openThread(forThread);
     }
 
     async function openThread(id) {
-      if (running) return toast("stop the current run first", "error");
+      // Already viewing this thread with a live stream attached: no-op (a
+      // re-fetch would wipe the streaming bubble mid-run). When NOT running,
+      // always fall through — attachRun calls openThread after the run ends
+      // to replace its replay with the persisted transcript.
+      if (id === threadId && running) return;
+      if (id !== threadId) {
+        // Switching threads mid-run: drop this view's reader. The run keeps
+        // going server-side and re-attaches when we come back to it.
+        detachStream();
+        viewSession++;
+      }
       try {
         const d = await api("/api/chat/threads/" + encodeURIComponent(id));
         threadId = id;
@@ -635,9 +725,9 @@ export default {
         renderMsgs();
         renderThreadList();
         // Run lifecycle: if this thread has an in-flight run (orphaned by a
-        // previous panel navigation), adopt it — Stop button reappears.
+        // previous navigation), re-attach to its live stream.
         for (const run of await fetchActiveRuns()) {
-          if (run.thread === id) { adoptRun(run, id); break; }
+          if (run.thread === id) { attachRun(run, id); break; }
         }
       } catch (e) { toast(e.message, "error"); }
     }
@@ -1067,6 +1157,7 @@ export default {
     }
 
     async function runAgent(promptText, imgs = []) {
+      const session = viewSession;   // guards the tail against thread switches
       setRunning(true);
       messages.push({ role: "user", content: promptText,
         ...(imgs.length ? { images: imgs.map((i) => i.name) } : {}) });
@@ -1169,22 +1260,38 @@ export default {
         }
         else if (e.code === "run_in_flight") {
           // Server-side single-flight won the race: a run is already in
-          // flight for this thread (another panel, or one we just lost
-          // track of). The starting panel persists the thread when its
-          // stream ends — reload after a beat to pick up the transcript
-          // and, if it's still going, adopt it (Stop button comes back).
+          // flight for this thread (another panel/tab, or one we just lost
+          // track of). Reload after a beat — openThread re-attaches to the
+          // live run (Stop button comes back, tokens keep streaming).
           conflicted = true;
+          const conflictThread = threadId;
           toast(e.message || "a run is already in flight for this thread",
             "info");
-          setTimeout(() => openThread(threadId), 700);
+          setTimeout(() => {
+            if (session === viewSession && conflictThread) {
+              detachStream();  // drop this dead attempt's state first
+              openThread(conflictThread);
+            }
+          }, 700);
         }
         else { errored = true; toast(String(e.message || e), "error"); }
       } finally {
-        runId = null;
-        abort = null;
         offDeleg();
-        setRunning(false);
+        // Only clear view state if nobody switched threads mid-stream:
+        // detachStream/attachRun already reset it (and may own the new
+        // abort/runId — clobbering those would break a live re-attach).
+        if (session === viewSession) {
+          runId = null;
+          abort = null;
+          setRunning(false);
+        }
       }
+
+      // The user switched threads / navigated away while this stream was
+      // aborted: the view now shows a different conversation. The run kept
+      // executing server-side and its transcript is persisted there — do not
+      // touch the new view's messages.
+      if (session !== viewSession) return;
 
       // Persist the WHOLE turn — reasoning, tool cards, footer — so reopening
       // the thread re-renders everything instead of only the final text. The
@@ -1332,10 +1439,11 @@ export default {
     return { destroy() {
       // Navigation is NOT cancellation: the run keeps executing on its
       // worker thread (by design — leaving the page shouldn't kill the work).
-      // abort only stops READING the stream; /api/chat/runs + adoption lets
-      // the next panel re-find the in-flight run and stop it for real.
-      if (abort) abort.abort();
-      if (adoptTimer) { clearInterval(adoptTimer); adoptTimer = null; }
+      // detachStream only stops READING; the server buffers every frame, so
+      // the next panel re-attaches via /api/chat/runs/<id>/stream and sees
+      // everything produced while away (and can Stop the real run).
+      detachStream();
+      viewSession++;   // invalidate any in-flight async tail for this view
       for (const u of unsubs) u();
     } };
   },
