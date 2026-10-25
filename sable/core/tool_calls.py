@@ -41,7 +41,7 @@ that is broken, not merely weak at function calling -- rewriting would
 paper over a real bug, so ALL passes, recovery included, refuse such text.
 
 Equivalence contract (WP8, verified by the drift-corpus gate ladder in
-``tests/test_tool_call_recovery.py``): :func:`parse_legacy` is the verbatim
+``tests/test_core.py``): :func:`parse_legacy` is the verbatim
 pre-WP8 recognizer; the new entry points run it FIRST and return its
 result untouched whenever it yields anything. Recovery therefore only ever
 adds calls for inputs that previously produced ``[]`` -- nothing that

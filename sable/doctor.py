@@ -9,7 +9,7 @@ writes face), RAM via ``/proc/meminfo`` MemAvailable, VRAM via a local
 assumed). Zero network: nothing here downloads or probes non-loopback hosts.
 
 Design for testability: every probe is an injectable callable / fixture text,
-so ``tests/test_doctor_wp7.py`` runs the full logic hermetically with tmp
+so ``tests/test_serving.py`` runs the full logic hermetically with tmp
 SABLE_HOME and monkeypatched disk/RAM probes — no subprocess needed. The
 CLI wrapper (``cli.cmd_doctor``) is thin.
 

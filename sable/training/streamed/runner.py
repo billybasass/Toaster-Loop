@@ -2,7 +2,7 @@
 
 WP10 step 2. Heavy imports (torch / transformers / safetensors) happen
 LAZILY inside functions only — this module lives on the training-extra seam
-alongside worker.py (tests/test_license_hygiene.py folds the streamed
+alongside worker.py (tests/test_hygiene.py folds the streamed
 package into that seam; importing it from the daemon would violate D-12,
 and nothing outside worker.py does). Top-level imports here are stdlib +
 the torch-free siblings (masking, gguf_lora), so ``sable.training.worker``

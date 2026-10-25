@@ -126,7 +126,7 @@ def percentile(sorted_vals: List[float], pct: float) -> Optional[float]:
     Public: dashboard/metrics.py imports this so exposition quantiles match
     the insights report exactly. core/agent_runner mirrors the one-line rank
     (core must not import store at module level — lazy-import-only direction)
-    and is pinned to it by the parity tests in test_insights.py.
+    and is pinned to it by the parity tests in test_dashboard.py.
     """
     if not sorted_vals:
         return None

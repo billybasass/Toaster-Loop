@@ -17,7 +17,7 @@ import json
 import re
 from typing import Tuple
 
-# Failure kinds ("" == not failed). Keep in sync with tests/test_failure_types.py.
+# Failure kinds ("" == not failed). Keep in sync with tests/test_core.py.
 KIND_NONE = "none"
 KIND_ERROR_TAG = "error_tag"          # content starts with "error"/"Error"
 KIND_TRACEBACK = "traceback"          # python traceback text

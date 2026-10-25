@@ -10,7 +10,7 @@ airllm reference tree (Apache-2.0): ``airllm/airllm/air_llm/airllm/
 airllm_lora.py`` (_StreamedModule, prefetch/evict layer streaming),
 ``.../lora_linear.py`` (PEFT-free LoRALinear) and ``.../chunked_ce.py``
 (chunked linear cross-entropy). Nothing here imports airllm (or any other
-reference project) — see tests/test_license_hygiene.py.
+reference project) — see tests/test_hygiene.py.
 
 Modules:
   streaming   (a) meta-device shell + per-layer weight streaming with a
@@ -25,7 +25,7 @@ Modules:
 Import boundary: this package is import-safe WITHOUT torch installed. Every
 torch / safetensors touch happens lazily inside functions (the training-extra
 seam approved for WP10 — the same policy worker.py lives under; see
-tests/test_license_hygiene.py). Classes that must subclass torch types are
+tests/test_hygiene.py). Classes that must subclass torch types are
 built by lazy factories and exposed via PEP 562 module ``__getattr__``.
 
 Modules added in steps 2–3:

@@ -6,7 +6,7 @@
 > [`experiments/wp11_specialization/`](../experiments/wp11_specialization/)
 > (outside the `sable` package by design — see "Not-wired seam" below) and
 > hermetic tests in
-> [`tests/test_wp11_specialization.py`](../tests/test_wp11_specialization.py).
+> [`tests/test_training.py`](../tests/test_training.py).
 
 ## Hypothesis
 
@@ -151,16 +151,16 @@ i.e. a materially more expensive experiment than this spike can justify.
 ```bash
 python -m experiments.wp11_specialization.run_experiment --replicates 13 \
     --out /tmp/wp11_report.json          # ~8 s, CPU, no network
-python -m pytest tests/test_wp11_specialization.py -q   # ~2 s
+python -m pytest tests/test_training.py -q   # ~2 s
 ```
 
 ## Not-wired seam (registration note)
 
 The spike lives in a top-level `experiments/` tree — **outside** the
-`sable` package — so `test_no_orphans.py`'s import graph and
-`test_license_hygiene.py`'s AST scan never see it, which is the deliberate
+`sable` package — so `test_hygiene.py`'s import graph and
+`test_hygiene.py`'s AST scan never see it, which is the deliberate
 not-wired seam (WP10-step-1 precedent, strengthened: no orphan-allowlist entry
-needed because the package can never reach it; `tests/test_wp11_specialization.py`
+needed because the package can never reach it; `tests/test_training.py`
 asserts both that `sable/research/` does not exist and that no banned
 D-12 name is imported anywhere in the spike). torch stays a lazy function-level
 import even inside the spike; `pyproject.toml` untouched.

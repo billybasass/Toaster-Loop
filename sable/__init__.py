@@ -5,7 +5,7 @@ training workers and GGUF export are all built in. External systems
 (any OpenAI-compatible server) are optional attach targets
 reached over HTTP only; no external agent or trainer framework is imported.
 The dependency boundary (docs/DECISIONS.md D-3) is enforced by
-tests/test_license_hygiene.py: no external agent or trainer packages, ever.
+tests/test_hygiene.py: no external agent or trainer packages, ever.
 """
 
 # Single source of truth: the installed distribution metadata (pyproject.toml).

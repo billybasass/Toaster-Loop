@@ -6,11 +6,11 @@
 > The text below is the step-1 record.
 
 Timeboxed mechanism spike in [`sable/training/streamed/`](../sable/training/streamed/)
-with tests in [`tests/test_streamed_lora_wp10.py`](../tests/test_streamed_lora_wp10.py).
+with tests in [`tests/test_training.py`](../tests/test_training.py).
 NOT wired into `worker.py` (Step 2, gated separately). All four mechanisms
 re-implemented inline; airllm (Apache-2.0) read as reference only — cited in
 module docstrings, never imported (D-12; the import allowlist in
-`test_license_hygiene.py` still passes and now also bans `airllm`-family names
+`test_hygiene.py` still passes and now also bans `airllm`-family names
 by construction).
 
 ## Machine reality (honesty per rule 5)

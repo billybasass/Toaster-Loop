@@ -16,7 +16,7 @@
 Everything is **re-implemented inline**; NEVER import Strata / airllm /
 kimi-k3-in-c / sparse_transformers (or any other reference project). Inspiration
 belongs in comments, imports never. Enforced by the import allowlist in
-[`tests/test_license_hygiene.py`](tests/test_license_hygiene.py) — it MUST keep
+[`tests/test_hygiene.py`](tests/test_hygiene.py) — it MUST keep
 passing. See [`docs/DECISIONS.md`](docs/DECISIONS.md) (D-3, D-12).
 
 ## Dependency policy
@@ -34,7 +34,7 @@ ruff check sable tests        # must report "All checks passed!"
 ```
 
 Hermetic-test conventions: tmp `SABLE_HOME`, injected probes / monkeypatched
-hardware readers (see [`tests/test_doctor_wp7.py`](tests/test_doctor_wp7.py)),
+hardware readers (see [`tests/test_serving.py`](tests/test_serving.py)),
 no subprocess-dependent unit tests, no network.
 
 ## Exit-code taxonomy
@@ -52,7 +52,7 @@ add the key to the dataclass field's documented section dict (`serve:`, `tools:`
 …), read it **leniently** (invalid values fall back to the default with a warning)
 or register mistypes in the WP2 validator sets so the consolidated report catches
 them, document it in [`config.example.yaml`](config.example.yaml), and keep the
-default byte-identical to pre-feature behavior. `test_config_strictness.py` must
+default byte-identical to pre-feature behavior. `test_core.py` must
 stay green (every valid config loads identically).
 
 ## Agent operating playbook

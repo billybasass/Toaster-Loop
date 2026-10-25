@@ -1,21 +1,114 @@
-# Adapted from PIASystem (MIT) docs/ORPHANED_FILES.md — orphan tracking as a test, not a doc.
-"""Import-graph hygiene: every module under sable/ must be reachable from a
-production entry point.
-
-Refactors strand helpers silently — a module whose last caller was deleted
-just sits there rotting. PIASystem tracked ~20 such modules in a document that
-nobody read; here it is a test instead. The graph is built statically: sources
-are parsed with ``ast`` (no module execution), covering absolute imports
-(``import sable.x.y`` / ``from sable.x import y``, where the imported name
-may be a submodule or an attribute) and relative imports
-(``from . import z`` / ``from ..core import w``).
-
-Anything genuinely dynamic (subprocess ``python -m ...`` launches, future
-importlib targets) is handled explicitly in ROOTS/ALLOWLIST below with a
-comment explaining why the static graph cannot see it.
+"""Hygiene tests: dependency/import allowlist (D-12 licensing boundary)
+and static import-graph reachability (no orphan modules).
 """
 
 from __future__ import annotations
+
+
+# ------------------------------------------------------------------------
+# from tests/test_license_hygiene.py
+# ------------------------------------------------------------------------
+
+import ast
+import sys
+from pathlib import Path
+
+SRC = Path(__file__).resolve().parents[1] / "sable"
+
+# Third-party packages the sable source may import at all. Everything else
+# (outside stdlib) is an offender. Stdlib is derived from the running
+# interpreter; keep this list in sync with pyproject.toml dependencies.
+ALLOWED_THIRD_PARTY = {"yaml", "httpx", "PIL"}
+
+# GPU/training stack: function-level imports allowed ONLY in worker.py and
+# the streamed training-backend package (WP10 step 2 wired the spike into
+# the worker seam; torch/transformers/safetensors stay lazily imported
+# inside functions there — the same policy as worker.py itself). Module-
+# level heavy imports stay banned everywhere. Reference projects that must
+# NEVER be imported in any form (airllm/Strata/kimi-k3-in-c/
+# sparse_transformers, D-12) are offenders via the general allowlist: they
+# are neither stdlib nor listed here.
+HEAVY = {"torch", "transformers", "peft", "trl", "datasets", "accelerate",
+         "bitsandbytes", "awq", "auto_gptq", "safetensors"}
+HEAVY_ALLOWED_FILES = {
+    SRC / "training" / "worker.py",
+    *sorted((SRC / "training" / "streamed").glob("*.py")),
+}
+
+STDLIB = set(sys.stdlib_module_names)
+
+
+def _root(name: str) -> str:
+    return name.split(".")[0]
+
+
+def test_only_allowed_third_party_imports():
+    offenders = []
+    for py in SRC.rglob("*.py"):
+        tree = ast.parse(py.read_text())
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names = [node.module]
+            for name in names:
+                root = _root(name)
+                if root in STDLIB or root in ALLOWED_THIRD_PARTY \
+                        or root in HEAVY or root.startswith("sable"):
+                    continue
+                lineno = getattr(node, "lineno", 0)
+                offenders.append(f"{py}:{lineno}: imports {name!r}")
+    assert not offenders, (
+        "Unexpected third-party import(s); sable is self-contained "
+        "(runtime deps: pyyaml + httpx + Pillow only):\n" + "\n".join(offenders))
+
+
+def test_heavy_imports_lazy_and_worker_only():
+    """torch/transformers/peft/trl/datasets only ever imported lazily in
+    worker.py and the wired streamed training backend (worker seam)."""
+    offenders = []
+
+    def is_heavy(node) -> bool:
+        if isinstance(node, ast.Import):
+            return any(_root(a.name) in HEAVY for a in node.names)
+        if isinstance(node, ast.ImportFrom) and node.module:
+            return _root(node.module) in HEAVY
+        return False
+
+    for py in SRC.rglob("*.py"):
+        tree = ast.parse(py.read_text())
+        module_level = {id(n) for n in tree.body
+                        if isinstance(n, (ast.Import, ast.ImportFrom))}
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)) or not is_heavy(node):
+                continue
+            if id(node) in module_level:
+                offenders.append(f"{py}:{node.lineno}: module-level heavy import")
+            elif py not in HEAVY_ALLOWED_FILES:
+                offenders.append(f"{py}:{node.lineno}: heavy import outside "
+                                 "worker.py / streamed spike")
+    assert not offenders, "Heavy-import violations:\n" + "\n".join(offenders)
+
+
+def test_no_legacy_env_var():
+    """The historical external-server env var name is fully gone from source."""
+    # Constructed so this file itself contains no literal of the old name.
+    legacy = "UN" + "SLOTH"
+    offenders = []
+    for py in SRC.rglob("*.py"):
+        text = py.read_text()
+        for i, line in enumerate(text.splitlines(), 1):
+            if legacy in line.upper() and "SABLE" not in line.upper():
+                offenders.append(f"{py}:{i}")
+    assert not offenders, f"Legacy env-var references: {offenders}"
+
+# ------------------------------------------------------------------------
+# from tests/test_no_orphans.py
+# ------------------------------------------------------------------------
+
+# Adapted from PIASystem (MIT) docs/ORPHANED_FILES.md — orphan tracking as a test, not a doc.
+
 
 import ast
 import pkgutil

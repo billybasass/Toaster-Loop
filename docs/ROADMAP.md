@@ -182,7 +182,7 @@ Mistypes are always errors; **unknown keys stay warn-only by default** (stray
 keys in existing configs load byte-identically) and become errors only with
 `SABLE_CONFIG_STRICT=1` / `load_config(strict_unknown=True)` — the choice is
 stated inside the error text itself. All valid configs load to identical
-objects (`tests/test_config_strictness.py`).
+objects (`tests/test_core.py`).
 
 **2b Corrupt-artifact checks** (`training/integrity.py`): post-export GGUF gate
 (exists / non-zero / `GGUF` magic) wired into `run_iterate` (NaN loss after a
@@ -205,7 +205,7 @@ No KV-cache-hit-rate metric exists anywhere in the stack (audited: metrics.py,
 insights.py, panels) — the program-brief canonical example has no sable
 analogue to fix; the coverage/denominator/evidence pairs above are this codebase's
 instances of the same failure class. No new dependencies; successful command
-outputs byte-identical (`tests/test_exit_codes.py`, `tests/test_metric_honesty.py`).
+outputs byte-identical (`tests/test_cli.py`, `tests/test_cli.py`).
 
 ## Improvement Program — WP3: `sable calibrate` per-machine autotune (shipped)
 
@@ -265,7 +265,7 @@ optional value; `sable calibrate --show` covers it).
 
 **No real-machine numbers are claimed.** No real llama-server/GPU calibration
 was executed in this environment; everything above is validated by hermetic
-fake-server / injected-measurement tests (`tests/test_calibrate.py`, 24 tests)
+fake-server / injected-measurement tests (`tests/test_serving.py`, 24 tests)
 only. The first real run on target hardware will produce the first actual
 profiles and noise floors.
 
@@ -339,7 +339,7 @@ invalid values fall back to defaults with a warning.
 
 **No real frozen-llama-server repro is claimed.** Recovery timing is proven by
 hermetic tests with injected clocks and fabricated `/proc` readings
-(`tests/test_watchdog_wp4.py`, 21 tests): freeze→kill→restart-backoff, busy-but-slow
+(`tests/test_serving.py`, 21 tests): freeze→kill→restart-backoff, busy-but-slow
 never killed, idle never triggers, foreign pid never killed (stale state cleared),
 backoff sequence + cap with no infinite loop, and config default-off.
 
@@ -434,7 +434,7 @@ train-first behavior.
 
 **No real GPU repro is claimed.** VRAM-free timing is faked in tests: injected
 clocks, scripted free-VRAM probes, monkeypatched spawn/stop paths
-(`tests/test_coexist_wp5.py`) prove idle-fire-once, never-mid-request, lazy
+(`tests/test_serving.py`) prove idle-fire-once, never-mid-request, lazy
 reload + retry-once, endpoint/CLI state round-trips, the full gate matrix
 (no-wiring / refuse+event / unload+admit / still-insufficient) and the no-
 double-launch serialization — without hardware.
@@ -443,7 +443,7 @@ double-launch serialization — without hardware.
 
 Inspired by Strata's MCP control-plane pattern — re-implemented inline with
 **zero new dependencies**: no MCP SDK, stdlib-only (`json`/`sys` framing in
-`sable/mcp/server.py`); `tests/test_license_hygiene.py` keeps the import
+`sable/mcp/server.py`); `tests/test_hygiene.py` keeps the import
 allowlist green. New opt-in command: nothing existing changes when
 `sable mcp` is not invoked; defaults byte-identical.
 
@@ -486,7 +486,7 @@ unknown args / missing required / wrong types (no coercion beyond int-satisfies-
 passed to a shell — executors import and call Python directly; a test greps
 the package for `shell=True`/`os.system`/subprocess/exec patterns.
 
-**Tests** (`tests/test_mcp_wp6.py`, hermetic, in-process): handshake + full
+**Tests** (`tests/test_mcp.py`, hermetic, in-process): handshake + full
 schema completeness across the 13-tool table, every validation rejection,
 plan-no-side-effect → execute-exactly-once → reuse/expiry/wrong-tool refusal
 matrix (injectable clock), train-enqueue 409-as-error via the dashboard
@@ -508,7 +508,7 @@ instances unload, frozen server → watchdog, stale calibration profile,
 token-identity INVALID on bench compare). [`AGENTS.md`](../AGENTS.md): the two
 cardinal rules (opt-in features keep outputs byte-identical; no claims below
 the measured noise floor), the D-12 licensing boundary (re-implement inline,
-never import reference projects — `tests/test_license_hygiene.py` enforces),
+never import reference projects — `tests/test_hygiene.py` enforces),
 dependency policy, test/lint commands, exit-code pointer, and how to add a
 config key.
 
@@ -535,7 +535,7 @@ never touched). Findings emit copy-paste next commands (`sable bench
 missing). Exit codes per taxonomy: 0 ok (warnings allowed), 1 actionable
 problems, 3 invalid config.
 
-**Tests** (`tests/test_doctor_wp7.py`, hermetic): every probe injectable — tmp
+**Tests** (`tests/test_serving.py`, hermetic): every probe injectable — tmp
 `SABLE_HOME`, fake `disk_usage`, fixture meminfo text, stubbed pid-alive —
 covering low-disk flagging on export paths, RAM/VRAM preset math on fixed
 inputs, next-command suggestions for missing noise-floor/calibration states,
@@ -618,7 +618,7 @@ data JSON pasted in prose unparsed (name + arguments-ish key required).
 `strip_tool_call_markup(…, extended=True)` strips the new XML shapes for
 recovered turns only; default stays legacy-verbatim.
 
-**Measured recovery rates** (`tests/test_tool_call_recovery.py::test_layer3_
+**Measured recovery rates** (`tests/test_core.py::test_layer3_
 recovery_rate_report`, printed each run; baseline = `parse_legacy` live on
 the 17-fixture parse corpus in `tests/fixtures/tool_drift/`):
 
@@ -642,7 +642,7 @@ gates (strictly-more-recovered AND new == expected). Performance sanity: a
 stop storm) parses/strips/detects in well under one second (measured ~0.1 s;
 all candidate scans bounded — `MAX_BARE_CANDIDATES=16`, span/band/junk caps).
 
-**Tests** (`tests/test_tool_call_recovery.py`, 57 tests, hermetic): stop-token
+**Tests** (`tests/test_core.py`, 57 tests, hermetic): stop-token
 edge cases incl. mid-content preservation and idempotence; loop-detection TPs
 (exact/near/hedging/interleaved think blocks) and TNs (30-item inventory,
 repetitive code, two-lap text); each repair class with attribution; name-
@@ -716,7 +716,7 @@ newest first). Both render honest hints on empty/unavailable history. Skipped
 as too invasive: a dedicated analytics route/panel and sparkline canvas — the
 APIs are the primary surface.
 
-**Tests** (`tests/test_wp9_analytics.py`, 12 tests, hermetic): funnel snapshot
+**Tests** (`tests/test_curation.py`, 12 tests, hermetic): funnel snapshot
 persistence with honest denominators; two-run accumulation + dataset filter;
 dedup rejects counted on a prefix-overlap dup fixture; funnel API history +
 latest diff; validation summary skip-counting; chronological merge of gate runs
@@ -752,7 +752,7 @@ sync AND threaded prefetch, real safetensors shards written in-test. CUDA-only
 paths (empty_cache eviction, device copies) code-reviewed-only; no perf claims
 (CPU box). Two documented test exemptions: heavy-import allowlist now lists
 `training/streamed/*` (function-level only, module-level still banned globally)
-and `test_no_orphans.py` ALLOWLIST marks the package a deliberate not-yet-wired
+and `test_hygiene.py` ALLOWLIST marks the package a deliberate not-yet-wired
 seam (delete when Step 2 wires it). **GO for Steps 2–3, conditional** on:
 single pinned transformers arch adapter first, GPU measurement before any
 speed claim, Step 3 built against the frozen `lora_state_dict` name→tensor
@@ -767,7 +767,7 @@ Step 2 wired the spike into the worker behind an opt-in `training.backend`
 (job spec) -> the spawned worker selects the branch in `run_sft`; spawn path
 untouched. Mistyped values warn and fall back to `peft` (WP2 lenient-enum
 convention). Both step-1 test exemptions removed: the package is now
-statically reachable from the worker root (`test_no_orphans.py` ALLOWLIST
+statically reachable from the worker root (`test_hygiene.py` ALLOWLIST
 back to empty), heavy imports stay function-level inside the worker seam.
 
 Streamed branch (all heavy imports lazy): split an on-disk HF checkpoint dir
@@ -820,7 +820,7 @@ adapted `""` (changed=True), `gate_with_adapter {ok: true, pass_rate: 1.0}`,
 `gate_without_adapter {ok: false, pass_rate: 0.0}`, `promotion {model_id: v1,
 active: true}`. Reproduce: `python -m experiments.wp10_golden_gate.run_gate`
 (prints full evidence JSON; deterministic across repeats) or
-`pytest tests/test_golden_gate_wp10.py` (~5 s; skips without heavy deps or an
+`pytest tests/test_training.py` (~5 s; skips without heavy deps or an
 existing llama-server binary — never auto-builds).
 **Hardware-unverified / remains for GPU acceptance**: any real-model-size run
 (speed/VRAM claims — none made, CPU box; follow `bench --noise-floor` rules),
@@ -862,5 +862,5 @@ these numbers. Nothing integrated: no config keys, worker or registry changes.
 full results table, split discipline, floor numbers, limitations. Spike code
 [`experiments/wp11_specialization/`](../experiments/wp11_specialization/)
 (outside the package = the deliberate not-wired seam), tests
-[`tests/test_wp11_specialization.py`](../tests/test_wp11_specialization.py).
+[`tests/test_training.py`](../tests/test_training.py).
 Full suite green, ruff clean, pyproject untouched.

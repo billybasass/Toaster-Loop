@@ -6,7 +6,7 @@ contract — a plain ``{module-name -> tensor-like}`` mapping (exactly what
 duck-typed with ``shape`` + bytes support works, so unit tests need no
 torch). Keeping this module heavy-import-free means the GGUF writer is
 unit-testable on any machine and never needs the training extras (the
-import allowlist in tests/test_license_hygiene.py stays as-is for it).
+import allowlist in tests/test_hygiene.py stays as-is for it).
 
 Format — verified by READING the local llama.cpp checkout this install
 builds (``src/llama-adapter.cpp::llama_adapter_lora_init_impl``,

@@ -20,7 +20,7 @@ built-in runner's design.
 
 ## D-3 — Licensing posture: nothing external is imported
 **Decision.** The dependency boundary is binding on design and enforced by CI
-(`tests/test_license_hygiene.py`): sable imports only `pyyaml`, `httpx`, the stdlib,
+(`tests/test_hygiene.py`): sable imports only `pyyaml`, `httpx`, the stdlib,
 and — lazily, inside the training worker only — the open ML stack
 (torch/transformers/peft/trl/datasets). No agent framework, no trainer CLI library, no
 external "studio"/hub packages. Interactions with other local programs are HTTP-only
@@ -129,7 +129,7 @@ own release cadences, and makes trace-capture/hot-swap hooks first-class instead
 adapter-shimmed. Hardening that mattered for a local-only endpoint (timeouts, infra
 failure classification, context compression) was re-implemented where it pays, rather
 than inherited wholesale with machinery sable never uses.
-**Consequences.** `tests/test_license_hygiene.py` enforces the import allowlist.
+**Consequences.** `tests/test_hygiene.py` enforces the import allowlist.
 Behavioral compatibility is defined by formats and payload shapes (ShareGPT trajectory,
 OpenAI-compatible HTTP), not shared code. D-1's process-boundary rules survive:
 external programs remain HTTP/subprocess-only.
@@ -195,6 +195,6 @@ it must never be cited as evidence of model quality, and mined/semantic
 goldens remain the production gate content. Determinism relies on greedy
 decoding on the same machine + llama.cpp build (the test pins discovery to an
 existing binary and skips rather than building). Evidence:
-`tests/test_golden_gate_wp10.py` (~5 s) and
+`tests/test_training.py` (~5 s) and
 `experiments/wp10_golden_gate/run_gate.py` (prints the full evidence JSON;
 repeats verified identical).

@@ -11,7 +11,7 @@ zero API keys.
 > built into sable: no external agent framework, trainer library, or model-hub SDK is
 > imported at runtime. Where prior art existed, designs were adapted in spirit and
 > re-implemented (see [`DECISIONS.md`](DECISIONS.md) D-12); the import allowlist is
-> enforced by `tests/test_license_hygiene.py`.
+> enforced by `tests/test_hygiene.py`.
 
 ## 1. Component diagram
 

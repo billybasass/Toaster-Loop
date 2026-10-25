@@ -141,7 +141,7 @@ def _confidence_aggregate(logprobs: List[float]) -> tuple:
       * ``conf_p90_negentropy`` = ``exp(logprob)`` of the 90th-percentile
         token (nearest-rank over the sorted logprobs, matching
         store/insights.percentile — mirrored below because core must not
-        import store at module level; parity pinned by test_insights.py).
+        import store at module level; parity pinned by test_dashboard.py).
         It reads as "the probability even the
         model's uncertain tail tokens were near-certain": high = confident
         throughout, low = a hesitant tail. (Documented proxy for token-level
@@ -158,7 +158,7 @@ def _confidence_aggregate(logprobs: List[float]) -> tuple:
     # Mirror of store/insights.percentile (canonical): ceil nearest-rank —
     # the old round() used banker's rounding and disagreed at exact .5
     # boundaries. Kept local because core cannot import store at module
-    # level; test_insights.py parity tests pin the two together.
+    # level; test_dashboard.py parity tests pin the two together.
     idx = max(0, min(len(ordered) - 1, math.ceil(0.90 * len(ordered)) - 1))
     p90_prob = math.exp(max(ordered[idx], -745.0))
     return round(mean, 6), round(p90_prob, 6)

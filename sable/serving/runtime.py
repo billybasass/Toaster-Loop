@@ -5,7 +5,7 @@ sable never assumes a particular vendor. This module:
   1. detects the available accelerator (NVIDIA CUDA / AMD ROCm / Apple Metal /
      Vulkan / CPU-only) using only cheap stdlib probes and vendor CLIs
      (nvidia-smi, rocminfo, vulkaninfo) — no torch import, so the daemon stays
-     light (see tests/test_license_hygiene.py);
+     light (see tests/test_hygiene.py);
   2. turns that into llama-server launch args (``-ngl`` offload) so a GPU build
      gets full offload and a CPU-only box simply runs on the CPU;
   3. can *set up llama.cpp itself*: clone + build with the backend matching the

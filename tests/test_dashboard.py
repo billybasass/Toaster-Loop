@@ -1,30 +1,63 @@
-"""Phase 5 tests — dashboard control API + server hygiene.
+"""Dashboard-domain tests: API, chat lifecycle, panels, insights.
 
-API-level tests call DashboardApp.handle() directly (no socket). One test
-brings up the real stdlib server to verify loopback bind, static serving,
-path-traversal rejection and JSON plumbing end-to-end. Security-hygiene
-tests assert no external CDN/URL references in the shipped UI assets.
+Consolidated from 13 former test modules; section banners mark origins.
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 import json
 import os
 import re
 import threading
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import Any, List, cast
-
+import time
+import inspect
+from http.server import BaseHTTPRequestHandler
+from typing import Any, Dict
+import math
+import sqlite3
+import stat
+import subprocess
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import base64
+import struct
+import zlib
 import pytest
 
-import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sable.core.config import SableConfig  # noqa: E402
 from sable.dashboard.app import DashboardApp, build_trace_timeline  # noqa: E402
 from sable.registry import ModelRegistry  # noqa: E402
 from sable.store.db import TraceRow, TraceStore  # noqa: E402
+from fake_server import FakeOpenAIServer  # noqa: E402
+from sable.core.agent_runner import AgentResult  # noqa: E402
+from sable.dashboard.app import DashboardApp  # noqa: E402
+from sable.core import agent_runner as ar  # noqa: E402
+from sable.core.agent_runner import SableAgentClient  # noqa: E402
+from sable.core.failure_types import FAILURE_CANCELLED, is_infra_reason, is_model_reason  # noqa: E402
+from sable.core.titles import DERIVED, LLM, USER, derive_title, generate_title, should_apply_title  # noqa: E402
+from sable.core.config import SableConfig, load_config  # noqa: E402
+from sable.core.indexer import CodebaseIndex, IndexRebuildRequired, clip_to_tokens, delete_project_index, get_index, stop_all_embed_servers, truncate_renorm, EmbeddingClient, DEFAULT_DB_ID, EMBED_UBATCH  # noqa: E402
+from sable.core import mmproj  # noqa: E402
+from sable.serving.run_args import canonical_spec_mode, run_settings_args, sanitize_run_settings, speculative_args  # noqa: E402
+from sable.serving.supervisor import build_instance_cmd  # noqa: E402
+from fake_server import FakeOpenAIServer, make_message_handler  # noqa: E402
+from sable.core.indexer import CodebaseIndex, LexicalIndex, chunk_file, cosine, _pack, _unpack  # noqa: E402
+from sable.serving.run_args import run_settings_args, sanitize_run_settings, scale_gpu_layers  # noqa: E402
+import sable.store.recorder as recorder_mod  # noqa: E402
+from sable.store import TraceRecorder  # noqa: E402
+from sable.store.insights import generate_insights  # noqa: E402
+from sable.core import images as uf_images  # noqa: E402
+from sable.core.agent_runner import SableAgentClient, _resolve_vision_mode  # noqa: E402
+from sable.core.tools import view_image, take_screenshot  # noqa: E402
+
+# ------------------------------------------------------------------------
+# from tests/test_dashboard.py
+# ------------------------------------------------------------------------
 
 STATIC = Path(__file__).resolve().parents[1] / "sable" / "dashboard" / "static"
 
@@ -2113,3 +2146,3704 @@ def test_query_token_only_accepted_for_get(home):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+# ------------------------------------------------------------------------
+# from tests/test_chat_reattach.py
+# ------------------------------------------------------------------------
+
+@pytest.fixture()
+def home__test_chat_reattach(tmp_path, monkeypatch):
+    h = tmp_path / "uf-reattach"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    return h
+
+
+def make_app(home):
+    return DashboardApp(SableConfig(), home=home)
+
+
+
+
+def _events(text):
+    out = []
+    for frame in text.split("\n\n"):
+        kind = None
+        data = None
+        for line in frame.splitlines():
+            if line.startswith("event: "):
+                kind = line[7:]
+            elif line.startswith("data: "):
+                data = json.loads(line[6:])
+        if kind:
+            out.append((kind, data or {}))
+    return out
+
+
+class GatedRunner:
+    """create_runner stub: streams deltas only after `release` is set, so a
+    test controls exactly when the run finishes relative to re-attachment."""
+
+    def __init__(self, cfg, base_url, model, **kw):
+        self.on_event = None          # dashboard attaches its sink here
+        self.release = threading.Event()
+        self.cancel = kw.get("cancel_event")
+
+    def run(self, prompt, history=None, previous_summary=None):
+        if self.on_event:
+            self.on_event("message.delta", {"text": "half-"})
+        self.release.wait(timeout=10)
+        if self.on_event:
+            self.on_event("message.delta", {"text": "done"})
+        return AgentResult(final_response="half-done",
+                           messages=[{"role": "assistant",
+                                      "content": "half-done"}],
+                           trace_id="tr-gate")
+
+
+@pytest.fixture()
+def gated(monkeypatch):
+    made: list = []
+
+    def _create(cfg, base_url, model, **kw):
+        r = GatedRunner(cfg, base_url, model, **kw)
+        made.append(r)
+        return r
+
+    monkeypatch.setattr("sable.core.agent_runner.create_runner", _create)
+    return made
+
+
+def _start(app, thread_id, prompt="go"):
+    """POST /api/chat/stream and iterate ONE frame (stream admitted/run
+    registered); returns the still-suspended generator."""
+    resp = app.handle("POST", "/api/chat/stream",
+                      body={"prompt": prompt, "thread": thread_id})
+    assert resp.status == 200 and resp.stream is not None
+    it = iter(resp.stream)
+    first = next(it)          # run.started — registry entry now live
+    assert "run.started" in first
+    return it
+
+
+# ------------------------------------------------ leave-mid-run resilience
+
+def test_abandoning_the_stream_does_not_kill_the_run(home__test_chat_reattach, gated):
+    """Close the starting reader mid-run: the worker keeps going, finishes,
+    persists the transcript, and only THEN marks the registry entry done."""
+    app = make_app(home__test_chat_reattach)
+    with FakeOpenAIServer() as fs:
+        _fake_serve_state(home__test_chat_reattach, fs.base_url)
+        it = _start(app, "t-leave")
+        run_id = app.handle("GET", "/api/chat/runs").body["runs"][0]["run_id"]
+
+        # Reader goes away mid-run (navigation): pure reader drop.
+        it.close()
+
+        runs = app.handle("GET", "/api/chat/runs").body["runs"]
+        assert [r["run_id"] for r in runs] == [run_id], \
+            "the run must still be in flight after its reader left"
+        # The registry carries the prompt so a re-attaching view can render
+        # the user turn (the transcript file only gets it at completion).
+        assert runs[0]["prompt"] == "go"
+
+        gated[0].release.set()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if app._chat_runs.get(run_id, {}).get("done"):
+                break
+            time.sleep(0.02)
+        assert app._chat_runs[run_id]["done"] is True
+
+        t = json.loads((home__test_chat_reattach / "chat" / "t-leave.json").read_text())
+        roles = [m["role"] for m in t["messages"]]
+        assert roles == ["user", "assistant"]
+        assert t["messages"][1]["content"] == "half-done"
+
+
+def test_reattach_replays_buffered_frames_and_follows_live(home__test_chat_reattach, gated):
+    """A second reader (the returning panel) sees the deltas streamed while
+    away, then the live tail, then run.done — and can watch again after."""
+    app = make_app(home__test_chat_reattach)
+    with FakeOpenAIServer() as fs:
+        _fake_serve_state(home__test_chat_reattach, fs.base_url)
+        it = _start(app, "t-back")
+        it.close()                                # original reader leaves
+        run_id = app.handle("GET", "/api/chat/runs").body["runs"][0]["run_id"]
+
+        # Some deltas may have streamed while nobody was watching; the
+        # re-attaching reader replays them from the buffer.
+        att = app.handle("GET", f"/api/chat/runs/{run_id}/stream")
+        assert att.status == 200 and att.stream is not None
+        reader = iter(att.stream)
+
+        def collect_until_done():
+            frames = []
+            for frame in reader:
+                frames.append(frame)
+                if "event: run.done" in frame or "event: run.error" in frame:
+                    break
+            return "".join(frames)
+
+        # Release while the re-attached reader is parked on the cond var:
+        # it must receive BOTH buffered and post-attach frames.
+        threading.Timer(0.1, gated[0].release.set).start()
+        text = collect_until_done()
+        kinds = [k for k, _ in _events(text)]
+        assert kinds[0] == "run.started"          # replay from the beginning
+        deltas = "".join(d["text"] for k, d in _events(text)
+                         if k == "message.delta")
+        assert deltas == "half-done"              # buffered + live tail
+        assert kinds[-1] == "run.done"
+
+        # A second re-attach (another tab) still gets the finished buffer.
+        again = app.handle("GET", f"/api/chat/runs/{run_id}/stream")
+        assert again.status == 200 and again.stream is not None
+        text2 = "".join(again.stream)
+        assert "event: run.done" in text2
+
+
+def test_reattach_unknown_run_is_404(home__test_chat_reattach):
+    app = make_app(home__test_chat_reattach)
+    r = app.handle("GET", "/api/chat/runs/nope/stream")
+    assert r.status == 404
+    assert json.loads(r.json())["error"]["code"] == "no_such_run"
+
+
+# ------------------------------------------------------ concurrent threads
+
+def test_two_threads_run_concurrently(home__test_chat_reattach, gated):
+    """Single-flight is PER thread: a second thread starts while the first
+    is still executing; both stay in the registry."""
+    app = make_app(home__test_chat_reattach)
+    with FakeOpenAIServer() as fs:
+        _fake_serve_state(home__test_chat_reattach, fs.base_url)
+        it1 = _start(app, "t-a", prompt="first")
+        it2 = _start(app, "t-b", prompt="second")   # must NOT 409
+        assert it2 is not None
+        runs = {r["thread"]: r for r in
+                app.handle("GET", "/api/chat/runs").body["runs"]}
+        assert set(runs) == {"t-a", "t-b"}
+        assert runs["t-a"]["prompt"] == "first"
+        assert runs["t-b"]["prompt"] == "second"
+
+        # A THIRD post on a busy thread is still refused (one run per thread).
+        busy = app.handle("POST", "/api/chat/stream",
+                          body={"prompt": "x", "thread": "t-a"})
+        assert busy.status == 409
+        assert json.loads(busy.json())["error"]["code"] == "run_in_flight"
+
+        for r in gated:
+            r.release.set()
+        it1.close()
+        it2.close()
+
+# ------------------------------------------------------------------------
+# from tests/test_chat_run_lifecycle.py
+# ------------------------------------------------------------------------
+
+# Shared stub for DashboardApp._resolve_chat_target. The old per-test
+# single-positional-arg lambdas broke the moment the method grew a kwarg
+# (routing_hint did exactly this). Instead of freezing today's shape, bind
+# against the REAL signature captured once at import: any call the real
+# method would accept passes (future kwargs included), while unknown/typo'd
+# kwarg names or too many positional args fail loudly as AssertionError.
+# Stubs are installed on app INSTANCES, so the helper receives the call's
+# arguments without `self` — hence the dummy self in bind().
+_REAL_RESOLVE_SIG = inspect.signature(DashboardApp._resolve_chat_target)
+
+
+def fake_resolve_chat_target(*args, **kwargs):
+    """(base, key, model) of a dead endpoint; never dialed in these tests."""
+    try:
+        _REAL_RESOLVE_SIG.bind(None, *args, **kwargs)
+    except TypeError as e:
+        raise AssertionError(
+            f"fake_resolve_chat_target called with {args!r} {kwargs!r}, "
+            f"invalid for the real signature {_REAL_RESOLVE_SIG}: {e}"
+        ) from None
+    return ("http://127.0.0.1:1", None, "m")
+
+
+@pytest.fixture()
+def _no_sleeps(monkeypatch):
+    monkeypatch.setattr(ar.SableAgentClient, "_sleep",
+                        staticmethod(lambda s: None))
+
+
+# ------------------------------------------------------------------ helpers
+
+class TwoToolCallHandler(BaseHTTPRequestHandler):
+    """Every POST returns ONE assistant turn with TWO tool calls (ids a, b).
+
+    The loop executes them in order; a slow first impl lets a test set the
+    cancel event mid-batch (boundary 2). Counts requests so a test can prove
+    the pre-loop boundary short-circuits before any model call.
+    """
+
+    requests = 0
+
+    def log_message(self, format, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)
+        type(self).requests += 1
+        msg = {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "a", "type": "function",
+             "function": {"name": "list_dir", "arguments": "{}"}},
+            {"id": "b", "type": "function",
+             "function": {"name": "read_file",
+                          "arguments": json.dumps({"path": "x.txt"})}},
+        ]}
+        body = json.dumps({
+            "id": "x", "object": "chat.completion", "model": "m",
+            "choices": [{"index": 0, "message": msg,
+                         "finish_reason": "tool_calls"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                      "total_tokens": 2}}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _client(srv, cancel_event=None):
+    client = SableAgentClient(base_url=srv.base_url, model="m",
+                                max_iterations=5,
+                                guardrails_enabled=False,
+                                verification_nudge=False,
+                                block_sensitive_files=False,
+                                cancel_event=cancel_event)
+    # Deterministic, workspace-free tool impls (containment never bound:
+    # direct construction with no workspace_roots, per house convention).
+    client.tool_impls["list_dir"] = lambda **kw: "dir listing ok"
+    client.tool_impls["read_file"] = lambda **kw: "file contents ok"
+    return client
+
+
+def _assert_well_formed(messages):
+    """Every assistant tool_call has exactly one tool result for its id."""
+    calls = []
+    results = []
+    for m in messages:
+        if m.get("role") == "assistant":
+            calls += [tc.get("id") for tc in (m.get("tool_calls") or [])]
+        elif m.get("role") == "tool":
+            results.append(m.get("tool_call_id"))
+    assert calls == results, f"unbalanced tool messages: {calls} vs {results}"
+
+
+# ------------------------------------------------------------ runner cancel
+
+def test_cancel_preloop_never_calls_model(_no_sleeps):
+    TwoToolCallHandler.requests = 0
+    ev = threading.Event()
+    ev.set()  # stop pressed before the run even starts
+    with FakeOpenAIServer(handler_cls=TwoToolCallHandler) as srv:
+        res = _client(srv, cancel_event=ev).run("do something")
+    assert res.completed is False
+    assert res.failure_reason == FAILURE_CANCELLED
+    assert TwoToolCallHandler.requests == 0, "cancel must not touch the model"
+
+
+def test_cancel_between_iterations_stops_before_second_call(_no_sleeps):
+    TwoToolCallHandler.requests = 0
+    ev = threading.Event()
+    with FakeOpenAIServer(handler_cls=TwoToolCallHandler) as srv:
+        client = _client(srv, cancel_event=ev)
+        # Deterministic boundary: stop pressed the instant the first model
+        # call returns — after its batch executes, before the second call.
+        orig = client.retry_chat
+        def cancel_after_first(messages, *a, **k):
+            if not ev.is_set():
+                ev.set()
+            return orig(messages, *a, **k)
+        client.retry_chat = cancel_after_first
+        res = client.run("do something")
+    assert res.completed is False
+    assert res.failure_reason == FAILURE_CANCELLED
+    # Exactly one model call: the first turn's batch completed, the second
+    # iteration was refused at the pre-model-call boundary.
+    assert TwoToolCallHandler.requests == 1
+    _assert_well_formed(res.messages)
+
+
+def test_cancel_midbatch_skips_remaining_tool_calls(_no_sleeps):
+    TwoToolCallHandler.requests = 0
+    ev = threading.Event()
+    with FakeOpenAIServer(handler_cls=TwoToolCallHandler) as srv:
+        client = _client(srv, cancel_event=ev)
+        # Slow first tool: the cancel lands WHILE it runs, so the loop
+        # stops at the between-calls boundary and must skip call "b".
+        client.tool_impls["list_dir"] = lambda **kw: (time.sleep(0.3),
+                                                      "dir listing ok")[1]
+
+        def cancel_midtool():
+            time.sleep(0.1)
+            ev.set()
+
+        t = threading.Thread(target=cancel_midtool, daemon=True)
+        t.start()
+        res = client.run("do something")
+        t.join()
+    assert res.completed is False
+    assert res.failure_reason == FAILURE_CANCELLED
+    _assert_well_formed(res.messages)
+    skipped = [m for m in res.messages if m.get("role") == "tool"
+               and "skipped" in str(m.get("content"))]
+    assert len(skipped) == 1
+    assert skipped[0]["tool_call_id"] == "b"
+
+
+def test_no_cancel_event_keeps_old_behavior(_no_sleeps):
+    """cancel_event=None (CLI, stubs, delegation children): untouched."""
+    TwoToolCallHandler.requests = 0
+    with FakeOpenAIServer(handler_cls=TwoToolCallHandler) as srv:
+        client = _client(srv)  # no event
+        # No cancel ever set: run must burn through max_iterations like before.
+        res = client.run("do something")
+    assert res.completed is False
+    assert res.failure_reason == "max_iterations"
+    assert TwoToolCallHandler.requests == 5
+    _assert_well_formed(res.messages)
+
+
+# ---------------------------------------------------- dashboard endpoints
+
+@pytest.fixture()
+def app__test_chat_run_lifecycle(tmp_path, monkeypatch):
+    home = tmp_path / "uf-lifecycle"
+    monkeypatch.setenv("SABLE_HOME", str(home))
+    a = DashboardApp(SableConfig(), home=home)
+    return a
+
+
+def _seed_run(app, run_id, thread, done=False, status="running"):
+    ev = threading.Event()
+    ev.set() if done else None
+    app._chat_runs[run_id] = {"cancel": ev, "done": done, "thread": thread,
+                              "model": "m", "profile": None,
+                              "status": status}
+
+
+def test_runs_registry_lists_inflight_and_prunes_done(app__test_chat_run_lifecycle, _no_sleeps):
+    _seed_run(app__test_chat_run_lifecycle, "aaaa", "t1")            # in flight
+    _seed_run(app__test_chat_run_lifecycle, "bbbb", "t2", done=True)  # finished
+    r = app__test_chat_run_lifecycle.handle("GET", "/api/chat/runs")
+    assert r.status == 200
+    runs = r.body["runs"]
+    assert [x["run_id"] for x in runs] == ["aaaa"]
+    assert runs[0]["thread"] == "t1" and runs[0]["status"] == "running"
+    assert "bbbb" not in app__test_chat_run_lifecycle._chat_runs, "done runs must be pruned"
+
+
+def test_stream_second_post_same_thread_gets_409_with_run_id(app__test_chat_run_lifecycle, monkeypatch, _no_sleeps):
+    # Bypass model resolution: the single-flight check happens after the
+    # target is resolved, so stub it with a dead (never-dialed) URL.
+    monkeypatch.setattr(app__test_chat_run_lifecycle, "_resolve_chat_target", fake_resolve_chat_target)
+    _seed_run(app__test_chat_run_lifecycle, "active1", "t1")
+    resp = app__test_chat_run_lifecycle.handle("POST", "/api/chat/stream",
+                      body={"prompt": "again", "thread": "t1"})
+    body = json.loads(resp.json())
+    assert resp.status == 409
+    err = body["error"]
+    assert err["code"] == "run_in_flight"
+    assert err["run_id"] == "active1", "UI needs the id to adopt/cancel"
+
+
+def test_stream_threadless_post_not_subject_to_single_flight(app__test_chat_run_lifecycle, monkeypatch, _no_sleeps):
+    """Runs without a thread id (fresh chats) must not be blocked by a
+    thread's in-flight run — and must not themselves block anything."""
+    monkeypatch.setattr(app__test_chat_run_lifecycle, "_resolve_chat_target", fake_resolve_chat_target)
+    _seed_run(app__test_chat_run_lifecycle, "active1", "t1")
+    # A different thread is free to run.
+    resp = app__test_chat_run_lifecycle.handle("POST", "/api/chat/stream",
+                      body={"prompt": "hi", "thread": "other"})
+    assert resp.status == 200  # started (its worker will fail harmlessly)
+
+
+def test_cancelled_is_neither_infra_nor_model(_no_sleeps):
+    assert not is_infra_reason(FAILURE_CANCELLED)
+    assert not is_model_reason(FAILURE_CANCELLED)
+    assert not is_infra_reason("backend_error:" + FAILURE_CANCELLED)
+
+
+# ------------------------------------------------- shutdown drain (step 3)
+
+def test_shutdown_drains_cooperative_runs(app__test_chat_run_lifecycle, _no_sleeps):
+    """A run whose worker watches its cancel event finishes inside the grace
+    window: shutdown sets every cancel flag and waits for done."""
+    _seed_run(app__test_chat_run_lifecycle, "slow1", "t1")
+
+    def _worker():
+        run = app__test_chat_run_lifecycle._chat_runs["slow1"]
+        while not run["cancel"].wait(timeout=0.05):
+            pass
+        run["done"] = True
+
+    threading.Thread(target=_worker, daemon=True).start()
+    n = app__test_chat_run_lifecycle.shutdown_chat_runs(grace_s=3.0)
+    assert n == 1
+    assert app__test_chat_run_lifecycle._chat_runs["slow1"]["done"] is True
+
+
+def test_shutdown_marks_stubborn_runs_interrupted(app__test_chat_run_lifecycle, _no_sleeps):
+    """A run that ignores cancel must not hang shutdown: after the grace
+    window it is marked interrupted (documenting the lost trace)."""
+    _seed_run(app__test_chat_run_lifecycle, "stub1", "t2")
+    n = app__test_chat_run_lifecycle.shutdown_chat_runs(grace_s=0.3)
+    assert n == 1
+    assert app__test_chat_run_lifecycle._chat_runs["stub1"]["status"] == "interrupted"
+    assert app__test_chat_run_lifecycle._chat_runs["stub1"]["cancel"].is_set()
+
+
+def test_shutdown_with_no_runs_is_noop(app__test_chat_run_lifecycle, _no_sleeps):
+    assert app__test_chat_run_lifecycle.shutdown_chat_runs(grace_s=0.1) == 0
+
+
+def test_unstarted_stream_leaves_no_phantom_registry_entry(app__test_chat_run_lifecycle, monkeypatch, _no_sleeps):
+    """The registry entry is created on the stream's first iteration. A POST
+    whose SSE never starts (admission rejection path) must not leave a run
+    that single-flight would 409 against forever."""
+    monkeypatch.setattr(app__test_chat_run_lifecycle, "_resolve_chat_target", fake_resolve_chat_target)
+    resp = app__test_chat_run_lifecycle.handle("POST", "/api/chat/stream",
+                      body={"prompt": "hi", "thread": "t9"})
+    assert resp.status == 200 and resp.stream is not None
+    # Never iterate the stream (simulates server-side rejection before write).
+    resp.stream.close()
+    runs = app__test_chat_run_lifecycle.handle("GET", "/api/chat/runs").body["runs"]
+    assert runs == [], "unstarted streams must not occupy the registry"
+
+# ------------------------------------------------------------------------
+# from tests/test_chat_transcript_persist.py
+# ------------------------------------------------------------------------
+
+@pytest.fixture()
+def home__test_chat_transcript_persist(tmp_path, monkeypatch):
+    h = tmp_path / "uf-persist"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    return h
+
+
+
+
+
+
+
+
+def _drain(r):
+    """Consume the whole SSE stream (no client-side save follows)."""
+    assert r.stream is not None
+    return "".join(r.stream)
+
+
+def _thread(home, tid):
+    p = home / "chat" / f"{tid}.json"
+    assert p.is_file(), "the finished run must persist the thread itself"
+    return json.loads(p.read_text())
+
+
+# ---------------------------------------------------------------- happy path
+
+def test_finished_run_persists_transcript_without_client_save(home__test_chat_transcript_persist):
+    """Drain the stream to completion and never PUT the thread: the file must
+    still carry both turns (fake server answers with a tool loop + text)."""
+    app = make_app(home__test_chat_transcript_persist)
+    with FakeOpenAIServer() as fs:
+        _fake_serve_state(home__test_chat_transcript_persist, fs.base_url)
+        r = app.handle("POST", "/api/chat/stream",
+                       body={"prompt": "read the file", "thread": "t-p1"})
+        assert r.stream is not None
+        text = "".join(r.stream)  # client fully drains; NO client save follows
+    evs = dict((k, d) for k, d in _events(text))
+    final_text = "".join(d.get("text", "")
+                         for k, d in _events(text) if k == "message.delta")
+
+    t = _thread(home__test_chat_transcript_persist, "t-p1")
+    roles = [m["role"] for m in t["messages"]]
+    assert roles == ["user", "assistant"], \
+        f"expected exactly one user+assistant pair, got {roles}"
+    assert t["messages"][0]["content"] == "read the file"
+    assistant = t["messages"][1]
+    assert final_text and final_text in assistant["content"]
+    # Tool cards survive into the stored transcript.
+    assert assistant.get("tools"), "tool calls must persist with the turn"
+    assert evs["run.done"]["trace_id"] in (t.get("trace_ids") or [])
+
+
+def test_persisted_profile_matches_run_selection(home__test_chat_transcript_persist):
+    """The thread records the profile used so reopening restores the dropdown
+    to that agent instead of default."""
+    app = make_app(home__test_chat_transcript_persist)
+    pr = app.handle("PUT", "/api/profiles/sable",
+                    body={"system_prompt": "you are sable", "tools": []})
+    assert pr.status == 200
+    with FakeOpenAIServer() as fs:
+        _fake_serve_state(home__test_chat_transcript_persist, fs.base_url)
+        r = app.handle("POST", "/api/chat/stream",
+                       body={"prompt": "hi sable", "thread": "t-prof",
+                             "profile": "sable"})
+        _drain(r)
+    assert _thread(home__test_chat_transcript_persist, "t-prof").get("profile") == "sable"
+
+
+# ------------------------------------------------------------ idempotent merge
+
+def test_partial_client_save_is_not_duplicated(home__test_chat_transcript_persist):
+    """An aborted panel may have saved the prompt (or a partial assistant turn
+    marked partial:true) before navigating away. The server-side write for the
+    same run must REPLACE that tail, not append a second copy."""
+    app = make_app(home__test_chat_transcript_persist)
+    tid = "t-dup"
+    # Simulate the aborted panel's save: prompt + half-rendered partial reply.
+    app.handle("PUT", f"/api/chat/threads/{tid}", body={"messages": [
+        {"role": "user", "content": "read the file"},
+        {"role": "assistant", "content": "half a re", "partial": True},
+    ]})
+    with FakeOpenAIServer() as fs:
+        _fake_serve_state(home__test_chat_transcript_persist, fs.base_url)
+        r = app.handle("POST", "/api/chat/stream",
+                       body={"prompt": "read the file", "thread": tid})
+        _drain(r)
+    t = _thread(home__test_chat_transcript_persist, tid)
+    roles = [m["role"] for m in t["messages"]]
+    assert roles == ["user", "assistant"], f"duplicate turns: {roles}"
+    assert not t["messages"][1].get("partial")
+    assert "half a re" != t["messages"][1]["content"]
+
+
+def test_prompt_only_save_replaced_in_place(home__test_chat_transcript_persist):
+    """Panel saved just the user prompt before aborting: the server appends
+    its assistant turn after that same user message (no second user msg)."""
+    app = make_app(home__test_chat_transcript_persist)
+    tid = "t-prompt"
+    app.handle("PUT", f"/api/chat/threads/{tid}", body={"messages": [
+        {"role": "user", "content": "read the file"}]})
+    with FakeOpenAIServer() as fs:
+        _fake_serve_state(home__test_chat_transcript_persist, fs.base_url)
+        r = app.handle("POST", "/api/chat/stream",
+                       body={"prompt": "read the file", "thread": tid})
+        _drain(r)
+    t = _thread(home__test_chat_transcript_persist, tid)
+    assert [m["role"] for m in t["messages"]] == ["user", "assistant"]
+
+
+def test_threadless_run_persists_nothing(home__test_chat_transcript_persist):
+    app = make_app(home__test_chat_transcript_persist)
+    with FakeOpenAIServer() as fs:
+        _fake_serve_state(home__test_chat_transcript_persist, fs.base_url)
+        _drain(app.handle("POST", "/api/chat/stream", body={"prompt": "go"}))
+    assert not (home__test_chat_transcript_persist / "chat").exists() or not list(
+        (home__test_chat_transcript_persist / "chat").glob("*.json"))
+
+# ------------------------------------------------------------------------
+# from tests/test_thread_titles.py
+# ------------------------------------------------------------------------
+
+# ------------------------------------------------------------ stage 1
+
+def test_derive_from_first_user_message():
+    msgs = [{"role": "user", "content": "Fix the scheduler VRAM gate please"}]
+    assert derive_title(msgs) == "Fix the scheduler VRAM gate please"
+
+
+def test_derive_strips_pleasantries_and_markers():
+    # Multiple stacked openers ("hey can you") collapse in repeated passes.
+    assert derive_title([{"role": "user", "content": "hey can you  explain\nthis"}]) \
+        == "explain this"
+    assert derive_title([{"role": "user", "content": "please - fix the bug"}]) \
+        == "fix the bug"
+    assert derive_title([{"role": "user", "content": "- item one two three"}]) \
+        == "item one two three"
+
+
+def test_derive_truncates_on_word_boundary():
+    long = "word " * 40
+    t = derive_title([{"role": "user", "content": long}])
+    assert len(t) <= 61 and t.endswith("…")
+    assert not t.endswith(" …")
+
+
+def test_derive_never_fails():
+    assert derive_title([]) == "Untitled chat"
+    assert derive_title([{"role": "user", "content": "   "}]) == "Untitled chat"
+    assert derive_title([{"role": "assistant", "content": "hi"}]) == "Untitled chat"
+    # A pure code-block opener still yields something stable.
+    assert derive_title([{"role": "user", "content": "```\nprint(1)\n```"}]) \
+        == "Untitled chat"
+
+
+def test_derive_skips_nonstring_content():
+    assert derive_title([{"role": "user", "content": None},
+                         {"role": "user", "content": "real question here"}]) \
+        == "real question here"
+
+
+# ------------------------------------------------------------ stage 2
+
+def _client__test_thread_titles(reply):
+    return lambda msgs, model: reply
+
+
+def test_generate_title_parses_json_object():
+    out = generate_title(
+        _client__test_thread_titles('{"title": "scheduler vram gating"}'), "m",
+        [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}])
+    assert out == "scheduler vram gating"
+
+
+def test_generate_title_cleans_plain_reply():
+    clean = lambda r: generate_title(  # noqa: E731
+        _client__test_thread_titles(r), "m", [{"role": "user", "content": "hi"},
+                          {"role": "assistant", "content": "ok"}])
+    assert clean('Title: "VRAM gate tuning"') == "VRAM gate tuning"
+    assert clean("```\nvram gate tuning\n```") == "vram gate tuning"
+    assert clean('"quoted title"') == "quoted title"
+
+
+def test_generate_title_failure_shapes():
+    empty_msgs = generate_title(_client__test_thread_titles('{"title": "x"}'), "m", [])
+    assert empty_msgs is None                       # nothing to title
+    assert generate_title(_client__test_thread_titles(None), "m",
+                          [{"role": "user", "content": "hi"}]) is None
+    assert generate_title(_client__test_thread_titles('{"title": "  "}'), "m",
+                          [{"role": "user", "content": "hi"}]) is None
+
+    def boom(msgs, model):
+        raise RuntimeError("endpoint down")
+    assert generate_title(boom, "m",
+                          [{"role": "user", "content": "hi"}]) is None
+
+
+# ------------------------------------------------------------- precedence
+
+def test_precedence_derived_llm_user():
+    assert should_apply_title(None, DERIVED)
+    assert should_apply_title(DERIVED, LLM)
+    assert should_apply_title(LLM, LLM)        # refresh allowed
+    assert not should_apply_title(LLM, DERIVED)  # never downgrade
+    assert not should_apply_title(USER, LLM)     # user rename is final
+    assert not should_apply_title(USER, DERIVED)
+    assert should_apply_title(USER, USER)
+
+
+# ------------------------------------------------------------------- API
+
+@pytest.fixture()
+def home__test_thread_titles(tmp_path, monkeypatch):
+    h = tmp_path / "uf-titles"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    return h
+
+
+def make_app__test_thread_titles(home) -> DashboardApp:
+    return DashboardApp(SableConfig(llama_auto_setup=False), home=home)
+
+
+
+
+class TitleJSONHandler(BaseHTTPRequestHandler):
+    """Answers the stage-2 call with a JSON title object.
+
+    Also serves GET /v1/models so the app's serve-alive probe (which gates
+    _resolve_chat_target) treats this fake as a live endpoint.
+    """
+
+    def log_message(self, format, *args):  # noqa: A002 - silence access log
+        pass
+
+    def do_GET(self):
+        if self.path.rstrip("/") == "/v1/models":
+            body = json.dumps({"object": "list",
+                               "data": [{"id": "fake-model", "object": "model"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def do_POST(self):
+        body = json.dumps({
+            "id": "x", "object": "chat.completion", "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant",
+                                     "content": '{"title": "vram gate design"}'}}],
+        }).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _thread_file(home, tid):
+    return json.loads((home / "chat" / f"{tid}.json").read_text())
+
+
+def test_put_derives_title_instantly(home__test_thread_titles):
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    r = app.handle("PUT", "/api/chat/threads/t1", body={
+        "messages": [{"role": "user", "content": "how do I quantize a 70B model"}]})
+    assert r.status == 200
+    t = r.body["thread"]
+    assert t["title"] == "how do I quantize a 70B model"
+    assert t["title_source"] == "derived"
+
+
+def test_thread_file_is_owner_only(home__test_thread_titles):
+    """The durable thread file lands 0600 regardless of umask (transcripts can
+    contain pasted secrets; matches the serve-state hardening)."""
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    app.handle("PUT", "/api/chat/threads/t7", body={
+        "messages": [{"role": "user", "content": "here is my key sk-abc123"}]})
+    mode = (home__test_thread_titles / "chat" / "t7.json").stat().st_mode & 0o777
+    assert mode == 0o600
+
+
+def test_list_rows_carry_title_source(home__test_thread_titles):
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    app.handle("PUT", "/api/chat/threads/t2", body={
+        "messages": [{"role": "user", "content": "quantize a model tonight"}]})
+    rows = app.handle("GET", "/api/chat/threads").body["threads"]
+    row = [x for x in rows if x["id"] == "t2"][0]
+    assert row["title"] == "quantize a model tonight"
+    assert row["title_source"] == "derived"
+
+
+def test_explicit_title_is_user_sourced(home__test_thread_titles):
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    app.handle("PUT", "/api/chat/threads/t3", body={
+        "messages": [{"role": "user", "content": "first words"}]})
+    r = app.handle("PUT", "/api/chat/threads/t3", body={"title": "My important thread"})
+    t = r.body["thread"]
+    assert t["title"] == "My important thread"
+    assert t["title_source"] == "user"
+
+
+def test_stage2_upgrade_replaces_derived_title(home__test_thread_titles):
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    with FakeOpenAIServer(handler_cls=TitleJSONHandler) as fs:
+        _fake_serve_state(home__test_thread_titles, fs.base_url)
+        app.handle("PUT", "/api/chat/threads/t4", body={
+            "messages": [{"role": "user", "content": "tell me about vram gates"},
+                         {"role": "assistant", "content": "sure"}]})
+        # Daemon thread: poll briefly for the upgrade.
+        t = None
+        for _ in range(50):
+            t = _thread_file(home__test_thread_titles, "t4")
+            if t.get("title_source") == "llm":
+                break
+            time.sleep(0.1)
+    assert t is not None
+    assert t["title"] == "vram gate design"
+    assert t["title_source"] == "llm"
+
+
+def test_stage2_never_overrides_user_rename(home__test_thread_titles):
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    with FakeOpenAIServer(handler_cls=TitleJSONHandler) as fs:
+        _fake_serve_state(home__test_thread_titles, fs.base_url)
+        # First save derives + schedules an upgrade; rename immediately.
+        app.handle("PUT", "/api/chat/threads/t5", body={
+            "messages": [{"role": "user", "content": "tell me about vram"},
+                         {"role": "assistant", "content": "ok"}]})
+        app.handle("PUT", "/api/chat/threads/t5", body={"title": "keep mine"})
+        time.sleep(1.0)  # give any scheduled upgrade rope to hang itself
+    t = _thread_file(home__test_thread_titles, "t5")
+    assert t["title"] == "keep mine"
+    assert t["title_source"] == "user"
+
+
+def test_stage2_skipped_without_assistant_reply(home__test_thread_titles):
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    with FakeOpenAIServer(handler_cls=TitleJSONHandler) as fs:
+        _fake_serve_state(home__test_thread_titles, fs.base_url)
+        app.handle("PUT", "/api/chat/threads/t6", body={
+            "messages": [{"role": "user", "content": "one-shot question"}]})
+        time.sleep(0.5)
+    t = _thread_file(home__test_thread_titles, "t6")
+    assert t["title_source"] == "derived"
+
+
+# ------------------------------------- regression: client saves vs titles (#1)
+
+def test_message_only_save_preserves_user_rename(home__test_thread_titles):
+    """A save that omits `title` (the chat panel's auto-save shape) must never
+    revert a double-click rename — the old client sent the first-message
+    snippet on every save, silently clobbering renames."""
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    app.handle("PUT", "/api/chat/threads/r1", body={
+        "messages": [{"role": "user", "content": "original question"}]})
+    app.handle("PUT", "/api/chat/threads/r1", body={"title": "renamed by hand"})
+    # Auto-save with more messages, NO title key (post-fix chat.js shape).
+    r = app.handle("PUT", "/api/chat/threads/r1", body={
+        "messages": [{"role": "user", "content": "original question"},
+                     {"role": "assistant", "content": "answer"},
+                     {"role": "user", "content": "follow-up"}]})
+    t = r.body["thread"]
+    assert t["title"] == "renamed by hand"
+    assert t["title_source"] == "user"
+    assert len(t["messages"]) == 3
+
+
+def test_message_only_save_preserves_llm_title(home__test_thread_titles):
+    """Same contract for the stage-2 LLM title: an omitted title key leaves an
+    llm-sourced title intact (previously overwritten + mislabeled USER)."""
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    # Seed a thread whose title already carries llm provenance.
+    d = home__test_thread_titles / "chat"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "r2.json").write_text(json.dumps({
+        "id": "r2", "title": "vram gate design", "title_source": "llm",
+        "created": "2026-01-01T00:00:00+00:00", "updated": "2026-01-01T00:00:00+00:00",
+        "messages": [{"role": "user", "content": "tell me about vram gates"}],
+    }))
+    r = app.handle("PUT", "/api/chat/threads/r2", body={
+        "messages": [{"role": "user", "content": "tell me about vram gates"},
+                     {"role": "assistant", "content": "sure"}]})
+    t = r.body["thread"]
+    assert t["title"] == "vram gate design"
+    assert t["title_source"] == "llm"
+
+
+def test_message_only_save_preserves_derived_title(home__test_thread_titles):
+    """Even a derived title stays put when messages change (no re-derivation
+    churn once a thread has a label)."""
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    r1 = app.handle("PUT", "/api/chat/threads/r3", body={
+        "messages": [{"role": "user", "content": "first question here"}]})
+    assert r1.body["thread"]["title"] == "first question here"
+    r2 = app.handle("PUT", "/api/chat/threads/r3", body={
+        "messages": [{"role": "user", "content": "totally different opener"},
+                     {"role": "assistant", "content": "ok"}]})
+    assert r2.body["thread"]["title"] == "first question here"
+
+
+# ------------------------------------- regression: rename preserves messages (#1)
+
+def test_rename_only_put_preserves_messages(home__test_thread_titles):
+    """The double-click rename sends {title} alone; the thread body must ride
+    through untouched (messages, trace ids, summary)."""
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    app.handle("PUT", "/api/chat/threads/r4", body={
+        "messages": [{"role": "user", "content": "hello there"},
+                     {"role": "assistant", "content": "hi"}],
+        "trace_ids": ["abc123"],
+        "summary": "rolling summary text"})
+    r = app.handle("PUT", "/api/chat/threads/r4", body={"title": "renamed"})
+    t = r.body["thread"]
+    assert t["title"] == "renamed" and t["title_source"] == "user"
+    assert len(t["messages"]) == 2
+    assert t["trace_ids"] == ["abc123"]
+    assert t["summary"] == "rolling summary text"
+
+
+# ------------------------------------- regression: atomic thread writes (#2)
+
+def test_thread_write_is_atomic(home__test_thread_titles, monkeypatch):
+    """A crash mid-write must never leave a partial file at the thread path:
+    the write goes to *.json.tmp and lands via os.replace. We make os.replace
+    raise (simulating death during the rename) and assert the previous file is
+    byte-intact."""
+    app = make_app__test_thread_titles(home__test_thread_titles)
+    app.handle("PUT", "/api/chat/threads/a1", body={
+        "messages": [{"role": "user", "content": "durable original"}]})
+    good = (home__test_thread_titles / "chat" / "a1.json").read_bytes()
+
+    import os as _os
+
+    def boom(src, dst):  # crash exactly between tmp write and rename
+        raise OSError("simulated crash mid-write")
+
+    monkeypatch.setattr(_os, "replace", boom)
+    # handle() funnels every handler exception into a 500 (no traceback leak).
+    r = app.handle("PUT", "/api/chat/threads/a1", body={
+        "messages": [{"role": "user", "content": "x" * 5000}]})
+    assert r.status == 500
+    # Original untouched; the half-written tmp never reached the read path.
+    assert (home__test_thread_titles / "chat" / "a1.json").read_bytes() == good
+    t = app.handle("GET", "/api/chat/threads/a1").body["thread"]
+    assert t["messages"][0]["content"] == "durable original"
+
+# ------------------------------------------------------------------------
+# from tests/test_tuning_panel.py
+# ------------------------------------------------------------------------
+
+@pytest.fixture()
+def home__test_tuning_panel(tmp_path, monkeypatch):
+    h = tmp_path / "uf-tuning"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    return h
+
+
+@pytest.fixture()
+def app__test_tuning_panel(home__test_tuning_panel):
+    return DashboardApp(SableConfig(), home=home__test_tuning_panel)
+
+
+def err_code__test_tuning_panel(r) -> str:
+    return (r.body.get("error") or {}).get("code", "")
+
+
+def wait_state(app, path: str, timeout: float = 30.0,
+               ) -> Dict[str, Any]:
+    """Poll a run-status endpoint until it leaves "running"."""
+    s: Dict[str, Any] = {"state": "running"}
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        s = app.handle("GET", path).body
+        if s.get("state") != "running":
+            return s
+        time.sleep(0.05)
+    return s
+
+
+# ------------------------------------------------------------------ routes
+
+def test_tuning_routes_registered(app__test_tuning_panel):
+    paths = {(m, p) for (m, p) in ((m, p) for (m, p, _) in app__test_tuning_panel.ROUTES)}
+    for m, p in [
+        ("GET", "/api/doctor/env"), ("POST", "/api/doctor/run"),
+        ("POST", "/api/doctor/env"),
+        ("GET", "/api/bench"), ("GET", "/api/bench/targets"),
+        ("POST", "/api/bench/run"), ("GET", "/api/bench/run"),
+        ("GET", "/api/calibrate"), ("POST", "/api/calibrate/run"),
+        ("GET", "/api/calibrate/run"), ("POST", "/api/calibrate/clear"),
+    ]:
+        assert (m, p) in paths, f"{m} {p} missing"
+
+
+# -------------------------------------------------------------------- doctor
+
+def test_doctor_env_idle_without_running(app__test_tuning_panel, home__test_tuning_panel):
+    """Bootstrap must NOT execute any checks (user clicks to activate)."""
+    r = app__test_tuning_panel.handle("GET", "/api/doctor/env")
+    assert r.status == 200
+    assert r.body["state"] == "idle"
+    assert r.body.get("checks") in (None, [])
+    assert r.body["calibration_mode"] in ("off", "auto")
+
+
+def test_doctor_run_background_structured(app__test_tuning_panel, home__test_tuning_panel):
+    r = app__test_tuning_panel.handle("POST", "/api/doctor/run", body={})
+    assert r.status == 200 and r.body["state"] == "running"
+    s = wait_state(app__test_tuning_panel, "/api/doctor/env")
+    assert s["state"] == "done", s.get("error")
+    assert s["exit_code"] in (0, 1, 3)
+    names = {c["name"] for c in s["checks"]}
+    # The WP7 check set must be visible to the panel.
+    assert {"python", "deps", "config", "home", "disk"} <= names
+    statuses = {c["status"] for c in s["checks"]}
+    assert statuses <= {"ok", "warn", "problem"}
+
+
+def test_doctor_run_fix_flag(app__test_tuning_panel, home__test_tuning_panel):
+    r = app__test_tuning_panel.handle("POST", "/api/doctor/env", body={"fix": True})
+    assert r.status == 200 and r.body["state"] == "running"
+    s = wait_state(app__test_tuning_panel, "/api/doctor/env")
+    assert s["state"] == "done", s.get("error")
+    assert any(c["name"] == "state" for c in s["checks"])
+
+
+def test_doctor_run_single_flight(app__test_tuning_panel, home__test_tuning_panel, monkeypatch):
+    """A second click while measuring gets 409 already_running."""
+    import sable.doctor as doctor_mod
+
+    started = __import__("threading").Event()
+    release = __import__("threading").Event()
+
+    def slow_collect(*a, **k):
+        started.set()
+        release.wait(timeout=5)
+        return [], 0
+
+    monkeypatch.setattr(doctor_mod, "collect_checks", slow_collect)
+    r = app__test_tuning_panel.handle("POST", "/api/doctor/run", body={})
+    assert r.status == 200
+    assert started.wait(timeout=5)
+    busy = app__test_tuning_panel.handle("POST", "/api/doctor/run", body={})
+    assert busy.status == 409 and err_code__test_tuning_panel(busy) == "already_running"
+    release.set()
+    wait_state(app__test_tuning_panel, "/api/doctor/env")
+
+
+# --------------------------------------------------------------------- bench
+
+def test_bench_list_empty(app__test_tuning_panel, home__test_tuning_panel):
+    r = app__test_tuning_panel.handle("GET", "/api/bench")
+    assert r.status == 200
+    assert r.body["records"] == []
+    assert r.body["noise_floor"] is None
+
+
+def test_bench_targets_lists_instances(app__test_tuning_panel, home__test_tuning_panel):
+    """Multi-instance awareness: the panel learns which server instances are
+    running (benchable endpoints) and whether a default spawn is possible."""
+    from sable.serving import instances as srv_inst
+
+    srv_inst.save_instance(home__test_tuning_panel, {"id": "sable", "name": "Sable",
+                                  "port": 8124})
+    r = app__test_tuning_panel.handle("GET", "/api/bench/targets")
+    assert r.status == 200
+    ids = {i["id"] for i in r.body["instances"]}
+    assert {"default", "sable"} <= ids
+    sable = next(i for i in r.body["instances"] if i["id"] == "sable")
+    assert sable["running"] is False  # no state file => not running
+    assert r.body["can_spawn_default"] == bool(app__test_tuning_panel.cfg.gguf_path)
+
+
+def test_bench_run_unknown_server_404(app__test_tuning_panel, home__test_tuning_panel):
+    r = app__test_tuning_panel.handle("POST", "/api/bench/run", body={"server_id": "ghost"})
+    assert r.status == 404 and err_code__test_tuning_panel(r) == "not_found"
+
+
+def test_bench_run_stopped_server_409(app__test_tuning_panel, home__test_tuning_panel):
+    from sable.serving import instances as srv_inst
+
+    srv_inst.save_instance(home__test_tuning_panel, {"id": "sable", "name": "Sable",
+                                  "port": 8124})
+    r = app__test_tuning_panel.handle("POST", "/api/bench/run", body={"server_id": "sable"})
+    assert r.status == 409 and err_code__test_tuning_panel(r) == "not_running"
+
+
+def _fake_record(**kw) -> Dict[str, Any]:
+    return {
+        "schema_version": 1, "kind": kw.get("kind", "bench"),
+        "label": kw.get("label", ""), "model": "fake-model",
+        "timestamp": "2026-01-01T00:00:00Z", "runs": 1,
+        "prompt_processing": {"median": 10.0, "min": 10.0, "max": 10.0,
+                              "spread_pct": 0.0},
+        "generation": {"median": 20.0, "min": 20.0, "max": 20.0,
+                       "spread_pct": 0.5},
+        "token_identity": {"status": "ok", "sha256": "deadbeef"},
+    }
+
+
+def test_bench_list_shows_persisted_record(app__test_tuning_panel, home__test_tuning_panel, monkeypatch):
+    from sable.serving import bench as bench_mod
+
+    monkeypatch.setenv("SABLE_BENCH_DIR", str(home__test_tuning_panel / "bench"))
+    bench_mod.save_result(_fake_record(kind="noise_floor", label="base"))
+    r = app__test_tuning_panel.handle("GET", "/api/bench")
+    assert r.status == 200
+    assert len(r.body["records"]) == 1
+    rec = r.body["records"][0]
+    assert rec["kind"] == "noise_floor" and rec["label"] == "base"
+    assert rec["gen_median_tps"] == 20.0
+    # noise floor surfaced for the panel chip
+    assert r.body["noise_floor"]["spread_pct"] == 0.5
+
+
+def test_bench_run_background_success(app__test_tuning_panel, home__test_tuning_panel, monkeypatch):
+    """POST /api/bench/run drives the WP1 modules through the same code path
+    as the CLI; with a stubbed endpoint it completes and persists."""
+    from sable.serving import bench as bench_mod
+
+    monkeypatch.setenv("SABLE_BENCH_DIR", str(home__test_tuning_panel / "bench"))
+
+    def fake_resolve(cfg, spawn_if_needed=True):
+        return "http://127.0.0.1:1/v1", "fake-model", None
+
+    monkeypatch.setattr("sable.cli._resolve_endpoint", fake_resolve)
+    monkeypatch.setattr(bench_mod, "run_bench",
+                        lambda *a, **k: _fake_record(label="ui"))
+
+    r = app__test_tuning_panel.handle("POST", "/api/bench/run", body={"runs": 1, "label": "ui"})
+    assert r.status == 200 and r.body["state"] == "running"
+
+    s = wait_state(app__test_tuning_panel, "/api/bench/run")
+    assert s["state"] == "done", s.get("error")
+    assert s["result"]["token_identity"]["status"] == "ok"
+    # persisted -> visible through the list endpoint
+    lst = app__test_tuning_panel.handle("GET", "/api/bench").body
+    assert len(lst["records"]) == 1
+
+
+def test_bench_run_error_state(app__test_tuning_panel, home__test_tuning_panel, monkeypatch):
+    """Endpoint resolution failure lands as state=error (not a 500)."""
+    from sable.serving.supervisor import ServeError
+
+    def boom(cfg, spawn_if_needed=True):
+        raise ServeError("no endpoint available")
+
+    monkeypatch.setattr("sable.cli._resolve_endpoint", boom)
+    r = app__test_tuning_panel.handle("POST", "/api/bench/run", body={"runs": 1})
+    assert r.status == 200
+    s = wait_state(app__test_tuning_panel, "/api/bench/run")
+    assert s["state"] == "error" and "no endpoint" in s["error"]
+
+
+def test_bench_run_rejects_bad_runs(app__test_tuning_panel):
+    r = app__test_tuning_panel.handle("POST", "/api/bench/run", body={"runs": "many"})
+    assert r.status == 400
+
+
+# ----------------------------------------------------------------- calibrate
+
+def test_calibrate_show_empty(app__test_tuning_panel, home__test_tuning_panel):
+    r = app__test_tuning_panel.handle("GET", "/api/calibrate")
+    assert r.status == 200
+    assert r.body["profiles"] == []
+    assert r.body["calibration_mode"] == "off"
+    assert r.body["running_instances"] == []
+
+
+def test_calibrate_run_without_model_400(app__test_tuning_panel, home__test_tuning_panel):
+    r = app__test_tuning_panel.handle("POST", "/api/calibrate/run", body={"quick": True})
+    assert r.status == 400 and err_code__test_tuning_panel(r) == "no_model"
+
+
+def test_calibrate_clear_empty(app__test_tuning_panel, home__test_tuning_panel):
+    r = app__test_tuning_panel.handle("POST", "/api/calibrate/clear", body={})
+    assert r.status == 200 and r.body["removed"] == 0
+
+
+def test_calibrate_run_rejects_bad_runs(app__test_tuning_panel, home__test_tuning_panel):
+    # runs is validated before the model resolution, so no gguf needed.
+    r = app__test_tuning_panel.handle("POST", "/api/calibrate/run", body={"runs": "lots"})
+    assert r.status == 400
+
+
+# ------------------------------------------------- serve.calibration toggle
+
+def test_config_put_serve_section(app__test_tuning_panel, home__test_tuning_panel):
+    """The Tuning panel toggles serve.calibration through a section patch."""
+    r = app__test_tuning_panel.handle("PUT", "/api/config", body={
+        "section": "serve", "patch": {"calibration": "auto"}})
+    assert r.status == 200, r.body
+    raw = (home__test_tuning_panel / "sable.yaml").read_text()
+    assert "calibration: auto" in raw
+
+    bad = app__test_tuning_panel.handle("PUT", "/api/config", body={
+        "section": "serve", "patch": {"nonsense_key": 1}})
+    assert bad.status == 400 and err_code__test_tuning_panel(bad) == "unknown_keys"
+
+# ------------------------------------------------------------------------
+# from tests/test_indexing_phase5.py
+# ------------------------------------------------------------------------
+
+# ------------------------------------------------------------------ helpers
+
+def make_project(home: Path, project_id: str, root: Path) -> dict:
+    """Create a project record the way the dashboard does (file layout)."""
+    root.mkdir(parents=True, exist_ok=True)
+    # NOTE: create workspace contents BEFORE calling this via helper below.
+    d = home / "projects"
+    d.mkdir(parents=True, exist_ok=True)
+    proj = {"id": project_id, "name": project_id, "created": "", "updated": "",
+            "workspace_dir": str(root), "agents": []}
+    (d / f"{project_id}.json").write_text(json.dumps(proj))
+    return proj
+
+
+class FakeEmbedder:
+    """Deterministic embedding client for MRL math tests.
+
+    Maps text -> vector by hashing tokens into a fixed 8-dim space; vectors
+    are NOT normalized so truncation+renormalization is observable."""
+
+    def __init__(self, dim: int = 8, model_path: str = "/models/fake.gguf"):
+        self.dim_full = dim
+        self.model_path = model_path
+        self.url = None
+        self.dim = None
+        self.embed_calls = 0
+
+    def available(self) -> bool:
+        return True
+
+    @property
+    def state(self):
+        return {"mode": "spawn", "url": None, "model_path": self.model_path,
+                "running": False, "dim": self.dim}
+
+    def embed(self, texts):
+        self.embed_calls += 1
+        import hashlib
+        out = []
+        for t in texts:
+            v = [0.0] * self.dim_full
+            words = t.lower().split()
+            for w in words:
+                h = int(hashlib.md5(w.encode()).hexdigest(), 16)
+                v[h % self.dim_full] += 1.0
+            # make vector non-unit and distinct per content
+            v = [x + 0.05 * (i + 1) for i, x in enumerate(v)]
+            out.append(v)
+        return out
+
+    def stop(self):
+        pass
+
+
+# ---------------------------------------------------------------- fixtures
+
+@pytest.fixture()
+def home__test_indexing_phase5(tmp_path, monkeypatch):
+    h = tmp_path / "uf-home"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    return h
+
+
+@pytest.fixture()
+def app__test_indexing_phase5(home__test_indexing_phase5):
+    return DashboardApp(SableConfig(), home=home__test_indexing_phase5)
+
+
+# ------------------------------------------------- 1. per-project isolation
+
+def test_per_project_db_isolation(tmp_path, home__test_indexing_phase5):
+    a_root = tmp_path / "proj-a"
+    b_root = tmp_path / "proj-b"
+    make_project(home__test_indexing_phase5, "proja", a_root)
+    make_project(home__test_indexing_phase5, "projb", b_root)
+    (a_root / "alpha.py").write_text("def alpha_widget():\n    return 'alpha'\n")
+    (b_root / "beta.py").write_text("def beta_gadget():\n    return 'beta'\n")
+
+    cfg = SableConfig(indexing={"enabled": True})
+    ia = get_index(home__test_indexing_phase5, cfg=cfg, project_id="proja")
+    ib = get_index(home__test_indexing_phase5, cfg=cfg, project_id="projb")
+    assert ia.db_path == home__test_indexing_phase5 / "index" / "proja.db"
+    assert ib.db_path != ia.db_path
+    ia.build()
+    ib.build()
+
+    hits_a = ia.search("alpha widget")
+    assert hits_a and all("alpha.py" in h["path"] for h in hits_a)
+    # searching project B never returns project A's chunks
+    hits_b = ib.search("alpha widget")
+    assert all("alpha.py" not in h["path"] for h in hits_b)
+
+    # default DB is a separate file and stays empty
+    idf = get_index(home__test_indexing_phase5, cfg=cfg)
+    assert idf.db_path == home__test_indexing_phase5 / "index" / f"{DEFAULT_DB_ID}.db"
+    st = idf.status()
+    assert st["files"] == 0
+
+
+def test_project_roots_derived_from_workspace(tmp_path, home__test_indexing_phase5):
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "x.py").write_text("def x():\n    return 1\n")
+    make_project(home__test_indexing_phase5, "projr", root)
+    cfg = SableConfig(indexing={"enabled": True,
+                                  "paths_override": [str(tmp_path)]})
+    idx = get_index(home__test_indexing_phase5, cfg=cfg, project_id="projr")
+    # project DB ignores paths_override: its only root is workspace_dir
+    assert idx.roots == [root]
+
+
+def test_get_index_cache_refreshes_on_config_change(home__test_indexing_phase5):
+    cfg1 = SableConfig(indexing={"enabled": True, "output_dim": 768})
+    i1 = get_index(home__test_indexing_phase5, cfg=cfg1)
+    cfg2 = SableConfig(indexing={"enabled": True, "output_dim": 256})
+    i2 = get_index(home__test_indexing_phase5, cfg=cfg2)
+    assert i2.output_dim == 256
+    assert get_index(home__test_indexing_phase5, cfg=cfg2) is i2  # stable afterwards
+
+
+# ------------------------------------------------------- 2. MRL truncation
+
+def test_truncate_renorm_math():
+    v = [3.0, 4.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
+    t = truncate_renorm(v, 2)
+    assert len(t) == 2
+    assert math.isclose(math.sqrt(sum(x * x for x in t)), 1.0)
+    assert math.isclose(t[0], 0.6) and math.isclose(t[1], 0.8)
+    # dim >= len keeps the full vector, renormalized
+    f = truncate_renorm(v, 16)
+    assert len(f) == len(v)
+    assert math.isclose(math.sqrt(sum(x * x for x in f)), 1.0)
+    # falsy dim: untouched copy
+    assert truncate_renorm(v, None) == v
+
+
+def test_mrl_stored_and_query_vectors_truncated(tmp_path, home__test_indexing_phase5):
+    root = tmp_path / "mrl"
+    root.mkdir()
+    (root / "a.py").write_text("alpha widget one two\n")
+    (root / "b.py").write_text("beta gadget three four\n")
+    make_project(home__test_indexing_phase5, "projm", root)
+
+    cfg = SableConfig(indexing={"enabled": True, "model": "/models/fake.gguf",
+                                  "output_dim": 4})
+    idx = get_index(home__test_indexing_phase5, cfg=cfg, project_id="projm")
+    fake = FakeEmbedder(dim=8)
+    # Duck-typed test double; setattr keeps the type checker happy.
+    setattr(idx, "_embed", fake)
+
+    res = idx.build()
+    assert res["embedded"] > 0 and res["embed_ok"] is True
+
+    # stored vectors are exactly output_dim long and unit-normalized
+    import sqlite3
+    from sable.core.indexer import _unpack
+    con = sqlite3.connect(str(idx.db_path))
+    blobs = [r[0] for r in con.execute(
+        "SELECT embedding FROM chunks WHERE embedding IS NOT NULL")]
+    meta = dict(con.execute("SELECT key, value FROM meta"))
+    con.close()
+    assert blobs
+    for b in blobs:
+        v = _unpack(b)
+        assert len(v) == 4
+        assert math.isclose(math.sqrt(sum(x * x for x in v)), 1.0,
+                            rel_tol=1e-6)
+    assert meta["vector_dim"] == "4"
+    assert meta["model_id"] == "/models/fake.gguf"
+
+    # query vector truncated too (fake returns 8 dims; search must cope)
+    hits = idx.search("alpha widget one two", mode="semantic")
+    assert hits and fake.embed_calls >= 2
+
+
+def test_dim_mismatch_requires_rebuild(tmp_path, home__test_indexing_phase5):
+    root = tmp_path / "dim"
+    root.mkdir()
+    (root / "a.py").write_text("alpha widget one two\n")
+    make_project(home__test_indexing_phase5, "projd", root)
+
+    cfg = SableConfig(indexing={"enabled": True, "model": "/models/fake.gguf",
+                                  "output_dim": 4})
+    idx = get_index(home__test_indexing_phase5, cfg=cfg, project_id="projd")
+    setattr(idx, "_embed", FakeEmbedder(dim=8))
+    idx.build()
+
+    # now query at a different dim: the DB was built at 4 dims
+    cfg2 = SableConfig(indexing={"enabled": True, "model": "/models/fake.gguf",
+                                   "output_dim": 6})
+    idx2 = CodebaseIndex(home__test_indexing_phase5, cfg=cfg2, project_id="projd")
+    setattr(idx2, "_embed", FakeEmbedder(dim=8))
+    with pytest.raises(IndexRebuildRequired):
+        idx2.search("alpha widget", mode="semantic")
+
+
+def test_model_change_requires_rebuild(tmp_path, home__test_indexing_phase5):
+    root = tmp_path / "mod"
+    root.mkdir()
+    (root / "a.py").write_text("alpha widget one two\n")
+    make_project(home__test_indexing_phase5, "projmm", root)
+    cfg = SableConfig(indexing={"enabled": True, "model": "/models/a.gguf",
+                                  "output_dim": 4})
+    idx = get_index(home__test_indexing_phase5, cfg=cfg, project_id="projmm")
+    setattr(idx, "_embed", FakeEmbedder(dim=8, model_path="/models/a.gguf"))
+    idx.build()
+
+    cfg2 = SableConfig(indexing={"enabled": True, "model": "/models/b.gguf",
+                                   "output_dim": 4})
+    idx2 = CodebaseIndex(home__test_indexing_phase5, cfg=cfg2, project_id="projmm")
+    setattr(idx2, "_embed", FakeEmbedder(dim=8, model_path="/models/b.gguf"))
+    with pytest.raises(IndexRebuildRequired):
+        idx2.search("alpha widget", mode="semantic")
+
+
+# ---------------------------------------------------- 3. project delete
+
+def test_delete_project_index_only_that_file(home__test_indexing_phase5):
+    idxdir = home__test_indexing_phase5 / "index"
+    idxdir.mkdir(parents=True)
+    (idxdir / "projax.db").write_text("a")
+    (idxdir / "projay.db").write_text("b")
+    (idxdir / f"{DEFAULT_DB_ID}.db").write_text("d")
+
+    assert delete_project_index(home__test_indexing_phase5, "projax") is True
+    assert not (idxdir / "projax.db").exists()
+    assert (idxdir / "projay.db").is_file()
+    assert (idxdir / f"{DEFAULT_DB_ID}.db").is_file()
+    # refusing to nuke the default DB
+    assert delete_project_index(home__test_indexing_phase5, DEFAULT_DB_ID) is False
+    assert (idxdir / f"{DEFAULT_DB_ID}.db").is_file()
+
+
+def test_project_delete_endpoint_removes_db(app__test_indexing_phase5, home__test_indexing_phase5, tmp_path):
+    root = tmp_path / "wsd"
+    root.mkdir()
+    make_project(home__test_indexing_phase5, "projdel", root)
+    idxdir = home__test_indexing_phase5 / "index"
+    idxdir.mkdir(parents=True, exist_ok=True)
+    (idxdir / "projdel.db").write_text("x")
+    (idxdir / f"{DEFAULT_DB_ID}.db").write_text("y")
+
+    r = app__test_indexing_phase5.handle("DELETE", "/api/projects/projdel", body={})
+    assert r.status == 200 and r.body["ok"] is True
+    assert r.body["index_removed"] is True
+    assert not (idxdir / "projdel.db").exists()
+    assert (idxdir / f"{DEFAULT_DB_ID}.db").is_file()
+
+
+# --------------------------------------------------- 4. spawn/stop lifecycle
+
+STUB__test_indexing_phase5 = '''#!/usr/bin/env python3
+import argparse, json, os, sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+p = argparse.ArgumentParser()
+p.add_argument("-m", dest="model", required=True)
+p.add_argument("--embedding", action="store_true")
+p.add_argument("--alias", default=None)
+p.add_argument("--host", default=None)
+p.add_argument("--port", type=int, required=True)
+p.add_argument("-ngl", dest="ngl", type=int, default=None)
+p.add_argument("-b", dest="batch", type=int, default=None)
+p.add_argument("-ub", dest="ubatch", type=int, default=None)
+p.add_argument("-c", dest="ctx", type=int, default=None)
+a = p.parse_args()
+
+if a.host != "127.0.0.1":
+    print("stub: refusing non-loopback bind", file=sys.stderr); sys.exit(4)
+if not a.embedding:
+    print("stub: --embedding missing", file=sys.stderr); sys.exit(5)
+
+with open(os.environ.get("STUB_PIDFILE", "/dev/null"), "w") as f:
+    f.write(str(os.getpid()))
+if os.environ.get("STUB_ARGFILE"):
+    with open(os.environ["STUB_ARGFILE"], "w") as f:
+        json.dump(sys.argv[1:], f)
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):  # noqa: A002 - silence access log
+        pass
+    def do_GET(self):
+        if self.path.rstrip("/") == "/v1/models":
+            body = json.dumps({"object": "list", "data": [{"id": "sable-embeddings"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body)
+        else:
+            self.send_response(404); self.end_headers()
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        payload = json.loads(self.rfile.read(n) or b"{}")
+        inputs = payload.get("input") or []
+        data = [{"index": i, "embedding": [0.1] * 8} for i in range(len(inputs))]
+        body = json.dumps({"object": "list", "data": data}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers(); self.wfile.write(body)
+
+srv = ThreadingHTTPServer((a.host, a.port), H)
+print("stub embed server ready", flush=True)
+srv.serve_forever()
+'''
+
+
+@pytest.fixture()
+def stub_binary(tmp_path):
+    p = tmp_path / "llama-server"
+    p.write_text(STUB__test_indexing_phase5)
+    p.chmod(p.stat().st_mode | stat.S_IEXEC)
+    return str(p)
+
+
+def test_build_backfills_null_embeddings(tmp_path, home__test_indexing_phase5):
+    """A build that previously failed mid-embed (NULL rows, files tracked)
+    retries those chunks on the next build instead of skipping them."""
+    root = tmp_path / "bfws"
+    root.mkdir()
+    (root / "a.py").write_text("alpha widget\n")
+    make_project(home__test_indexing_phase5, "projbf", root)
+    cfg = SableConfig(indexing={"enabled": True,
+                                  "model": "/models/fake.gguf"})
+    idx = CodebaseIndex(home__test_indexing_phase5, cfg=cfg, project_id="projbf")
+    fake = FakeEmbedder(dim=8)
+    setattr(idx, "_embed", fake)
+    res = idx.build()
+    assert res["embedded"] > 0
+    # simulate a failed partial embed: wipe one embedding, keep files tracked
+    con = sqlite3.connect(str(idx.db_path))
+    con.execute("UPDATE chunks SET embedding=NULL")
+    con.commit()
+    con.close()
+    fake2 = FakeEmbedder(dim=8)
+    setattr(idx, "_embed", fake2)
+    res2 = idx.build()  # no file changes: only the NULL backfill path
+    assert res2["embedded"] > 0 and fake2.embed_calls >= 1
+    con = sqlite3.connect(str(idx.db_path))
+    n_null = con.execute(
+        "SELECT COUNT(*) FROM chunks WHERE embedding IS NULL").fetchone()[0]
+    con.close()
+    assert n_null == 0
+
+
+def test_embed_client_passes_batch_flags(tmp_path, home__test_indexing_phase5, stub_binary,
+                                         monkeypatch):
+    """Spawn sets -b/-ub/-c so inputs over the 512 default are accepted."""
+    argvfile = tmp_path / "argv.json"
+    monkeypatch.setenv("STUB_ARGFILE", str(argvfile))
+    client = EmbeddingClient(model_path=str(tmp_path / "m.gguf"),
+                             cfg=SableConfig(
+                                 llama_server_binary=stub_binary,
+                                 llama_auto_setup=False))
+    (tmp_path / "m.gguf").write_bytes(b"GGUF")
+    try:
+        assert client.ensure_running()
+        argv = json.loads(argvfile.read_text())
+        assert argv[argv.index("-ub") + 1] == str(EMBED_UBATCH)
+        assert argv[argv.index("-b") + 1] == str(EMBED_UBATCH)
+        assert argv[argv.index("-c") + 1] == str(EMBED_UBATCH)
+    finally:
+        client.stop()
+
+
+def test_clip_to_tokens():
+    short = "x" * 60
+    assert clip_to_tokens(short, 128) == short
+    long = "\n".join(["word " * 12 + str(i) for i in range(2000)])
+    out = clip_to_tokens(long, 500)
+    assert len(out) <= 500 * 2 and len(out) < len(long)
+    # prefix of the original, cut at a newline boundary, not over-clipped
+    assert long.startswith(out) and long[len(out)] == "\n"
+    assert len(out) > 400 * 2
+
+
+def test_embed_client_spawn_stop_loopback(tmp_path, home__test_indexing_phase5, stub_binary,
+                                          monkeypatch):
+    """Build spawns the owned server (loopback-only), stop() terminates it."""
+    pidfile = tmp_path / "stub.pid"
+    monkeypatch.setenv("STUB_PIDFILE", str(pidfile))
+    root = tmp_path / "spawnws"
+    root.mkdir()
+    (root / "a.py").write_text("alpha widget\n")
+    make_project(home__test_indexing_phase5, "projsp", root)
+
+    cfg = SableConfig(indexing={"enabled": True,
+                                  "model": str(tmp_path / "emb.gguf")},
+                        llama_server_binary=stub_binary,
+                        llama_auto_setup=False)
+    (tmp_path / "emb.gguf").write_bytes(b"GGUF")
+    idx = CodebaseIndex(home__test_indexing_phase5, cfg=cfg, project_id="projsp")
+    try:
+        res = idx.build()
+        assert res["embed_ok"] is True and res["embedded"] > 0
+        child_pid = int(pidfile.read_text())
+        # process alive while owned server runs; registered for cleanup
+        os.kill(child_pid, 0)
+        import sable.core.indexer as im
+        assert idx.embedder() in im._spawned_clients
+
+        stop_all_embed_servers()
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+                time.sleep(0.1)
+            except OSError:
+                break
+        else:
+            pytest.fail("spawned embedding server still running after stop")
+        assert not idx.embedder()._proc
+    finally:
+        idx.stop_embed_server()
+
+
+def test_stop_all_never_touches_foreign_processes(stub_binary, tmp_path,
+                                                  monkeypatch):
+    """A process sable did not spawn survives stop_all_embed_servers."""
+    foreign = subprocess.Popen([sys.executable, "-c",
+                                "import time; time.sleep(30)"])
+    try:
+        stop_all_embed_servers()  # nothing registered => no-op
+        assert foreign.poll() is None
+        # with a registered client, only the client's own child stops
+        pidfile = tmp_path / "stub2.pid"
+        monkeypatch.setenv("STUB_PIDFILE", str(pidfile))
+        client = EmbeddingClient(model_path=str(tmp_path / "m.gguf"),
+                                 cfg=SableConfig(
+                                     llama_server_binary=stub_binary,
+                                     llama_auto_setup=False))
+        (tmp_path / "m.gguf").write_bytes(b"GGUF")
+        base = client.ensure_running()
+        assert base and base.startswith("http://127.0.0.1:")
+        child_pid = int(pidfile.read_text())
+        stop_all_embed_servers()
+        os.kill(foreign.pid, 0)          # foreign untouched
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            try:
+                os.kill(child_pid, 0)
+                time.sleep(0.1)
+            except OSError:
+                break
+    finally:
+        foreign.terminate()
+        foreign.wait(timeout=5)
+
+
+def test_spawn_failure_surfaces_clear_error(tmp_path, home__test_indexing_phase5):
+    """Missing llama-server binary => build raises, no silent fallback."""
+    root = tmp_path / "nofind"
+    root.mkdir()
+    (root / "a.py").write_text("alpha widget\n")
+    make_project(home__test_indexing_phase5, "projnf", root)
+    cfg = SableConfig(indexing={"enabled": True,
+                                  "model": str(tmp_path / "e.gguf")},
+                        llama_server_binary=str(tmp_path / "nope"),
+                        llama_auto_setup=False)
+    (tmp_path / "e.gguf").write_bytes(b"GGUF")
+    idx = CodebaseIndex(home__test_indexing_phase5, cfg=cfg, project_id="projnf")
+    with pytest.raises(RuntimeError) as ei:
+        idx.build()
+    assert "embedding server error" in str(ei.value)
+
+
+# ----------------------------------------------------- 5. legacy config keys
+
+def test_legacy_indexing_keys_load_without_crash(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "old.yaml"
+    cfg_file.write_text(
+        "indexing:\n"
+        "  enabled: true\n"
+        "  embedding_model: /models/old.gguf\n"
+        "  embedding_url: http://127.0.0.1:9999/v1\n"
+        "  top_k: 3\n"
+        "  paths:\n"
+        "    - /some/root\n"
+        "  search_mode: semantic\n")
+    monkeypatch.setenv("SABLE_CONFIG", str(cfg_file))
+    cfg = load_config()
+    ix = cfg.indexing
+    assert ix["enabled"] is True
+    assert ix["model"] == "/models/old.gguf"       # embedding_model -> model
+    assert ix["paths_override"] == ["/some/root"]  # paths -> paths_override
+    assert "embedding_url" not in ix               # attach mode absorbed
+    assert "top_k" not in ix                       # internal constant now
+    assert ix["search_mode"] == "semantic"
+    # and the indexer consumes it without exploding
+    idx = CodebaseIndex(tmp_path / "h", cfg=cfg)
+    assert idx.model_path == "/models/old.gguf"
+    assert idx.top_k == 8  # SEARCH_TOP_K, not the old 3
+
+
+def test_config_put_accepts_phase5_indexing_keys(app__test_indexing_phase5, home__test_indexing_phase5, monkeypatch):
+    monkeypatch.setenv("SABLE_CONFIG", str(home__test_indexing_phase5 / "sable.yaml"))
+    r = app__test_indexing_phase5.handle("PUT", "/api/config", body={
+        "section": "indexing",
+        "patch": {"enabled": True, "model": "/models/x.gguf",
+                  "output_dim": 512, "paths_override": ["/x"]}})
+    assert r.status == 200, r.body
+    # legacy keys still round-trip (absorbed on load, not rejected on write)
+    r = app__test_indexing_phase5.handle("PUT", "/api/config", body={
+        "section": "indexing", "patch": {"top_k": 4}})
+    assert r.status == 200, r.body
+    cfg = load_config(str(home__test_indexing_phase5 / "sable.yaml"))
+    assert cfg.indexing["model"] == "/models/x.gguf"
+    assert cfg.indexing["output_dim"] == 512
+    assert "top_k" not in cfg.indexing
+
+
+# ------------------------------------------------- 6. search_codebase routing
+
+def test_search_codebase_routes_by_bound_project(monkeypatch, tmp_path, home__test_indexing_phase5):
+    import sable.core.tools as uf_tools  # noqa: F811
+
+    a_root = tmp_path / "ra"
+    b_root = tmp_path / "rb"
+    make_project(home__test_indexing_phase5, "routea", a_root)
+    make_project(home__test_indexing_phase5, "routeb", b_root)
+    # spaced words: the BM25 tokenizer keeps identifiers like alpha_widget
+    # as one token, so query terms must appear as separate words.
+    (a_root / "alpha.py").write_text("# alpha widget factory\nx = 1\n")
+    (b_root / "beta.py").write_text("# beta gadget factory\ny = 2\n")
+
+    cfg = SableConfig(indexing={"enabled": True})
+    ia = get_index(home__test_indexing_phase5, cfg=cfg, project_id="routea")
+    ib = get_index(home__test_indexing_phase5, cfg=cfg, project_id="routeb")
+    ia.build()
+    ib.build()
+
+    import functools
+    out_a = uf_tools.search_codebase("alpha widget", _project_id="routea",
+                    _workspace_dir=str(a_root))
+    assert "alpha.py" in out_a
+    out_b = uf_tools.search_codebase("alpha widget", _project_id="routeb",
+                                     _workspace_dir=str(b_root))
+    assert "alpha.py" not in out_b  # no cross-project results
+
+    # create_runner binds the partial when project_id is given
+    from sable.core.agent_runner import create_runner
+
+    runner = create_runner(cfg, "http://127.0.0.1:1/v1", "m",
+                           project_workspace_dir=str(a_root),
+                           project_id="routea")
+    impl = runner.tool_impls["search_codebase"]
+    assert isinstance(impl, functools.partial)
+    assert impl.keywords.get("_project_id") == "routea"
+    assert impl.keywords.get("_workspace_dir") == str(a_root)
+
+    runner2 = create_runner(cfg, "http://127.0.0.1:1/v1", "m")
+    assert not isinstance(runner2.tool_impls["search_codebase"],
+                          functools.partial) or \
+        "_project_id" not in getattr(runner2.tool_impls["search_codebase"],
+                                     "keywords", {})
+
+
+# ------------------------------------------------------- dashboard endpoints
+
+def test_index_build_endpoint_routes_project(app__test_indexing_phase5, home__test_indexing_phase5, tmp_path):
+    root = tmp_path / "epws"
+    root.mkdir()
+    (root / "a.py").write_text("alpha widget\n")
+    make_project(home__test_indexing_phase5, "projep", root)
+
+    r = app__test_indexing_phase5.handle("POST", "/api/index/build", body={"project": "projep"})
+    assert r.status == 200 and r.body["project"] == "projep"
+    st = {}
+    for _ in range(100):
+        st = app__test_indexing_phase5.handle("GET", "/api/index", query={"project": "projep"}).body
+        if not st["building"] and st["chunks"]:
+            break
+        time.sleep(0.05)
+    assert st["files"] == 1
+    assert (home__test_indexing_phase5 / "index" / "projep.db").is_file()
+
+    r = app__test_indexing_phase5.handle("POST", "/api/index/build", body={"project": "nope"})
+    assert r.status == 404
+
+
+def test_index_status_reports_phase5_fields(app__test_indexing_phase5, home__test_indexing_phase5, tmp_path):
+    root = tmp_path / "stws"
+    root.mkdir()
+    make_project(home__test_indexing_phase5, "projst", root)
+    cfgd = SableConfig(indexing={"enabled": True, "output_dim": 256})
+    app__test_indexing_phase5.cfg = cfgd
+    r = app__test_indexing_phase5.handle("GET", "/api/index", query={"project": "projst"})
+    assert r.status == 200
+    body = r.body
+    assert body["enabled"] is True
+    assert body["project_id"] == "projst"
+    assert body["output_dim"] == 256
+    assert body["roots"] == [str(root)]
+
+# ------------------------------------------------------------------------
+# from tests/test_run_settings_v2.py
+# ------------------------------------------------------------------------
+
+def _has(args, *tokens):
+    s = "\x00".join(args)
+    return ("\x00".join(tokens)) in s
+
+
+# ------------------------------------------------- 1. speculative decoding
+
+def test_canonical_spec_mode_aliases():
+    assert canonical_spec_mode("auto") == "auto"
+    assert canonical_spec_mode("default") == "auto"
+    assert canonical_spec_mode("none") == "off"
+    assert canonical_spec_mode("draft-mtp") == "mtp"
+    assert canonical_spec_mode("ngram-mod") == "ngram"
+    assert canonical_spec_mode("mtp+ngram") == "ngram+mtp"
+    assert canonical_spec_mode("ngram-mod,draft-mtp") == "ngram+mtp"
+    assert canonical_spec_mode(None) is None
+    assert canonical_spec_mode("garbage") is None
+
+
+def test_speculative_args_emissions(tmp_path):
+    drafter = tmp_path / "mtp-model-Q8_0.gguf"
+    drafter.write_bytes(b"GGUF")
+    assert speculative_args({}) == []
+    assert speculative_args({"speculative_type": "off"}) == []
+    assert speculative_args({"speculative_type": "auto"}) == \
+        ["--spec-type", "ngram-mod"]
+    # MTP modes need a drafter: explicit mtp_path -> --model-draft.
+    a = speculative_args({"speculative_type": "mtp",
+                          "mtp_path": str(drafter)})
+    assert _has(a, "--spec-type", "draft-mtp")
+    assert _has(a, "--model-draft", str(drafter))
+    b = speculative_args({"speculative_type": "ngram+mtp",
+                          "mtp_path": str(drafter),
+                          "spec_draft_n_max": 3})
+    assert _has(b, "--spec-type", "ngram-mod,draft-mtp")
+    assert _has(b, "--model-draft", str(drafter))
+    assert _has(b, "--spec-draft-n-max", "3")
+    # No drafter anywhere (no mtp_path, no gguf sibling): degrade to ngram so
+    # llama-server never exits early on a missing draft model.
+    assert speculative_args({"speculative_type": "mtp"}) == \
+        ["--spec-type", "ngram-mod"]
+    assert speculative_args({"speculative_type": "mtp",
+                             "mtp_path": str(tmp_path / "nope.gguf")}) == \
+        ["--spec-type", "ngram-mod"]
+
+
+def test_speculative_mtp_autodetects_sibling(tmp_path):
+    gguf = tmp_path / "model-Q4_K_M.gguf"
+    gguf.write_bytes(b"GGUF")
+    mtp = tmp_path / "mtp-model-Q8_0.gguf"
+    mtp.write_bytes(b"GGUF")
+    a = speculative_args({"speculative_type": "mtp"}, gguf_path=str(gguf))
+    assert _has(a, "--spec-type", "draft-mtp")
+    assert _has(a, "--model-draft", str(mtp.resolve()))
+
+
+def test_run_settings_args_includes_spec():
+    args = run_settings_args({"speculative_type": "ngram"})
+    assert _has(args, "--spec-type", "ngram-mod")
+
+
+def test_sanitize_new_run_setting_keys():
+    out = sanitize_run_settings({
+        "vision": False, "speculative_type": "DRAFT-MTP",
+        "spec_draft_n_max": 4})
+    assert out["vision"] is False
+    assert out["speculative_type"] == "mtp"
+    assert out["spec_draft_n_max"] == 4
+    with pytest.raises(ValueError):
+        sanitize_run_settings({"speculative_type": "quantum"})
+    with pytest.raises(ValueError):
+        sanitize_run_settings({"spec_draft_n_max": 99})
+
+
+# ------------------------------------------------- 2. mmproj detection
+
+def test_find_local_sibling(tmp_path):
+    gguf = tmp_path / "model-Q4_K_M.gguf"
+    gguf.write_bytes(b"GGUF")
+    assert mmproj.find_local(str(gguf)) is None
+    proj = tmp_path / "mmproj-model-F16.gguf"
+    proj.write_bytes(b"GGUF")
+    assert mmproj.find_local(str(gguf)) == str(proj.resolve())
+    # non-mmproj ggufs and other extensions don't count
+    (tmp_path / "other.gguf").write_bytes(b"x")
+    found = mmproj.find_local(str(gguf))
+    assert found is not None and Path(found).name == proj.name
+
+
+def test_is_mmproj_name():
+    assert mmproj.is_mmproj_name("mmproj.gguf")
+    assert mmproj.is_mmproj_name("mmproj-F16.gguf")
+    assert mmproj.is_mmproj_name("Qwen3-VL-mmproj-BF16.gguf")
+    assert not mmproj.is_mmproj_name("model-Q4_K_M.gguf")
+    assert not mmproj.is_mmproj_name("mmproj.safetensors")
+
+
+def test_resolve_mmproj_toggle_precedence(tmp_path):
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"G")
+    proj = tmp_path / "mmproj.gguf"
+    proj.write_bytes(b"P")
+    # default (no vision key): auto-detect the sibling
+    assert mmproj.resolve_mmproj(str(gguf), {}) == str(proj.resolve())
+    # explicit off wins
+    assert mmproj.resolve_mmproj(str(gguf), {"vision": False}) is None
+    # explicit manual path overrides detection
+    other = tmp_path / "manual-mmproj.gguf"
+    other.write_bytes(b"M")
+    assert mmproj.resolve_mmproj(
+        str(gguf), {"mmproj_path": str(other)}) == str(other.resolve())
+    # dead manual path => absent, not a crash
+    assert mmproj.resolve_mmproj(
+        str(gguf), {"mmproj_path": str(tmp_path / "gone.gguf")}) is None
+
+
+def test_source_repo_for_hub_layout_and_manifest(tmp_path):
+    snap = (tmp_path / "models--testorg--Test-GGUF" / "snapshots" / "abc123")
+    snap.mkdir(parents=True)
+    g = snap / "model.gguf"
+    g.write_bytes(b"G")
+    assert mmproj.source_repo_for(str(g)) == "testorg/Test-GGUF"
+    # loose file with a manifest
+    loose = tmp_path / "loose"
+    loose.mkdir()
+    (loose / "m.gguf").write_bytes(b"G")
+    (loose / "sable_download.json").write_text(
+        json.dumps({"repo_id": "org/From-Manifest"}))
+    assert mmproj.source_repo_for(str(loose / "m.gguf")) == "org/From-Manifest"
+    # loose file, no provenance
+    (tmp_path / "plain.gguf").write_bytes(b"G")
+    assert mmproj.source_repo_for(str(tmp_path / "plain.gguf")) is None
+
+
+# ---------------------------------------------------- fake hub + download
+
+class _HubHandler(BaseHTTPRequestHandler):
+    def log_message(self, format, *args):  # noqa: A002 - silence access log
+        pass
+
+    def do_GET(self):
+        p = self.path.split("?")[0]
+        if p == "/api/models/org/Vision-GGUF":
+            body = json.dumps({
+                "id": "org/Vision-GGUF", "sha": "cafe1234",
+                "siblings": [
+                    {"rfilename": "vision-Q4_K_M.gguf", "size": 4},
+                    {"rfilename": "mmproj-BF16.gguf", "size": 5},
+                ]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif p == "/org/Vision-GGUF/resolve/cafe1234/mmproj-BF16.gguf":
+            body = b"MMPRJ"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+
+@pytest.fixture()
+def fake_hub(monkeypatch):
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _HubHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    monkeypatch.setenv("HF_ENDPOINT", f"http://127.0.0.1:{port}")
+    yield srv
+    srv.shutdown()
+
+
+def test_remote_candidates_and_download(tmp_path, fake_hub):
+    snap = (tmp_path / "models--org--Vision-GGUF" / "snapshots" / "cafe1234")
+    snap.mkdir(parents=True)
+    gguf = snap / "vision-Q4_K_M.gguf"
+    gguf.write_bytes(b"GGUF")
+
+    cands = mmproj.remote_mmproj_candidates("org/Vision-GGUF")
+    assert [c["rfilename"] for c in cands] == ["mmproj-BF16.gguf"]
+
+    info = mmproj.download_for(str(gguf))
+    # lands NEXT TO the GGUF (expected launcher behavior)
+    assert Path(info["path"]).parent == snap.resolve()
+    assert Path(info["path"]).name == "mmproj-BF16.gguf"
+    assert Path(info["path"]).read_bytes() == b"MMPRJ"
+    # now detection finds it
+    assert mmproj.find_local(str(gguf)) == info["path"]
+
+
+def test_download_requires_provenance(tmp_path):
+    (tmp_path / "plain.gguf").write_bytes(b"G")
+    with pytest.raises(ValueError):
+        mmproj.download_for(str(tmp_path / "plain.gguf"))
+
+
+# ------------------------------------- 3. per-instance non-inheritance
+
+class _Cfg:
+    run_settings = {"flash_attn": True, "kv_cache_type": "q8_0"}
+    context_length = 4096
+    gpu_layers = None
+    extra_llama_args = []
+
+
+def test_named_instance_does_not_inherit_global_run_settings():
+    rt_gpus_none = None
+    inst = {"id": "coding", "gguf": "/x/model.gguf",
+            "run_settings": {"parallel": 4}}
+    cmd = build_instance_cmd("llama-server", _Cfg(), inst, port=1234,
+                             model_name="m", rt=rt_gpus_none)
+    assert "--flash-attn" not in cmd          # global setting NOT inherited
+    assert "-ctk" not in cmd
+    assert _has(cmd, "-np", "4")              # own settings applied
+
+
+def test_default_instance_inherits_global_run_settings():
+    for ident in ({"id": "default"}, {"default": True}):
+        inst = {**ident, "gguf": "/x/model.gguf"}
+        cmd = build_instance_cmd("llama-server", _Cfg(), inst, port=1234,
+                                 model_name="m", rt=None)
+        assert "--flash-attn" in cmd
+
+
+def test_instance_cmd_vision_toggle_and_spec(tmp_path):
+    gguf = tmp_path / "m.gguf"
+    gguf.write_bytes(b"G")
+    (tmp_path / "mmproj.gguf").write_bytes(b"P")
+    inst = {"id": "vision", "gguf": str(gguf), "run_settings": {}}
+    cmd = build_instance_cmd("llama-server", _Cfg(), inst, port=1,
+                             model_name="m", rt=None)
+    assert _has(cmd, "--mmproj", str((tmp_path / "mmproj.gguf").resolve()))
+    inst2 = {"id": "textonly", "gguf": str(gguf),
+             "run_settings": {"vision": False}}
+    cmd2 = build_instance_cmd("llama-server", _Cfg(), inst2, port=1,
+                              model_name="m", rt=None)
+    assert "--mmproj" not in cmd2
+
+
+# ------------------------------------------ 4. dashboard API behavior
+
+@pytest.fixture()
+def home__test_run_settings_v2(tmp_path, monkeypatch):
+    h = tmp_path / "uf-rs2"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    return h
+
+
+def make_app__test_run_settings_v2(home) -> DashboardApp:
+    return DashboardApp(SableConfig(llama_auto_setup=False), home=home)
+
+
+def test_instance_create_validates_run_settings(home__test_run_settings_v2):
+    app = make_app__test_run_settings_v2(home__test_run_settings_v2)
+    gguf = Path(home__test_run_settings_v2).parent / "m.gguf"
+    gguf.write_bytes(b"G")
+    r = app.handle("POST", "/api/servers", body={
+        "name": "ok", "gguf": str(gguf),
+        "run_settings": {"speculative_type": "auto", "vision": True}})
+    assert r.status == 201
+    row = next(s for s in app.handle("GET", "/api/servers").body["servers"]
+               if s["name"] == "ok")
+    assert row["run_settings"]["speculative_type"] == "auto"
+    bad = app.handle("POST", "/api/servers", body={
+        "name": "bad", "gguf": str(gguf),
+        "run_settings": {"bogus_key": 1}})
+    assert bad.status == 400
+
+
+def test_default_instance_run_settings_put_rejected(home__test_run_settings_v2):
+    app = make_app__test_run_settings_v2(home__test_run_settings_v2)
+    r = app.handle("PUT", "/api/servers/default",
+                   body={"run_settings": {"flash_attn": True}})
+    assert r.status == 400
+
+
+def test_mmproj_status_endpoint(tmp_path, monkeypatch):
+    h = tmp_path / "uf-mm"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    app = DashboardApp(SableConfig(llama_auto_setup=False), home=h)
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"G")
+    r = app.handle("GET", "/api/mmproj", query={"gguf": str(gguf)})
+    assert r.body["local"] is None
+    (tmp_path / "mmproj-x.gguf").write_bytes(b"P")
+    r = app.handle("GET", "/api/mmproj", query={"gguf": str(gguf)})
+    assert r.body["local"].endswith("mmproj-x.gguf")
+    assert app.handle("GET", "/api/mmproj", query={}).status == 400
+
+
+def test_config_put_accepts_new_run_setting_keys(tmp_path, monkeypatch):
+    cfgp = tmp_path / "sable.yaml"
+    monkeypatch.setenv("SABLE_CONFIG", str(cfgp))
+    h = tmp_path / "uf-cfg"
+    app = DashboardApp(SableConfig(llama_auto_setup=False), home=h)
+    r = app.handle("PUT", "/api/config", body={
+        "section": "run_settings",
+        "patch": {"speculative_type": "auto", "vision": True,
+                  "spec_draft_n_max": 3}})
+    assert r.status == 200 and r.body["ok"]
+    import yaml
+    data = yaml.safe_load(cfgp.read_text())
+    assert data["run_settings"]["speculative_type"] == "auto"
+    assert data["run_settings"]["vision"] is True
+
+
+# ============================================================ image settings
+# Diffusion engines (sd-server): per-instance generation defaults instead of
+# the chat sampling knobs. sanitize_image_settings validates; 
+# image_settings_args emits sd-server flags.
+
+def test_sanitize_image_settings_valid_values():
+    from sable.serving.run_args import sanitize_image_settings
+
+    out = sanitize_image_settings({
+        "steps": 24, "cfg_scale": "7.5", "width": 1024, "height": 576,
+        "sampler": "DPM++2M".lower(), "scheduler": "karras",
+        "seed": -1, "batch_count": 2})
+    assert out == {"steps": 24, "cfg_scale": 7.5, "width": 1024,
+                   "height": 576, "sampler": "dpm++2m",
+                   "scheduler": "karras", "seed": -1, "batch_count": 2}
+
+
+def test_sanitize_image_settings_rejects_bad_values():
+    from sable.serving.run_args import sanitize_image_settings
+
+    for bad in ({"top_k": 5},                    # chat knob, not image
+                {"steps": 0}, {"steps": 999},
+                {"cfg_scale": -1}, {"cfg_scale": 31},
+                {"width": 8}, {"height": 99999},
+                {"sampler": "nope"}, {"scheduler": "nope"},
+                {"seed": -2}, {"batch_count": 0}):
+        with pytest.raises(ValueError):
+            sanitize_image_settings(bad)
+
+
+def test_sanitize_image_settings_clears_empty():
+    from sable.serving.run_args import sanitize_image_settings
+
+    assert sanitize_image_settings({"steps": None, "cfg_scale": "",
+                                    "seed": ""}) == {
+        "steps": None, "cfg_scale": None, "seed": None}
+
+
+def test_image_settings_args_emits_sd_server_flags():
+    from sable.serving.run_args import image_settings_args
+
+    args = image_settings_args({
+        "steps": 30, "cfg_scale": 6.5, "width": 768, "height": 1024,
+        "sampler": "euler_a", "scheduler": "sgm_uniform", "seed": 42,
+        "batch_count": 3, "extra_args": "--vae-tiling --offload-to-cpu"})
+    assert args == ["--steps", "30", "--cfg-scale", "6.5",
+                    "-W", "768", "-H", "1024",
+                    "--sampling-method", "euler_a",
+                    "--scheduler", "sgm_uniform",
+                    "-s", "42", "-b", "3",
+                    "--vae-tiling", "--offload-to-cpu"]
+
+
+def test_image_settings_args_empty_is_noop():
+    from sable.serving.run_args import image_settings_args
+
+    assert image_settings_args(None) == []
+    assert image_settings_args({}) == []
+    # seed 0 is a real seed and must still emit; batch_count 1 is the default
+    assert image_settings_args({"seed": 0, "batch_count": 1}) == ["-s", "0"]
+
+# ------------------------------------------------------------------------
+# from tests/test_run_settings_indexing.py
+# ------------------------------------------------------------------------
+
+# ------------------------------------------------------------ 1. run args
+
+def _has__test_run_settings_indexing(args, *tokens):
+    """True when the tokens appear consecutively in args."""
+    s = "\x00".join(args)
+    return ("\x00".join(tokens)) in s
+
+
+def test_run_args_empty():
+    assert run_settings_args(None) == []
+    assert run_settings_args({}) == []
+
+
+def test_run_args_kv_and_flags():
+    args = run_settings_args({
+        "kv_cache_type": "q8_0",
+        "flash_attn": True,
+        "parallel": 4,
+        "batch_size": 512,
+        "ubatch_size": 128,
+        "tensor_parallel": True,
+        "no_mmap": True,
+        "mlock": True,
+        "mmproj_path": "/x/mm.gguf",
+    })
+    assert _has__test_run_settings_indexing(args, "-ctk", "q8_0", "-ctv", "q8_0")
+    assert _has__test_run_settings_indexing(args, "--flash-attn", "on")
+    assert _has__test_run_settings_indexing(args, "-np", "4") and _has__test_run_settings_indexing(args, "-b", "512") \
+        and _has__test_run_settings_indexing(args, "-ub", "128")
+    assert "--tensor-parallel" in args and "--no-mmap" in args
+    assert "--mlock" in args and _has__test_run_settings_indexing(args, "--mmproj", "/x/mm.gguf")
+
+
+def test_run_args_f16_kv_is_default_noop():
+    assert run_settings_args({"kv_cache_type": "f16"}) == []
+
+
+def test_run_args_vram_budget_scales_ngl():
+    args = run_settings_args({"gpu_memory_pct": 50}, gpu_layers=999)
+    assert _has__test_run_settings_indexing(args, "-ngl", "499")
+    # 100% leaves the resolved offload untouched
+    assert run_settings_args({"gpu_memory_pct": 100}, gpu_layers=999) == []
+    assert scale_gpu_layers(999, 0) == 999
+
+
+def test_run_args_extra_args_split():
+    args = run_settings_args({"extra_args": "--rope-scaling yarn --yarn-orig-ctx 32768"})
+    assert args == ["--rope-scaling", "yarn", "--yarn-orig-ctx", "32768"]
+
+
+def test_sanitize_run_settings_rejects_unknown():
+    with pytest.raises(ValueError):
+        sanitize_run_settings({"bogus": 1})
+    with pytest.raises(ValueError):
+        sanitize_run_settings({"gpu_memory_pct": 101})
+    out = sanitize_run_settings({"kv_cache_type": "Q8_0", "flash_attn": 1,
+                                 "parallel": "4"})
+    assert out == {"kv_cache_type": "q8_0", "flash_attn": True, "parallel": 4}
+
+
+def test_pack_unpack_vectors():
+    v = [0.25, -1.5, 3.0]
+    assert _unpack(_pack(v)) == pytest.approx(v)
+    assert cosine(v, v) == pytest.approx(1.0)
+
+
+# ------------------------------------------------- 2. sampling + healing
+
+def test_sampling_injected_into_requests():
+    handler = make_message_handler({"*": {"role": "assistant", "content": "ok"}})
+    with FakeOpenAIServer(handler_cls=handler) as srv:
+        handler.requests.clear()
+        client = SableAgentClient(base_url=srv.base_url, model="m",
+                                    sampling={"temperature": 0.7, "top_k": 20})
+        client.run("hi")
+    assert handler.requests, "fake server saw no request"
+    sent = handler.requests[-1]
+    assert sent["temperature"] == 0.7
+    assert sent["top_k"] == 20
+
+
+def test_no_sampling_by_default():
+    handler = make_message_handler({"*": {"role": "assistant", "content": "ok"}})
+    with FakeOpenAIServer(handler_cls=handler) as srv:
+        handler.requests.clear()
+        client = SableAgentClient(base_url=srv.base_url, model="m")
+        client.run("hi")
+    sent = handler.requests[-1]
+    assert "temperature" not in sent and "top_k" not in sent
+
+
+def test_heal_tool_calls_toggle_off():
+    """With healing off, a fenced-JSON tool call stays plain text (final answer)."""
+    fenced = ('```json\n{"name": "todo_read", "arguments": {}}\n```')
+    handler = make_message_handler(
+        {"*": {"role": "assistant", "content": fenced}})
+    with FakeOpenAIServer(handler_cls=handler) as srv:
+        client = SableAgentClient(base_url=srv.base_url, model="m",
+                                    heal_tool_calls=False)
+        res = client.run("do it")
+    assert res.completed
+    # no tool executed -> the fenced block is (stripped or raw) final content,
+    # and importantly the loop ended after one turn without a tool round-trip.
+    assert "todo" not in (res.final_response or "").lower() or \
+        res.messages[-1]["role"] == "assistant"
+
+
+def test_create_runner_threads_sampling_and_healing(tmp_path, monkeypatch):
+    monkeypatch.setenv("SABLE_HOME", str(tmp_path))
+    cfg = SableConfig(sampling={"temperature": 0.1},
+                        agent={"heal_tool_calls": False})
+    from sable.core.agent_runner import create_runner
+
+    r = create_runner(cfg, "http://127.0.0.1:1/v1", "m")
+    assert r.sampling == {"temperature": 0.1}
+    assert r.heal_tool_calls is False
+
+
+# -------------------------------------------------------- 3. indexer
+
+@pytest.fixture()
+def project(tmp_path):
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "embeddings.py").write_text(
+        "def compute_embeddings(vectors):\n"
+        "    # normalize each embedding vector before cosine similarity\n"
+        "    return [v for v in vectors]\n" * 3)
+    (root / "src" / "toast.py").write_text(
+        "def raise_toast(message):\n    print('toast:', message)\n" * 3)
+    (root / "notes.md").write_text("# notes\nsemantic search rocks\n")
+    return root
+
+
+def test_chunk_file_line_windows(project):
+    chunks = chunk_file(project / "src" / "embeddings.py")
+    assert chunks and chunks[0][0] == 1
+    # windows overlap: second chunk starts before the first ends
+    if len(chunks) > 1:
+        assert chunks[1][0] <= chunks[0][1]
+
+
+def test_lexical_index_scores_matching_doc():
+    lx = LexicalIndex([(1, "embedding vector cosine similarity"),
+                       (2, "toast notifications ui")])
+    hits = lx.score("cosine embedding", limit=5)
+    assert hits and hits[0][0] == 1
+
+
+def test_index_build_and_lexical_search(tmp_path, project):
+    idx = CodebaseIndex(tmp_path / "home", cfg=None,
+                        index_cfg={"enabled": True, "paths": [str(project)]})
+    res = idx.build()
+    assert res["added"] == 3 and res["chunks"] >= 3
+    assert res["embedded"] == 0 and res["embed_ok"] is False  # no model set
+
+    hits = idx.search("cosine similarity embedding vector")
+    assert hits, "lexical search returned nothing"
+    assert hits[0]["path"].endswith("embeddings.py")
+
+    st = idx.status()
+    assert st["enabled"] and st["files"] == 3
+    assert st["embedding"]["mode"] == "none"
+
+
+def test_index_incremental_rebuild(tmp_path, project):
+    idx = CodebaseIndex(tmp_path / "home2", cfg=None,
+                        index_cfg={"enabled": True, "paths": [str(project)]})
+    first = idx.build()
+    assert first["added"] == 3
+    second = idx.build()          # nothing changed
+    assert second["added"] == 0 and second["updated"] == 0
+    (project / "extra.py").write_text("def extra():\n    return 42\n")
+    third = idx.build()
+    assert third["added"] == 1
+    (project / "notes.md").unlink()
+    fourth = idx.build()
+    assert fourth["removed"] == 1
+
+
+def test_search_codebase_tool_disabled_message(monkeypatch, tmp_path):
+    from sable.core import tools as uf_tools
+
+    monkeypatch.setenv("SABLE_HOME", str(tmp_path / "h"))
+    out = uf_tools.search_codebase("anything")
+    assert "disabled" in out
+
+
+def test_search_codebase_tool_over_built_index(monkeypatch, tmp_path, project):
+    import sable.core.indexer as indexer_mod
+
+    home__test_run_settings_indexing = tmp_path / "h2"
+    monkeypatch.setenv("SABLE_HOME", str(home__test_run_settings_indexing))
+    idx = CodebaseIndex(home__test_run_settings_indexing, cfg=None,
+                        index_cfg={"enabled": True, "paths_override":
+                                   [str(project)]})
+    idx.build()
+    # Phase 5: get_index caches per (home, project) — seed the default slot.
+    monkeypatch.setitem(indexer_mod._instances, (str(home__test_run_settings_indexing), None), idx)
+
+    from sable.core import tools as uf_tools
+
+    out = uf_tools.search_codebase("embedding vector cosine")
+    assert "embeddings.py" in out
+
+
+# ---------------------------------------------------- 4. dashboard API
+
+@pytest.fixture()
+def home__test_run_settings_indexing(tmp_path, monkeypatch):
+    h = tmp_path / "uf-ctl"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    return h
+
+
+@pytest.fixture()
+def app__test_run_settings_indexing(home__test_run_settings_indexing):
+    return DashboardApp(SableConfig(), home=home__test_run_settings_indexing)
+
+
+def test_logs_endpoint(app__test_run_settings_indexing, home__test_run_settings_indexing):
+    (home__test_run_settings_indexing / "logs").mkdir(parents=True)
+    (home__test_run_settings_indexing / "logs" / "dashboard.log").write_text("one\ntwo\nthree\n")
+    r = app__test_run_settings_indexing.handle("GET", "/api/logs", query={"tail": "2"})
+    assert r.status == 200
+    body = r.body
+    assert body["dashboard"]["exists"] is True
+    assert body["dashboard"]["lines"][-2:] == ["two", "three"]
+    assert body["llama-server"]["exists"] is False
+
+
+def test_logs_endpoint_includes_instance_logs(app__test_run_settings_indexing, home__test_run_settings_indexing):
+    """Named instances write server-<id>.log — the console must list them."""
+    (home__test_run_settings_indexing / "logs").mkdir(parents=True)
+    (home__test_run_settings_indexing / "logs" / "server-coder.log").write_text("slot booted\n")
+    (home__test_run_settings_indexing / "logs" / "server-embed2.log").write_text("ready\n")
+    body = app__test_run_settings_indexing.handle("GET", "/api/logs").body
+    assert body["server-coder"]["exists"] is True
+    assert body["server-coder"]["lines"] == ["slot booted"]
+    assert body["server-embed2"]["exists"] is True
+
+
+def test_shutdown_route_mocked(app__test_run_settings_indexing, home__test_run_settings_indexing, monkeypatch):
+    import sable.dashboard.app as appmod
+
+    kills = []
+    monkeypatch.setattr(appmod.os, "kill",
+                        lambda pid, sig: kills.append((pid, sig)))
+    r = app__test_run_settings_indexing.handle("POST", "/api/shutdown", body={})
+    assert r.status == 200 and r.body["ok"]
+    import time as _t
+    _t.sleep(1.0)  # the daemon thread sleeps ~0.4 s before signalling
+    assert kills and kills[0][1].name == "SIGTERM"
+
+
+def test_index_endpoints(app__test_run_settings_indexing, home__test_run_settings_indexing, tmp_path, project, monkeypatch):
+    import sable.core.indexer as indexer_mod
+
+    idx = CodebaseIndex(home__test_run_settings_indexing, cfg=None,
+                        index_cfg={"enabled": True, "paths_override":
+                                   [str(project)]})
+    # The app now routes through get_index's cache; seed the default slot so
+    # _index(None) returns this lexical-only test index.
+    monkeypatch.setitem(indexer_mod._instances, (str(home__test_run_settings_indexing), None), idx)
+
+    r = app__test_run_settings_indexing.handle("GET", "/api/index")
+    assert r.status == 200 and r.body["enabled"] is True
+
+    r = app__test_run_settings_indexing.handle("POST", "/api/index/build", body={})
+    assert r.status == 200 and r.body["state"] == "running"
+    # wait for the background build to land
+    import time as _t
+    st = {}
+    for _ in range(100):
+        st = app__test_run_settings_indexing.handle("GET", "/api/index").body
+        if not st["building"] and st["chunks"]:
+            break
+        _t.sleep(0.05)
+    assert st["files"] == 3
+
+    r = app__test_run_settings_indexing.handle("POST", "/api/index/search",
+                   body={"query": "cosine embedding vector"})
+    assert r.status == 200 and r.body["results"]
+
+    r = app__test_run_settings_indexing.handle("POST", "/api/index/stop", body={})
+    assert r.status == 200
+
+    r = app__test_run_settings_indexing.handle("POST", "/api/index/search", body={})
+    assert r.status == 400
+
+
+def test_config_put_accepts_new_sections(app__test_run_settings_indexing, home__test_run_settings_indexing, monkeypatch):
+    monkeypatch.setenv("SABLE_CONFIG", str(home__test_run_settings_indexing / "sable.yaml"))
+    r = app__test_run_settings_indexing.handle("PUT", "/api/config",
+                   body={"section": "run_settings",
+                         "patch": {"kv_cache_type": "q8_0",
+                                   "gpu_memory_pct": 90}})
+    assert r.status == 200, r.body
+    r = app__test_run_settings_indexing.handle("PUT", "/api/config",
+                   body={"section": "sampling", "patch": {"temperature": 0.6}})
+    assert r.status == 200, r.body
+    r = app__test_run_settings_indexing.handle("PUT", "/api/config",
+                   body={"section": "indexing",
+                         "patch": {"enabled": True, "search_mode": "hybrid"}})
+    assert r.status == 200, r.body
+
+    # unknown keys inside the new sections are rejected
+    r = app__test_run_settings_indexing.handle("PUT", "/api/config",
+                   body={"section": "sampling", "patch": {"vibes": 9}})
+    assert r.status == 400 and r.body["error"]["code"] == "unknown_keys"
+
+    # and the file reloads into the typed config
+    cfg = load_config(str(home__test_run_settings_indexing / "sable.yaml"))
+    assert cfg.run_settings["kv_cache_type"] == "q8_0"
+    assert cfg.sampling["temperature"] == 0.6
+    assert cfg.indexing["enabled"] is True
+
+# ------------------------------------------------------------------------
+# from tests/test_insights.py
+# ------------------------------------------------------------------------
+
+# --------------------------------------------------------------------- seeds
+
+class _FrozenDatetime(datetime):
+    """datetime.now() shim so the recorder writes controlled timestamps."""
+    frozen: datetime = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls.frozen if tz is None else cls.frozen.astimezone(tz)
+
+
+@pytest.fixture()
+def home__test_insights(tmp_path, monkeypatch):
+    h = tmp_path / "uf-insights"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setattr(recorder_mod, "datetime", _FrozenDatetime)
+    return h
+
+
+def _tool_messages(name: str, fail: bool) -> list:
+    """One assistant tool_call + its tool result (pass or fail)."""
+    content = "error: boom" if fail else "ok output"
+    return [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"call_{name}", "type": "function",
+             "function": {"name": name, "arguments": "{}"}}]},
+        {"role": "tool", "name": name, "tool_call_id": f"call_{name}",
+         "content": content},
+    ]
+
+
+def seed(home, *, when: datetime, profile="sable", model_alias="base-model",
+         model_version=None, completed=True, fail_tool=False, tool=None,
+         tokens_in=None, tokens_out=None, duration_s=None,
+         failure_reason=None, conf_mean=None, conf_p90_negentropy=None):
+    """Record one synthetic trace at a frozen timestamp."""
+    _FrozenDatetime.frozen = when
+    msgs = [{"role": "user", "content": "do the thing"}]
+    if tool:
+        msgs += _tool_messages(tool, fail_tool)
+    msgs.append({"role": "assistant", "content": "done"})
+    rec = TraceRecorder(home=home)
+    try:
+        row = rec.record(
+            task="do the thing", messages=msgs, backend=profile,
+            model_alias=model_alias, base_url="http://127.0.0.1:9/v1",
+            completed=completed, tokens_in=tokens_in, tokens_out=tokens_out,
+            duration_s=duration_s, model_version=model_version,
+            failure_reason=failure_reason,
+            conf_mean=conf_mean, conf_p90_negentropy=conf_p90_negentropy,
+        )
+    finally:
+        rec.close()
+    assert row is not None
+    return row
+
+
+def now():
+    return datetime.now(timezone.utc)
+
+
+# ------------------------------------------------------------- zero structure
+
+def test_empty_db_returns_well_formed_zero_structure(home__test_insights):
+    r = generate_insights(home__test_insights, days=30)
+    assert r["empty"] is True
+    assert r["overview"]["traces"] == 0
+    assert r["overview"]["avg_score"] is None
+    assert r["score_trend"]["overall"]["points"] == []
+    assert r["score_trend"]["overall"]["half_mean_delta"] is None
+    assert r["tool_reliability"]["tools"] == []
+    assert r["failure_reasons"]["total"] == 0
+    assert r["latency"]["duration_s"]["p50"] is None
+    assert r["activity"]["traces_per_day"] == []
+    assert r["promotions"]["available"] is False
+
+
+# ------------------------------------------------------------- overview/trend
+
+def test_overview_and_score_trend_exact(home__test_insights):
+    # day 1: scores 0.5, 0.25 (avg 0.375) · day 2: score 0.5 -> trend up
+    seed(home__test_insights, when=now() - timedelta(days=2), completed=True)          # 0.5
+    seed(home__test_insights, when=now() - timedelta(days=2), completed=False)         # -0.5
+    seed(home__test_insights, when=now() - timedelta(days=1), completed=True)          # 0.5
+
+    r = generate_insights(home__test_insights, days=30)
+    ov = r["overview"]
+    assert ov["traces"] == 3
+    assert ov["avg_score"] == pytest.approx((0.5 - 0.5 + 0.5) / 3, abs=1e-4)
+    assert ov["status_counts"]["failure"] == 1
+    assert ov["status_counts"]["success"] == 2
+
+    pts = r["score_trend"]["overall"]["points"]
+    assert [p["traces"] for p in pts] == [2, 1]
+    assert pts[0]["avg_score"] == pytest.approx(0.0)   # (0.5 + -0.5)/2
+    assert pts[1]["avg_score"] == pytest.approx(0.5)
+    # two scored buckets: second-half mean (0.5) - first-half mean (0.0)
+    assert r["score_trend"]["overall"]["half_mean_delta"] == pytest.approx(0.5)
+    assert r["score_trend"]["overall"]["direction"] == "up"
+
+    prof = r["score_trend"]["by_profile"]
+    assert len(prof) == 1 and prof[0]["traces"] == 3
+
+
+def test_score_trend_grouped_by_model(home__test_insights):
+    seed(home__test_insights, when=now() - timedelta(days=1), model_alias="v1")
+    seed(home__test_insights, when=now() - timedelta(days=1), model_alias="v2",
+         model_version="v2")
+    r = generate_insights(home__test_insights)
+    names = {g["name"] for g in r["score_trend"]["by_model"]}
+    assert names == {"v1", "v2"}  # model_version wins over alias
+
+
+# ------------------------------------------------------------ tool reliability
+
+def test_tool_failure_rates_from_jsonl_scan(home__test_insights):
+    seed(home__test_insights, when=now() - timedelta(days=1), tool="read_file")
+    seed(home__test_insights, when=now() - timedelta(days=1), tool="read_file", fail_tool=True)
+    seed(home__test_insights, when=now() - timedelta(days=1), tool="shell", fail_tool=True)
+
+    tr = generate_insights(home__test_insights)["tool_reliability"]
+    assert tr["available"] is True and tr["traces_scanned"] == 3
+    by_name = {t["tool"]: t for t in tr["tools"]}
+    assert by_name["read_file"]["calls"] == 2
+    assert by_name["read_file"]["failures"] == 1
+    assert by_name["read_file"]["failure_rate"] == pytest.approx(0.5)
+    assert by_name["shell"]["calls"] == 1
+    assert by_name["shell"]["failure_rate"] == pytest.approx(1.0)
+
+
+def test_tool_reliability_tolerates_pruned_transcripts(home__test_insights):
+    row = seed(home__test_insights, when=now() - timedelta(days=1), tool="shell")
+    Path(row.jsonl_path).unlink()  # transcript pruned -> skipped silently
+    tr = generate_insights(home__test_insights)["tool_reliability"]
+    assert tr["traces_scanned"] == 0
+    assert tr["tools"] == []
+
+
+# ----------------------------------------------------------- failure reasons
+
+def test_failure_reason_histogram_splits_infra_model(home__test_insights):
+    seed(home__test_insights, when=now() - timedelta(days=1), completed=False,
+         failure_reason="backend_error:timeout")     # infra
+    seed(home__test_insights, when=now() - timedelta(days=1), completed=False,
+         failure_reason="max_iterations")            # model
+    seed(home__test_insights, when=now() - timedelta(days=1), completed=False,
+         failure_reason="max_iterations")            # model
+    seed(home__test_insights, when=now() - timedelta(days=1))       # no reason
+
+    fr = generate_insights(home__test_insights)["failure_reasons"]
+    assert fr["total"] == 3
+    assert fr["infra_total"] == 1 and fr["model_total"] == 2
+    top = fr["by_reason"][0]
+    assert top["reason"] == "max_iterations" and top["count"] == 2
+    assert top["kind"] == "model"
+    infra = next(b for b in fr["infra"] if b["reason"] == "backend_error:timeout")
+    assert infra["count"] == 1
+
+
+# ---------------------------------------------------------------- percentiles
+
+def test_duration_token_percentiles(home__test_insights):
+    for d, t in ((1.0, 100), (2.0, 200), (3.0, 300), (4.0, 400)):
+        seed(home__test_insights, when=now() - timedelta(days=1), duration_s=d,
+             tokens_in=t // 2, tokens_out=t // 2)
+    lat = generate_insights(home__test_insights)["latency"]
+    ds, tk = lat["duration_s"], lat["tokens_total"]
+    assert ds["count"] == 4 and ds["max"] == 4.0
+    # nearest rank: p50 of [1,2,3,4] -> index 1 (2.0); p90 -> index 3 (4.0)
+    assert ds["p50"] == 2.0 and ds["p90"] == 4.0
+    assert tk["count"] == 4 and tk["p50"] == 200.0 and tk["max"] == 400.0
+
+
+# ------------------------------------------------- percentile parity (#16)
+#
+# insights.percentile and agent_runner._confidence_aggregate both claim
+# nearest-rank semantics; the old banker's-round() index disagreed with
+# ceil(p*n) at exact .5 boundaries (e.g. p50 @ n=15, p90 @ n=5/16/25/36,
+# p95 @ n=11..19/30..39). Pin the canonical rank across n=1..40 on random
+# and adversarial samples so the two can never silently diverge again.
+
+def _rank_samples(n: int) -> list:
+    import random
+
+    rng = random.Random(1234 + n)
+    return [
+        sorted(rng.uniform(-10, 10) for _ in range(n)),      # random
+        [7.0] * n,                                           # all-equal
+        sorted(rng.choice([1.0, 1.0, 2.0, 3.0]) for _ in range(n)),  # dup-heavy
+        [float(i) for i in range(n)],                        # strictly increasing
+    ]
+
+
+@pytest.mark.parametrize("pct", [50, 90, 95])
+@pytest.mark.parametrize("n", list(range(1, 41)))
+def test_percentile_matches_nearest_rank_ceiling(pct, n):
+    from sable.store.insights import percentile
+
+    for vals in _rank_samples(n):
+        expected = vals[math.ceil(pct * n / 100) - 1]   # canonical nearest rank
+        got = percentile(vals, pct)
+        assert got == pytest.approx(round(expected, 4)), (pct, n, vals[:5])
+
+
+@pytest.mark.parametrize("n", list(range(1, 41)))
+def test_confidence_aggregate_p90_matches_insights_percentile(n):
+    """agent_runner._confidence_aggregate's p90 picks the SAME sorted element
+    as insights.percentile(..., 90) (its docstring promises this parity).
+    Compared via exp() over logprob-domain (<= 0) samples so rounding stays
+    bounded; the previous test pins percentile itself to ceil-rank."""
+    import random
+
+    from sable.core.agent_runner import _confidence_aggregate
+
+    rng = random.Random(99 + n)
+    for vals in (sorted(-rng.random() * 20 for _ in range(n)),   # random lp
+                 [math.log(0.5)] * n,                            # all-equal
+                 sorted(rng.choice([math.log(0.1), math.log(0.1),
+                                    math.log(0.9)]) for _ in range(n))):
+        _, p90 = _confidence_aggregate(vals)
+        expected = math.exp(vals[math.ceil(90 * n / 100) - 1])
+        assert p90 == pytest.approx(expected, abs=1e-3), (n, vals[:5])
+
+
+# ------------------------------------------------------------------- activity
+
+def test_activity_hour_profiles_daily(home__test_insights):
+    seed(home__test_insights, when=now().replace(hour=9), tool="shell")
+    seed(home__test_insights, when=now().replace(hour=9))
+    seed(home__test_insights, when=now().replace(hour=3), profile="coder")
+
+    act = generate_insights(home__test_insights)["activity"]
+    assert act["busiest_hour"] == "09"
+    hist = {h["hour"]: h["traces"] for h in act["hour_histogram"]}
+    assert hist["09"] == 2 and hist["03"] == 1 and len(hist) == 24
+    profiles = {p["profile"]: p for p in act["profiles"]}
+    assert set(profiles) == {"sable", "coder"}
+    assert profiles["sable"]["traces"] == 2
+    assert act["traces_per_day"][-1]["traces"] == 3
+
+
+# ------------------------------------------------------------------- filters
+
+def test_days_and_profile_filters(home__test_insights):
+    seed(home__test_insights, when=now() - timedelta(days=3), profile="sable")
+    seed(home__test_insights, when=now() - timedelta(days=40), profile="sable")
+    seed(home__test_insights, when=now() - timedelta(days=1), profile="coder")
+
+    r30 = generate_insights(home__test_insights, days=30)
+    assert r30["overview"]["traces"] == 2          # the 40-day-old one drops
+    r_p = generate_insights(home__test_insights, days=30, profile="coder")
+    assert r_p["overview"]["traces"] == 1
+    assert all(p["profile"] == "coder" for p in r_p["activity"]["profiles"])
+
+
+# --------------------------------------------------------------- promotions
+
+def test_promotion_delta_before_after(home__test_insights):
+    db = home__test_insights / "buffer" / "sable.db"
+    reg = ModelRegistry(db)
+    try:
+        m1 = reg.register_model("base-x")           # v1
+        reg.set_validation(m1.model_id, {"tasks": []}, passed=True)
+        reg.promote(m1.model_id)
+        m2 = reg.register_model("base-x")           # v2, parent v1
+        assert m2.parent_adapter == "v1"
+        reg.set_validation(m2.model_id, {"tasks": []}, passed=True)
+        reg.promote(m2.model_id)
+        # Backdate both promotions so symmetric windows contain seeded traces.
+        with reg._lock:
+            for mid, days_ago in (("v1", 6), ("v2", 3)):
+                ts = (now() - timedelta(days=days_ago)).isoformat(
+                    timespec="seconds")
+                reg._conn.execute("UPDATE models SET promoted_at = ? "
+                                  "WHERE model_id = ?", (ts, mid))
+            reg._conn.commit()
+    finally:
+        reg.close()
+
+    # History edges at -4d/-2d make the symmetric window around the v2
+    # promotion (-3d) ±1d: one v1 trace before it, one failing v2 trace after.
+    seed(home__test_insights, when=now() - timedelta(days=4), model_alias="v1")
+    seed(home__test_insights, when=now() - timedelta(days=2), model_alias="v2",
+         completed=False)
+
+    promo = generate_insights(home__test_insights)["promotions"]
+    assert promo["available"] is True
+
+    v2 = next(d for d in promo["deltas"] if d["model_id"] == "v2")
+    assert v2["previous_model_id"] == "v1"
+    assert v2["match"] == "model_id"          # traces carry model_alias=vN
+    assert v2["window_days"] == pytest.approx(1.0)
+    assert v2["before_avg_score"] == pytest.approx(0.5)   # v1 traces before
+    assert v2["after_avg_score"] == pytest.approx(-0.5)   # v2 traces after
+    assert v2["delta"] == pytest.approx(-1.0)
+    assert v2["before_traces"] == 1 and v2["after_traces"] == 1
+
+    # v1 (first promotion, no parent): entry exists; before-window falls back
+    # to all traces in the window since there is no previous model to match.
+    v1 = next(d for d in promo["deltas"] if d["model_id"] == "v1")
+    assert v1["previous_model_id"] is None
+    assert v1["promoted_at"] is not None
+
+
+def test_promotion_section_degrades_without_history(home__test_insights):
+    seed(home__test_insights, when=now() - timedelta(days=1))
+    promo = generate_insights(home__test_insights)["promotions"]
+    # No registry tables in a fresh buffer DB -> unavailable with a reason.
+    assert promo["available"] is False
+    assert promo["reason"]
+
+
+# ---------------------------------------------------- intent review (#36)
+
+def test_intent_review_pairs_promote_intent_with_delta(home__test_insights):
+    """Promote-with-intent gets the same before/after window as promotions."""
+    db = home__test_insights / "buffer" / "sable.db"
+    reg = ModelRegistry(db)
+    try:
+        m1 = reg.register_model("base-x")            # v1
+        reg.set_validation(m1.model_id, {"tasks": []}, passed=True)
+        reg.promote(m1.model_id)
+        m2 = reg.register_model("base-x")            # v2, parent v1
+        reg.set_validation(m2.model_id, {"tasks": []}, passed=True)
+        reg.promote(m2.model_id, intent="expect fewer tool errors")
+        # Backdate the ledger entry to when the promotion "happened", mirroring
+        # promoted_at (the review anchors windows on the entry's own ts).
+        ts = (now() - timedelta(days=3)).isoformat(timespec="seconds")
+        with reg._lock:
+            reg._conn.execute(
+                "UPDATE ledger SET ts = ? WHERE op = 'promote' AND seq = "
+                "(SELECT MAX(seq) FROM ledger WHERE op = 'promote')", (ts,))
+            reg._conn.commit()
+    finally:
+        reg.close()
+
+    # Same edges as the promotions test: ±1d window around -3d.
+    seed(home__test_insights, when=now() - timedelta(days=4), model_alias="v1")
+    seed(home__test_insights, when=now() - timedelta(days=2), model_alias="v2",
+         completed=False)
+
+    ir = generate_insights(home__test_insights)["intent_review"]
+    assert ir["available"] is True
+    # Only the intented promote shows up; v1's promote had none.
+    assert len(ir["rows"]) == 1
+    r = ir["rows"][0]
+    assert r["op"] == "promote" and r["target"] == "v2"
+    assert r["intent"] == "expect fewer tool errors"
+    assert r["before_score"] == pytest.approx(0.5)   # v1 traces before
+    assert r["after_score"] == pytest.approx(-0.5)   # failing v2 traces after
+    assert r["delta"] == pytest.approx(-1.0)         # expectation missed
+    assert r["window_days"] == pytest.approx(1.0)
+    assert r["match"] == "model_id"
+
+
+def test_intent_review_honest_empty_no_fabrication(home__test_insights):
+    seed(home__test_insights, when=now() - timedelta(days=1))       # traces but no intents
+    ir = generate_insights(home__test_insights)["intent_review"]
+    assert ir["available"] is True                   # readable, just empty
+    assert ir["rows"] == []                          # zero synthetic rows
+    assert ir["hint"] == "no recorded intents"
+
+
+def test_intent_review_ignores_ops_without_intent(home__test_insights):
+    db = home__test_insights / "buffer" / "sable.db"
+    reg = ModelRegistry(db)
+    try:
+        reg.register_model("base-x")
+        reg.set_validation("v1", {"tasks": []}, passed=True)
+        reg.promote("v1")                            # no intent recorded
+    finally:
+        reg.close()
+    seed(home__test_insights, when=now() - timedelta(days=1))
+    ir = generate_insights(home__test_insights)["intent_review"]
+    assert ir["available"] is True and ir["rows"] == []
+
+
+def test_intent_review_cli_output(home__test_insights, capsys):
+    from sable.cli import main as cli_main
+
+    db = home__test_insights / "buffer" / "sable.db"
+    reg = ModelRegistry(db)
+    try:
+        reg.register_model("base-x")
+        reg.set_validation("v1", {"tasks": []}, passed=True)
+    finally:
+        reg.close()
+    assert cli_main(["models", "promote", "v1", "--intent",
+                     "halve the timeout failures"]) == 0
+    capsys.readouterr()
+    assert cli_main(["insights", "--json"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    ir = report["intent_review"]
+    assert ir["available"] is True and len(ir["rows"]) == 1
+    assert ir["rows"][0]["intent"] == "halve the timeout failures"
+
+
+# ------------------------------------------------- confidence calibration (#40)
+
+def test_calibration_buckets_and_confidently_wrong(home__test_insights):
+    """High-confidence-but-failing top bucket flips the divergence flag."""
+    day = now() - timedelta(days=1)
+    # very_high bucket (conf >= -0.1): three FAILING traces (score -0.5 each)
+    for _ in range(3):
+        seed(home__test_insights, when=day, completed=False, conf_mean=-0.05,
+             conf_p90_negentropy=0.95)
+    # low bucket ([-2.0,-1.0)): three succeeding traces (score +0.5 each)
+    for _ in range(3):
+        seed(home__test_insights, when=day, completed=True, conf_mean=-1.5,
+             conf_p90_negentropy=0.22)
+    # no confidence data -> excluded from every bucket
+    seed(home__test_insights, when=day, completed=True)
+
+    cal = generate_insights(home__test_insights)["calibration"]
+    assert cal["available"] is True
+    by_label = {r["bucket_label"]: r for r in cal["rows"]}
+    assert sum(r["n"] for r in cal["rows"]) == 6      # conf-less trace excluded
+    top = by_label["very_high (>=-0.1)"]
+    assert top["n"] == 3
+    assert top["mean_conf"] == pytest.approx(-0.05, abs=1e-4)
+    assert top["mean_score"] == pytest.approx(-0.5)
+    low = by_label["low ([-2.0,-1.0))"]
+    assert low["n"] == 3 and low["mean_score"] == pytest.approx(0.5)
+    # pooled others (+0.5) minus top (-0.5) = 1.0 > 0.15 gap threshold
+    assert cal["confidently_wrong"] is True
+
+
+def test_calibration_no_divergence_when_confidence_tracks_quality(home__test_insights):
+    day = now() - timedelta(days=1)
+    for _ in range(3):
+        seed(home__test_insights, when=day, completed=True, conf_mean=-0.05)   # top: +0.5
+    for _ in range(3):
+        seed(home__test_insights, when=day, completed=False, conf_mean=-1.5)   # low: -0.5
+    cal = generate_insights(home__test_insights)["calibration"]
+    assert cal["confidently_wrong"] is False
+
+
+def test_calibration_honest_empty(home__test_insights):
+    seed(home__test_insights, when=now() - timedelta(days=1))       # traces, no conf data
+    cal = generate_insights(home__test_insights)["calibration"]
+    assert cal["available"] is True
+    assert cal["rows"] == []
+    assert cal["hint"] == "no traces with confidence data yet"
+    assert cal["confidently_wrong"] is False
+
+
+def test_calibration_cli_output(home__test_insights, capsys):
+    seed(home__test_insights, when=now() - timedelta(days=1), conf_mean=-0.3)
+    from sable.cli import build_parser
+
+    args = build_parser().parse_args(["insights"])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "Confidence calibration" in out
+    assert "high ([-0.5,-0.1))" in out
+
+
+# ------------------------------------------------------------------------ CLI
+
+def test_cli_insights_json_round_trip(home__test_insights, capsys):
+    seed(home__test_insights, when=now() - timedelta(days=1), tool="shell", fail_tool=True)
+    from sable.cli import build_parser
+
+    args = build_parser().parse_args(["insights", "--days", "7", "--json"])
+    assert args.command == "insights" and args.days == 7
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    report = json.loads(out)
+    assert report["days"] == 7
+    assert report["overview"]["traces"] == 1
+    assert report["tool_reliability"]["tools"][0]["tool"] == "shell"
+
+
+def test_cli_insights_human_output(home__test_insights, capsys):
+    seed(home__test_insights, when=now() - timedelta(days=1), completed=False,
+         failure_reason="max_iterations")
+    from sable.cli import build_parser
+
+    args = build_parser().parse_args(["insights"])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "Insights — last 30 days" in out
+    assert "max_iterations" in out
+
+
+# ------------------------------------------------------------------- API
+
+def test_api_insights_endpoint(home__test_insights):
+    seed(home__test_insights, when=now() - timedelta(days=1), profile="sable")
+    app = DashboardApp(SableConfig(), home=home__test_insights)
+    r = app.handle("GET", "/api/insights", query={"days": "30"})
+    assert r.status == 200
+    assert r.body["overview"]["traces"] == 1
+    assert r.body["score_trend"]["overall"]["points"]
+
+    rp = app.handle("GET", "/api/insights",
+                    query={"days": "30", "profile": "nope"})
+    assert rp.status == 200 and rp.body["empty"] is True
+
+
+def test_api_insights_bad_days(home__test_insights):
+    app = DashboardApp(SableConfig(), home=home__test_insights)
+    r = app.handle("GET", "/api/insights", query={"days": "abc"})
+    assert r.status == 400
+
+# ------------------------------------------------------------------------
+# from tests/test_fs_tree.py
+# ------------------------------------------------------------------------
+
+@pytest.fixture()
+def home__test_fs_tree(tmp_path, monkeypatch):
+    h = tmp_path / "uf-fs"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    return h
+
+
+@pytest.fixture()
+def app__test_fs_tree(home__test_fs_tree):
+    return DashboardApp(SableConfig(), home=home__test_fs_tree)
+
+
+@pytest.fixture()
+def workspace(tmp_path):
+    ws = tmp_path / "ws"
+    (ws / "src").mkdir(parents=True)
+    (ws / "src" / "app.py").write_text("print('hi')\n")
+    (ws / "README.md").write_text("# hi\n")
+    (ws / ".hidden-file").write_text("x")
+    (ws / ".config").mkdir()
+    return ws
+
+
+def _mkproject(app, ws):
+    r = app.handle("POST", "/api/projects",
+                   body={"name": "p", "workspace_dir": str(ws)})
+    assert r.status == 201
+    return r.body["project"]["id"]
+
+
+# ------------------------------------------------------------------ happy path
+
+def test_fs_tree_root_dirs_first_one_level(app__test_fs_tree, workspace):
+    pid = _mkproject(app__test_fs_tree, workspace)
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree", query={"project": pid, "path": ""})
+    assert r.status == 200, r.body
+    entries = r.body["entries"]
+    names = [e["name"] for e in entries]
+    # dirs first, then files, each group sorted; dotfiles hidden by default
+    assert names == ["src", "README.md"]
+    src = entries[0]
+    assert src["type"] == "dir" and src["path"] == "src"
+    readme = entries[1]
+    assert readme["type"] == "file" and readme["path"] == "README.md"
+    assert readme["size"] == len("# hi\n")
+    assert readme["mtime"]
+    # one level only: nested dir contents are NOT expanded
+    assert all("src/" not in e["path"] for e in entries)
+
+    # expanding the subdir returns its single level with rel paths prefixed
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree", query={"project": pid, "path": "src"})
+    assert r.status == 200
+    assert [(e["name"], e["path"], e["type"]) for e in r.body["entries"]] == \
+        [("app.py", "src/app.py", "file")]
+
+
+# ------------------------------------------------------------------- containment
+
+def test_fs_tree_rejects_traversal(app__test_fs_tree, workspace):
+    pid = _mkproject(app__test_fs_tree, workspace)
+    outside = workspace.parent / "evil"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("boo")
+
+    for bad in ("../evil", "..", "src/../../evil", "a/../b"):
+        r = app__test_fs_tree.handle("GET", "/api/fs/tree",
+                       query={"project": pid, "path": bad})
+        assert r.status == 400, (bad, r.body)
+        assert r.body["error"]["code"] == "bad_request"
+
+
+def test_fs_tree_rejects_absolute_paths(app__test_fs_tree, workspace):
+    pid = _mkproject(app__test_fs_tree, workspace)
+    for bad in ("/etc", str(workspace.parent), "~/.ssh"):
+        r = app__test_fs_tree.handle("GET", "/api/fs/tree",
+                       query={"project": pid, "path": bad})
+        assert r.status == 400, (bad, r.body)
+
+
+def test_fs_tree_rejects_encoded_traversal(app__test_fs_tree, workspace):
+    pid = _mkproject(app__test_fs_tree, workspace)
+    # The HTTP layer decodes query strings via parse_qs; the handler re-checks
+    # the unquoted form too, so both shapes are rejected.
+    for enc in ("%2e%2e/evil", "..%2fevil", "%2E%2E"):
+        r = app__test_fs_tree.handle("GET", "/api/fs/tree",
+                       query={"project": pid, "path": enc})
+        assert r.status == 400, (enc, r.body)
+        # and after transport-level decoding (what parse_qs delivers) likewise
+        from urllib.parse import unquote
+        r2 = app__test_fs_tree.handle("GET", "/api/fs/tree",
+                        query={"project": pid, "path": unquote(enc)})
+        assert r2.status == 400, (unquote(enc), r2.body)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="symlinks are posix here")
+def test_fs_tree_symlink_escape_not_listed_or_traversed(app__test_fs_tree, workspace, tmp_path):
+    pid = _mkproject(app__test_fs_tree, workspace)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "private.txt").write_text("secret")
+    link = workspace / "link-out"
+    link.symlink_to(outside)
+
+    # not listed at all (target resolves outside the workspace root)
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree", query={"project": pid, "path": ""})
+    assert r.status == 200
+    assert "link-out" not in [e["name"] for e in r.body["entries"]]
+
+    # and cannot be traversed into either
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree",
+                   query={"project": pid, "path": "link-out"})
+    assert r.status == 400, r.body
+
+
+# ---------------------------------------------------------------- sensitive paths
+
+def test_fs_tree_omits_sensitive_entries(app__test_fs_tree, workspace):
+    pid = _mkproject(app__test_fs_tree, workspace)
+    # real cases from core/tools.py deny lists: .ssh/ dir + .env file
+    (workspace / ".ssh").mkdir()
+    (workspace / ".ssh" / "id_rsa").write_text("key")
+    (workspace / ".env").write_text("SECRET=1")
+
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree",
+                   query={"project": pid, "path": "", "hidden": "1"})
+    assert r.status == 200
+    names = [e["name"] for e in r.body["entries"]]
+    assert ".ssh" not in names and ".env" not in names
+    assert "src" in names  # control: normal entries still listed
+
+
+def test_fs_tree_sensitive_dir_blocked_as_root(app__test_fs_tree, workspace):
+    pid = _mkproject(app__test_fs_tree, workspace)
+    (workspace / ".ssh").mkdir()
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree",
+                   query={"project": pid, "path": ".ssh"})
+    assert r.status == 400
+    assert "sensitive" in r.body["error"]["message"]
+
+
+# ----------------------------------------------------------------------- hidden
+
+def test_fs_tree_hidden_dotfiles_opt_in(app__test_fs_tree, workspace):
+    pid = _mkproject(app__test_fs_tree, workspace)
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree", query={"project": pid})
+    names = [e["name"] for e in r.body["entries"]]
+    assert ".hidden-file" not in names and ".config" not in names
+
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree",
+                   query={"project": pid, "hidden": "1"})
+    names = [e["name"] for e in r.body["entries"]]
+    assert ".hidden-file" in names and ".config" in names
+
+
+# ------------------------------------------------------------------------ errors
+
+def test_fs_tree_unknown_project_404(app__test_fs_tree):
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree", query={"project": "does-not-exist"})
+    assert r.status == 404
+    assert r.body["error"]["code"] == "unknown_project"
+
+
+def test_fs_tree_requires_project_param(app__test_fs_tree):
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree", query={})
+    assert r.status == 400
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree", query={"project": "  "})
+    assert r.status == 400
+
+
+def test_fs_tree_missing_workspace_dir_404(app__test_fs_tree, home__test_fs_tree, tmp_path):
+    ws = tmp_path / "gone"
+    ws.mkdir()
+    pid = _mkproject(app__test_fs_tree, ws)
+    ws.rmdir()  # workspace deleted after the project was created
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree", query={"project": pid})
+    assert r.status == 404
+
+
+def test_fs_tree_missing_subdir_404(app__test_fs_tree, workspace):
+    pid = _mkproject(app__test_fs_tree, workspace)
+    r = app__test_fs_tree.handle("GET", "/api/fs/tree",
+                   query={"project": pid, "path": "nope"})
+    assert r.status == 404
+
+
+def test_fs_tree_endpoint_is_read_only(app__test_fs_tree, workspace):
+    # listing must never mutate anything on disk
+    pid = _mkproject(app__test_fs_tree, workspace)
+    before = sorted(os.listdir(workspace))
+    app__test_fs_tree.handle("GET", "/api/fs/tree", query={"project": pid})
+    assert sorted(os.listdir(workspace)) == before
+
+# ------------------------------------------------------------------------
+# from tests/test_images.py
+# ------------------------------------------------------------------------
+
+def png_bytes(w: int = 2, h: int = 2) -> bytes:
+    """Smallest valid PNG (solid color), stdlib only."""
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data)))
+
+    raw = b"".join(b"\x00" + b"\x7f\xff\x00" * w for _ in range(h))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw))
+            + chunk(b"IEND", b""))
+
+
+@pytest.fixture()
+def png(tmp_path) -> Path:
+    p = tmp_path / "pic.png"
+    p.write_bytes(png_bytes())
+    return p
+
+
+# ------------------------------------------------------------ encoding
+
+def test_sniff_mime(png):
+    assert uf_images.sniff_image_mime(png.read_bytes()) == "image/png"
+    assert uf_images.sniff_image_mime(b"\xff\xd8\xffhello") == "image/jpeg"
+    assert uf_images.sniff_image_mime(b"not an image at all") is None
+
+
+def test_encode_image_file_roundtrip(png):
+    url, err = uf_images.encode_image_file(str(png))
+    assert err is None
+    assert url is not None and url.startswith("data:image/png;base64,")
+    raw = base64.b64decode(url.split(",", 1)[1])
+    assert raw == png.read_bytes()
+
+
+def test_encode_image_rejects_non_image(tmp_path):
+    bad = tmp_path / "x.png"
+    bad.write_text("plain text pretending to be png")
+    url, err = uf_images.encode_image_file(str(bad))
+    assert url is None
+    assert err is not None and "not a recognized image" in err
+
+
+def test_save_data_url_validates_and_writes(tmp_path):
+    du = "data:image/png;base64," + base64.b64encode(png_bytes()).decode()
+    path, err = uf_images.save_data_url(du, tmp_path / "uploads")
+    assert err is None and path
+    assert Path(path).read_bytes() == png_bytes()
+
+    _p, err2 = uf_images.save_data_url("data:text/plain;base64,aGk=", tmp_path)
+    assert err2 is not None
+    _p, err3 = uf_images.save_data_url("not-a-data-url", tmp_path)
+    assert err3 is not None
+
+
+# ----------------------------------------------------------- expansion
+
+def test_expand_message_images_rewrites_only_on_markers(png):
+    plain = {"role": "user", "content": "hello"}
+    out, n = uf_images.expand_message_images(plain)
+    assert out is plain and n == 0
+
+    marked = {"role": "tool",
+              "content": f"look: {uf_images.attach_marker(str(png))}"}
+    out, n = uf_images.expand_message_images(marked)
+    assert n == 1
+    assert isinstance(out["content"], list)
+    assert out["content"][0]["type"] == "text"
+    assert out["content"][1]["type"] == "image_url"
+    assert out["content"][1]["image_url"]["url"].startswith(
+        "data:image/png;base64,")
+    # Original message untouched (history/trace keep the stub).
+    assert isinstance(marked["content"], str)
+
+
+def test_expand_degrades_on_missing_file():
+    marked = {"role": "tool",
+              "content": uf_images.attach_marker("/nonexistent/x.png")}
+    out, n = uf_images.expand_message_images(marked)
+    assert n == 0 and out is marked
+
+
+# -------------------------------------------------------- vision tools
+
+def test_view_image_returns_attach_marker(png):
+    out = view_image(str(png), note="reference")
+    assert out.startswith("[image attached:")
+    assert "(see image)" in out and "reference" in out
+
+
+def test_view_image_rejects_non_image(tmp_path):
+    assert view_image(str(tmp_path)).startswith("error:")
+
+
+def test_take_screenshot_graceful_without_tool(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda _n: None)
+    out = take_screenshot()
+    assert out.startswith("error: no screenshot backend succeeded")
+    assert "tried:" in out
+
+
+# --------------------------------------------------------- capability gate
+
+def _names(client):
+    return {s.get("function", {}).get("name") for s in client.tools}
+
+
+def test_vision_tools_gated_by_capabilities():
+    from sable.core.agent_runner import SableAgentClient as C
+
+    c = C(base_url="http://127.0.0.1:1/v1", model="m")
+    assert not {"view_image", "take_screenshot"} & _names(c)
+
+    c = C(base_url="http://127.0.0.1:1/v1", model="m",
+          capabilities={"vision": True, "screenshots": True})
+    assert {"view_image", "take_screenshot"} <= _names(c)
+    assert {"view_image", "take_screenshot"} <= set(c.tool_impls)
+
+
+class _FakeResp:
+    def __init__(self, payload, status=200):
+        self._p, self.status_code = payload, status
+
+    def json(self):
+        return self._p
+
+
+class _FakeClient:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def get(self, url):
+        return _FakeResp(self.payload)
+
+
+def test_vision_probe_detects_multimodal_capability():
+    """Current llama.cpp advertises the projector as capabilities
+    ["completion","multimodal"] (not an mmproj meta key) — both shapes work."""
+    uf_images.reset_vision_cache()
+    modern = {"data": [{"id": "m", "capabilities": ["completion",
+                                                    "multimodal"],
+                        "meta": {}}]}
+    assert uf_images.detect_vision_support(
+        _FakeClient(modern), "http://x/v1") is True
+    uf_images.reset_vision_cache()
+    legacy = {"data": [{"id": "m", "meta": {"mmproj": "/x/mmproj.gguf"}}]}
+    assert uf_images.detect_vision_support(
+        _FakeClient(legacy), "http://x/v1") is True
+    uf_images.reset_vision_cache()
+    text_only = {"data": [{"id": "m", "capabilities": ["completion"],
+                           "meta": {}}]}
+    assert uf_images.detect_vision_support(
+        _FakeClient(text_only), "http://x/v1") is False
+    uf_images.reset_vision_cache()
+
+
+def test_vision_mode_resolution():
+    cfg = SableConfig()
+    assert _resolve_vision_mode({}, cfg) == "auto"
+    assert _resolve_vision_mode({"vision": True}, cfg) == "true"
+    assert _resolve_vision_mode({"vision": False}, cfg) == "false"
+    assert _resolve_vision_mode({"vision": "off"}, cfg) == "off"
+    cfg2 = SableConfig(run_settings={"mmproj_path": "/x/mmproj.gguf"})
+    assert _resolve_vision_mode({}, cfg2) == "true"
+
+
+# --------------------------------------- runner end-to-end (fake server)
+
+def test_runner_expands_markers_only_on_the_wire(tmp_path, monkeypatch):
+    """With vision forced on, the REQUEST carries image parts while the
+    recorded message list keeps the plain text marker."""
+    png = tmp_path / "shot.png"
+    png.write_bytes(png_bytes())
+    captured: dict = {}
+
+    with FakeOpenAIServer() as srv:
+        client = SableAgentClient(
+            base_url=srv.base_url, model="fake-model", vision="true")
+        orig_post = client._client.post
+
+        def spy(url, json=None, **kw):  # httpx passthrough spy
+            if url.endswith("/chat/completions") and json is not None:
+                captured["messages"] = json.get("messages")
+            return orig_post(url, json=json, **kw)
+
+        client._client.post = spy
+        res = client.run(
+            f"look at this {uf_images.attach_marker(str(png))}")
+        assert res.completed
+        # Wire: multimodal parts present.
+        wire_msgs = captured["messages"]
+        assert any(isinstance(m.get("content"), list)
+                   and any(p.get("type") == "image_url" for p in m["content"])
+                   for m in wire_msgs)
+        # History/trace: still plain strings.
+        assert all(isinstance(m.get("content"), str) or m.get("content") is None
+                   for m in res.messages if m.get("role") != "tool"
+                   or isinstance(m.get("content"), str))
+
+
+def test_runner_text_only_when_vision_off(fake_server_unused=None):
+    """Default (vision off / unreachable probe) => markers stay text."""
+    with FakeOpenAIServer() as srv:
+        client = SableAgentClient(base_url=srv.base_url,
+                                    model="fake-model", vision="false")
+        res = client.run("hello [image attached: /nope.png]")
+        assert res.completed
+        assert all(isinstance(m.get("content"), str) or m.get("content") is None
+                   for m in res.messages)
+
+
+# -------------------------------------------------- dashboard uploads
+
+def test_chat_stream_saves_uploaded_images(tmp_path):
+    from sable.dashboard.app import DashboardApp
+
+    app = DashboardApp(SableConfig(), home=Path(str(tmp_path)))
+    du = "data:image/png;base64," + base64.b64encode(png_bytes()).decode()
+    # The handler validates + saves before touching the runner; with no
+    # server running the run itself fails, but uploads must already exist.
+    resp = None
+    try:
+        resp = app.handle("POST", "/api/chat/stream",
+                          body={"prompt": "what is in this image?",
+                                "images": [du]})
+    except Exception:
+        pass  # stream setup may raise without a live endpoint — fine here
+    uploads = list((Path(str(tmp_path)) / "uploads").glob("upload-*.png"))
+    assert uploads, "uploaded image was not persisted"
+    assert uploads[0].read_bytes() == png_bytes()
+
+# ------------------------------------------------------------------------
+# from tests/test_projects.py
+# ------------------------------------------------------------------------
+
+@pytest.fixture()
+def home__test_projects(tmp_path, monkeypatch):
+    h = tmp_path / "uf-proj"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    return h
+
+
+@pytest.fixture()
+def app__test_projects(home__test_projects):
+    return DashboardApp(SableConfig(), home=home__test_projects)
+
+
+# ------------------------------------------------------------- project CRUD
+
+def test_project_crud_roundtrip(app__test_projects, home__test_projects, tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    # create
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "alpha", "workspace_dir": str(ws),
+                         "agents": ["coder", "reviewer"]})
+    assert r.status == 201, r.body
+    p = r.body["project"]
+    pid = p["id"]
+    assert p["name"] == "alpha" and p["workspace_dir"] == str(ws)
+    assert p["agents"] == ["coder", "reviewer"]
+    assert p["created"] and p["updated"]
+    # one JSON file per project under <home>/projects/
+    assert (home__test_projects / "projects" / f"{pid}.json").is_file()
+
+    # list
+    r = app__test_projects.handle("GET", "/api/projects")
+    assert r.status == 200
+    assert [x["id"] for x in r.body["projects"]] == [pid]
+
+    # update: bump updated, change name/agents/workspace_dir
+    ws2 = tmp_path / "ws2"
+    ws2.mkdir()
+    r = app__test_projects.handle("PUT", f"/api/projects/{pid}",
+                   body={"name": "beta", "workspace_dir": str(ws2),
+                         "agents": ["coder"]})
+    assert r.status == 200
+    assert r.body["project"]["name"] == "beta"
+    assert r.body["project"]["workspace_dir"] == str(ws2)
+    assert r.body["project"]["agents"] == ["coder"]
+
+    # delete
+    r = app__test_projects.handle("DELETE", f"/api/projects/{pid}")
+    assert r.status == 200 and r.body["ok"]
+    assert app__test_projects.handle("GET", "/api/projects").body["projects"] == []
+    assert app__test_projects.handle("PUT", f"/api/projects/{pid}",
+                      body={"name": "x"}).status == 404
+    assert app__test_projects.handle("DELETE", f"/api/projects/{pid}").status == 404
+
+
+def test_project_validation_errors(app__test_projects, tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "", "workspace_dir": str(ws)})
+    assert r.status == 400 and r.body["error"]["code"] == "bad_request"
+
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "  ", "workspace_dir": str(ws)})
+    assert r.status == 400
+
+    # relative path rejected
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "rel", "workspace_dir": "relative/dir"})
+    assert r.status == 400
+    assert "absolute" in r.body["error"]["message"]
+
+    # absolute but missing dir rejected
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "gone",
+                         "workspace_dir": str(tmp_path / "nope")})
+    assert r.status == 400
+    assert "does not exist" in r.body["error"]["message"]
+
+    # agents must be a list of strings
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "ok", "workspace_dir": str(ws),
+                         "agents": [{"bad": 1}]})
+    assert r.status == 400
+
+
+# ------------------------------------------------------- threads <-> project
+
+def test_thread_with_project_lists_under_it(app__test_projects):
+    ws = Path("/tmp")  # exists, absolute
+    pid = app__test_projects.handle("POST", "/api/projects",
+                     body={"name": "p1", "workspace_dir": str(ws)}
+                     ).body["project"]["id"]
+
+    r = app__test_projects.handle("PUT", "/api/chat/threads/t-proj",
+                   body={"title": "filed", "messages": [], "project": pid})
+    assert r.status == 200
+    assert r.body["thread"]["project"] == pid
+
+    lst = app__test_projects.handle("GET", "/api/chat/threads").body["threads"]
+    row = next(t for t in lst if t["id"] == "t-proj")
+    assert row["project"] == pid
+
+    # move between projects via update; explicit null -> Unfiled
+    pid2 = app__test_projects.handle("POST", "/api/projects",
+                      body={"name": "p2", "workspace_dir": str(ws)}
+                      ).body["project"]["id"]
+    r = app__test_projects.handle("PUT", "/api/chat/threads/t-proj",
+                   body={"project": pid2})
+    assert r.body["thread"]["project"] == pid2
+    r = app__test_projects.handle("PUT", "/api/chat/threads/t-proj",
+                   body={"project": None})
+    assert r.body["thread"]["project"] is None
+
+    # unknown project id rejected on thread write
+    assert app__test_projects.handle("PUT", "/api/chat/threads/t-proj",
+                      body={"project": "does-not-exist"}).status == 400
+
+
+def test_legacy_thread_without_project_key_still_lists(app__test_projects, home__test_projects):
+    """Raw pre-projects chat file (no "project" key) lists fine = Unfiled."""
+    d = home__test_projects / "chat"
+    d.mkdir(parents=True, exist_ok=True)
+    legacy = {"id": "old1", "title": "legacy", "created": "2026-01-01T00:00:00+00:00",
+              "updated": "2026-01-01T00:00:00+00:00", "model_alias": "m",
+              "messages": [{"role": "user", "content": "hi"}],
+              "trace_ids": ["t9"], "summary": None}
+    (d / "old1.json").write_text(json.dumps(legacy))
+
+    lst = app__test_projects.handle("GET", "/api/chat/threads").body["threads"]
+    assert [t["id"] for t in lst] == ["old1"]
+    assert lst[0]["project"] is None          # absent key -> Unfiled
+    assert lst[0]["message_count"] == 1
+
+    # full detail read still works, and a re-save keeps it projectless
+    det = app__test_projects.handle("GET", "/api/chat/threads/old1")
+    assert det.status == 200 and det.body["thread"]["title"] == "legacy"
+    r = app__test_projects.handle("PUT", "/api/chat/threads/old1", body={"title": "renamed"})
+    assert r.status == 200 and r.body["thread"]["project"] is None
+
+
+def test_delete_project_leaves_threads_unfiled(app__test_projects):
+    ws = Path("/tmp")
+    pid = app__test_projects.handle("POST", "/api/projects",
+                     body={"name": "doomed", "workspace_dir": str(ws)}
+                     ).body["project"]["id"]
+    app__test_projects.handle("PUT", "/api/chat/threads/keep-me",
+               body={"title": "kept", "messages": [], "project": pid})
+
+    assert app__test_projects.handle("DELETE", f"/api/projects/{pid}").status == 200
+
+    # thread file untouched; its dangling id reads as Unfiled in the tree
+    lst = app__test_projects.handle("GET", "/api/chat/threads").body["threads"]
+    row = next(t for t in lst if t["id"] == "keep-me")
+    assert row["project"] == pid  # raw value kept; UI groups unknown ids here
+    known = {p["id"] for p in app__test_projects.handle("GET", "/api/projects").body["projects"]}
+    assert row["project"] not in known  # => renders under Unfiled
+
+
+# ------------------------------------------------- trace project propagation
+
+def test_trace_recording_carries_project_and_filters(app__test_projects, home__test_projects):
+    from sable.store.recorder import TraceRecorder
+
+    ws = Path("/tmp")
+    pid = app__test_projects.handle("POST", "/api/projects",
+                     body={"name": "trace-proj", "workspace_dir": str(ws)}
+                     ).body["project"]["id"]
+
+    rec = TraceRecorder(home=home__test_projects, project=pid)
+    row = rec.record(task="do the thing", messages=[
+        {"role": "user", "content": "do the thing"},
+        {"role": "assistant", "content": "done"}],
+        backend="sable", model_alias="m", base_url="http://x/v1",
+        completed=True)
+    assert row is not None and row.project == pid
+    rec2 = TraceRecorder(home=home__test_projects)  # no project => unfiled trace
+    row2 = rec2.record(task="other task", messages=[
+        {"role": "user", "content": "other"},
+        {"role": "assistant", "content": "ok"}],
+        backend="sable", model_alias="m", base_url="http://x/v1",
+        completed=True)
+    assert row2 is not None and row2.project is None
+    rec.close(); rec2.close()
+
+    # list + filter
+    r = app__test_projects.handle("GET", "/api/traces", query={"project": pid})
+    assert [t["trace_id"] for t in r.body["traces"]] == [row.trace_id]
+    assert r.body["total"] == 1
+
+    r = app__test_projects.handle("GET", "/api/traces")
+    ids = {t["trace_id"] for t in r.body["traces"]}
+    assert ids == {row.trace_id, row2.trace_id}
+
+    # detail exposes project too
+    det = app__test_projects.handle("GET", f"/api/traces/{row.trace_id}")
+    assert det.body["trace"]["project"] == pid
+
+
+def test_trace_project_survives_legacy_db(tmp_path, monkeypatch):
+    """A v2 DB (no project column) migrates on open and reads old rows."""
+    import sqlite3
+    from sable.store.db import TraceStore
+
+    monkeypatch.setenv("SABLE_HOME", str(tmp_path / "h"))
+    db = tmp_path / "buffer" / "sable.db"
+    db.parent.mkdir(parents=True)
+    # hand-build a minimal v2-shaped traces table (no project column)
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE traces (trace_id TEXT PRIMARY KEY, session_id TEXT,"
+        " timestamp TEXT NOT NULL, agent_profile TEXT, model_alias TEXT,"
+        " model_version TEXT, endpoint_label TEXT, task_summary TEXT,"
+        " status TEXT NOT NULL, outcome_score REAL, num_tool_calls INTEGER"
+        " NOT NULL DEFAULT 0, tokens_in INTEGER, tokens_out INTEGER,"
+        " duration_s REAL, jsonl_path TEXT NOT NULL, schema_version INTEGER"
+        " NOT NULL DEFAULT 2, curated INTEGER NOT NULL DEFAULT 0,"
+        " dataset_id TEXT, failure_reason TEXT)")
+    conn.execute(
+        "INSERT INTO traces (trace_id, timestamp, status, jsonl_path)"
+        " VALUES ('old', '2026-01-01T00:00:00+00:00', 'success', '/x.jsonl')")
+    conn.commit()
+    conn.close()
+
+    store = TraceStore(db)  # runs the guarded ALTER TABLE ADD COLUMN
+    try:
+        row = store.get_trace("old")
+        assert row is not None and row.project is None
+        cols = {r[1] for r in store._conn.execute(
+            "PRAGMA table_info(traces)").fetchall()}
+        assert "project" in cols
+    finally:
+        store.close()
+
+
+# ------------------------------------------------ workspace roots precedence
+
+def test_resolve_workspace_roots_precedence(tmp_path, monkeypatch):
+    import sable.core.agent_runner as ar
+    from sable.core.agent_runner import resolve_workspace_roots
+
+    fake_cwd = tmp_path / "cwd"
+    fake_cwd.mkdir()
+    monkeypatch.setattr(ar.os, "getcwd", lambda: str(fake_cwd))
+
+    proj_ws = tmp_path / "proj-ws"
+    proj_ws.mkdir()
+    prof_ws = tmp_path / "prof-ws"
+    prof_ws.mkdir()
+    cfg_ws = tmp_path / "cfg-ws"
+    cfg_ws.mkdir()
+
+    # config level only -> config wins over cwd
+    cfg = SableConfig(agent={"workspace_root": str(cfg_ws)})
+    roots = resolve_workspace_roots(cfg)
+    assert roots is not None and roots[0] == cfg_ws
+
+    # project beats config
+    roots = resolve_workspace_roots(cfg, project_workspace_dir=str(proj_ws))
+    assert roots is not None and roots[0] == proj_ws
+
+    # profile beats project (and config)
+    roots = resolve_workspace_roots(
+        cfg, workspace_root_override=str(prof_ws),
+        project_workspace_dir=str(proj_ws))
+    assert roots is not None and roots[0] == prof_ws
+
+    # no config, no project -> cwd (behavior unchanged when no project)
+    roots = resolve_workspace_roots(SableConfig())
+    assert roots is not None and roots[0] == fake_cwd
+
+    # project with no config still beats the cwd default
+    roots = resolve_workspace_roots(SableConfig(),
+                                    project_workspace_dir=str(proj_ws))
+    assert roots is not None and roots[0] == proj_ws
+
+
+def test_chat_stream_rejects_unknown_project(app__test_projects):
+    """Run context channel validates the project id before streaming."""
+    r = app__test_projects.handle("POST", "/api/chat/stream",
+                   body={"prompt": "hi", "project": "nope"})
+    assert r.status == 404
+    assert r.body["error"]["code"] == "unknown_project"

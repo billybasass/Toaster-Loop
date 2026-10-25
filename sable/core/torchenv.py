@@ -320,7 +320,7 @@ def check_function(find_spec: Callable[[str], Any]
                    ) -> Tuple[bool, List[str]]:
     """Doctor probe: (ok, lines). Reads only the installed wheel's version
     *metadata* (importlib.metadata) — torch is never imported here (heavy
-    imports are worker-only; see tests/test_license_hygiene.py)."""
+    imports are worker-only; see tests/test_hygiene.py)."""
     lines: List[str] = []
     if find_spec("torch") is None:
         return True, ["torch: not installed (training extras absent)"]

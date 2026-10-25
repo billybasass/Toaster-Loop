@@ -1111,7 +1111,7 @@ coverage for hub/model-discovery, indexing, skills, playbooks, evolution,
 shadow/transfer eval, RFT, golden mining, ledger/tiers and multi-instance
 serving. No GPU required anywhere, and no agent or trainer framework is
 ever imported — training runs on transformers/peft/trl directly (enforced by
-the `tests/test_license_hygiene.py` import allowlist).
+the `tests/test_hygiene.py` import allowlist).
 
 ## Manual test with a real local GGUF
 
@@ -1133,6 +1133,6 @@ the `tests/test_license_hygiene.py` import allowlist).
   optional `[training]` extra; llama.cpp via subprocess for conversion).
 - Third-party imports are restricted to an explicit allowlist
   (`pyyaml`, `httpx`, stdlib, plus the lazy training extra) enforced by
-  `tests/test_license_hygiene.py`. External servers remain optional attach
+  `tests/test_hygiene.py`. External servers remain optional attach
   targets over HTTP only.
 - Loopback-only networking; no telemetry.

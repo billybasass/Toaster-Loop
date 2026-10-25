@@ -131,7 +131,7 @@ notification — see §5.
 
 - **All UI assets are authored in this repo**: CSS, icons, fonts, logos, copy
   strings — nothing is copied from third-party products.
-- [`tests/test_license_hygiene.py`](../tests/test_license_hygiene.py) plus the
+- [`tests/test_hygiene.py`](../tests/test_hygiene.py) plus the
   dashboard tests enforce the shipped tree stays dependency-free: no external
   URLs, no vendored frameworks.
 - Any runtime integration with other local programs is HTTP-only as an ordinary
