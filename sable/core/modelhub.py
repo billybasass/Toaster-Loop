@@ -244,7 +244,15 @@ def _token() -> Optional[str]:
 
 
 def _headers() -> Dict[str, str]:
-    h = {"User-Agent": "sable-resourcehub"}
+    # Accept-Encoding: identity is load-bearing, not cosmetics. HF serves
+    # small repo files (README, .gitattributes, config.json) with
+    # Content-Encoding: gzip; the download loop reads with iter_raw() so that
+    # .part-resume byte offsets match the wire stream. Without this header
+    # httpx's default (gzip, deflate) makes iter_raw() yield COMPRESSED bytes:
+    # every text file lands gzip-encoded at the wrong size and fails the
+    # size check — non-GGUF repos died on ".gitattributes: incomplete
+    # download (234/1570 bytes)" while GGUF binaries (served identity) worked.
+    h = {"User-Agent": "sable-resourcehub", "Accept-Encoding": "identity"}
     tok = _token()
     if tok:
         h["Authorization"] = f"Bearer {tok}"
@@ -758,6 +766,38 @@ def _files_for_variant(repo_id: str, variant: str, kind: str = "models",
 
 # --------------------------------------------------------------- downloads
 
+#: Files at most this size are checked for a gzip body (see _is_gzip): HF
+#: gzips *small* repo files, so a download that starts with gzip magic and
+#: is tiny is an encoding artifact, not content. Big archives legitimately
+#: start with \\x1f\\x8b and are left alone.
+_GZIP_SUSPECT_BYTES = 64 * 1024
+
+
+def _is_gzip(path: Path) -> bool:
+    """True if the file starts with the gzip magic bytes (\\x1f \\x8b)."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(2) == b"\x1f\x8b"
+    except OSError:
+        return False
+
+
+def _is_gzip_artifact(rel: str) -> bool:
+    """Repo files that are legitimately gzip (dataset .gz shards etc.)."""
+    return rel.lower().endswith((".gz", ".tgz"))
+
+
+def _gzip_poisoned(path: Path, rel: str) -> bool:
+    """A small non-.gz repo file that starts with gzip magic: the signature
+    of a server/proxy that gzipped our identity-requested download."""
+    if _is_gzip_artifact(rel):
+        return False
+    try:
+        return (path.stat().st_size <= _GZIP_SUSPECT_BYTES
+                and _is_gzip(path))
+    except OSError:
+        return False
+
 @dataclass
 class DownloadJob:
     job_id: str
@@ -1013,11 +1053,20 @@ class ModelHub:
             raise HubError(f"unsafe path in repo file list: {rel!r}")
         part = dest.with_name(dest.name + ".part")
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if dest.exists() and (not sib["size"] or dest.stat().st_size == sib["size"]):
+        # gzip magic on a *small* file: residue of the pre-Accept-Encoding
+        # bug (or a proxy that gzipped anyway). Both .part and already-final
+        # files can carry it — and a corrupt gzip .part may coincidentally
+        # match the expected size, so the size shortcut alone is not enough.
+        if _gzip_poisoned(part, rel):
+            part.unlink(missing_ok=True)
+        if (dest.exists()
+                and (not sib["size"] or dest.stat().st_size == sib["size"])
+                and not _gzip_poisoned(dest, rel)):
             job.done_bytes += sib["size"]
             job.files_done.append(rel)
             return
-
+        if _gzip_poisoned(dest, rel):
+            dest.unlink(missing_ok=True)  # corrupt: re-download, don't skip
         headers = _headers()
         resume_from = part.stat().st_size if part.exists() else 0
         if resume_from and sib["size"] and resume_from >= sib["size"]:
@@ -1064,6 +1113,10 @@ class ModelHub:
             raise HubError(
                 f"{rel}: incomplete download "
                 f"({part.stat().st_size}/{sib['size']} bytes) — retry resumes it")
+        if _gzip_poisoned(part, rel):
+            raise HubError(
+                f"{rel}: hub returned a gzip-encoded body for a small file — "
+                "server or proxy ignores Accept-Encoding: identity")
         os.replace(part, dest)
         job.files_done.append(rel)
 

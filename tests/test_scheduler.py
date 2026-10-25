@@ -442,6 +442,10 @@ def test_rocm_free_mib_text_fallback(monkeypatch):
 def test_gpu_free_mib_falls_through_vendors(monkeypatch):
     import sable.training.scheduler as sched
 
+    # Vendor-chain semantics only: neutralize the unified-pool probe so
+    # this test means the same thing on a TTM/APU box as on a dGPU one.
+    from sable.core import gpumem as _gm
+    monkeypatch.setattr(_gm, "unified_pool", lambda **kw: None)
     # nvidia probe fails (e.g. busy/unsupported) -> rocm result still wins.
     monkeypatch.setattr(sched, "_nvidia_free_mib", lambda: None)
     monkeypatch.setattr(sched, "_rocm_free_mib", lambda: 12345)

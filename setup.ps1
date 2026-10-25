@@ -89,12 +89,42 @@ Say "2/4 creating venv + installing sable"
 $Extras = if ($Training) { "dev,training" } else { "dev" }
 if ($HasUv) {
     Native { & uv venv $Venv --python $Py } 2>$null | Out-Null
-    Native { & uv pip install --python (Join-Path $Venv "Scripts\python.exe") -q "-e" "${Repo}[$Extras]" }
-    if ($LASTEXITCODE -ne 0) { Warn "uv pip install failed"; exit 1 }
 } else {
     $venvPy = Join-Path $Venv "Scripts\python.exe"
     if (-not (Test-Path $venvPy)) { Native { & $Py -m venv $Venv } }
     Native { & $venvPy -m pip install -q --upgrade pip setuptools wheel }
+}
+
+# torch build flavor must match THIS machine's accelerator (plain PyPI ships
+# CUDA on Windows too; Intel Arc needs the xpu index). See
+# sable/core/torchenv.py. Install torch FIRST from the right index so the
+# [training] extras resolve against it.
+if ($Training) {
+    $env:PYTHONPATH = $Repo
+    $venvPy = Join-Path $Venv "Scripts\python.exe"
+    $Flavor = ((Native { & $venvPy -c "from sable.core.torchenv import detect_flavor; print(detect_flavor().flavor)" } ) | Select-Object -Last 1)
+    if (-not $Flavor) { $Flavor = "default" }
+    $FlavorIdx = ((Native { & $venvPy -c "from sable.core.torchenv import detect_flavor; print(detect_flavor().index_url or '')" } ) | Select-Object -Last 1)
+    Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
+    Write-Host "torch      : $Flavor build for this hardware"
+    if ($HasUv) {
+        if ($Flavor -eq "default") {
+            Native { & uv pip install --python $venvPy -q torch }
+        } else {
+            Native { & uv pip install --python $venvPy -q torch --torch-backend $Flavor --extra-index-url https://download.pytorch.org/whl }
+        }
+    } elseif ($FlavorIdx) {
+        Native { & $venvPy -m pip install -q torch --index-url $FlavorIdx }
+    } else {
+        Native { & $venvPy -m pip install -q torch }
+    }
+    if ($LASTEXITCODE -ne 0) { Warn "torch install failed ($Flavor)"; exit 1 }
+}
+
+if ($HasUv) {
+    Native { & uv pip install --python (Join-Path $Venv "Scripts\python.exe") -q "-e" "${Repo}[$Extras]" }
+    if ($LASTEXITCODE -ne 0) { Warn "uv pip install failed"; exit 1 }
+} else {
     Native { & $venvPy -m pip install -q "-e" "${Repo}[$Extras]" }
     if ($LASTEXITCODE -ne 0) { Warn "package install failed (check network/disk)"; exit 1 }
 }

@@ -173,10 +173,33 @@ def _amdgpu_vram_fill(gpus: List[GpuInfo]) -> None:
       * sysfs ``mem_info_vram_total/used`` (Linux + amdgpu driver — works
         without ROCm userland, including unified-memory APUs);
       * ``rocm-smi --showmeminfo vram --json`` (any OS with ROCm userland).
-    Entries that neither probe covers keep free_mib=None (unknown, not zero)."""
+    Entries that neither probe covers keep free_mib=None (unknown, not zero).
+    Afterwards, a detected UNIFIED pool (core.gpumem — integrated card under
+    TTM/carve-out, where both probes read only the BIOS carve-out: 512 MiB
+    on a 128 GiB Strix Halo) overrides the view for single-AMD-GPU machines;
+    multi-GPU boxes keep their per-card numbers (GpuInfo carries no card id,
+    so mis-attribution is possible there)."""
     todo = [g for g in gpus if g.vendor == "amd" and g.total_mib is None]
+
+    def _unified_override() -> None:
+        try:
+            from ..core import gpumem
+            pool = gpumem.unified_pool()
+        except Exception:  # noqa: BLE001 — probe failure keeps carve-out view
+            pool = None
+        if pool is None:
+            return
+        if len([x for x in gpus if x.vendor == "amd"]) != 1:
+            return
+        for g in gpus:
+            if g.vendor == "amd":
+                g.total_mib = pool.total_mib
+                g.free_mib = pool.free_mib
+
+    _unified_override()
     if not todo:
         return
+
     # 1. sysfs by card index order (same enumeration order as _amdgpu_sysfs).
     base = Path("/sys/class/drm")
     if base.is_dir():

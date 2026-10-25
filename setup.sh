@@ -69,11 +69,49 @@ EXTRAS="dev"
 [ "$TRAINING" = 1 ] && EXTRAS="dev,training"
 if command -v uv >/dev/null 2>&1; then
     uv venv "$VENV" --python "$PY" >/dev/null 2>&1 || true
-    uv pip install --python "$VENV/bin/python" -q -e "$REPO[$EXTRAS]" \
-        || { warn "uv pip install failed"; exit 1; }
 else
     [ -x "$VENV/bin/python" ] || "$PY" -m venv "$VENV"
     "$VENV/bin/python" -m pip install -q --upgrade pip setuptools wheel
+fi
+
+# torch build flavor must match THIS machine's accelerator: plain PyPI
+# ships the CUDA wheel on Linux, which silently CPU-trains on AMD/MPS
+# boxes (see sable/core/torchenv.py). Install torch from the right index
+# FIRST so the [training] extras resolve against it; then the editable
+# install (whose torch>=2.4 pin is already satisfied) won't touch it.
+if [ "$TRAINING" = 1 ]; then
+    # torchenv is stdlib-only (its runtime import is lazy), so a bare
+    # PYTHONPATH probe works before sable itself is installed.
+    FLAVOR_NAME="$(PYTHONPATH="$REPO" "$VENV/bin/python" -c \
+        "from sable.core.torchenv import detect_flavor; print(detect_flavor().flavor)" \
+        2>/dev/null || echo default)"
+    FLAVOR_IDX="$(PYTHONPATH="$REPO" "$VENV/bin/python" -c \
+        "from sable.core.torchenv import detect_flavor; print(detect_flavor().index_url or '')" \
+        2>/dev/null || true)"
+    echo "torch      : $FLAVOR_NAME build for this hardware"
+    if command -v uv >/dev/null 2>&1; then
+        if [ "$FLAVOR_NAME" = default ]; then
+            uv pip install --python "$VENV/bin/python" -q torch \
+                || { warn "torch install failed"; exit 1; }
+        else
+            uv pip install --python "$VENV/bin/python" -q torch \
+                --torch-backend "$FLAVOR_NAME" \
+                --extra-index-url https://download.pytorch.org/whl \
+                || { warn "torch install failed ($FLAVOR_NAME)"; exit 1; }
+        fi
+    elif [ -n "$FLAVOR_IDX" ]; then
+        "$VENV/bin/python" -m pip install -q torch --index-url "$FLAVOR_IDX" \
+            || { warn "torch install failed (index $FLAVOR_IDX)"; exit 1; }
+    else
+        "$VENV/bin/python" -m pip install -q torch \
+            || { warn "torch install failed"; exit 1; }
+    fi
+fi
+
+if command -v uv >/dev/null 2>&1; then
+    uv pip install --python "$VENV/bin/python" -q -e "$REPO[$EXTRAS]" \
+        || { warn "uv pip install failed"; exit 1; }
+else
     "$VENV/bin/python" -m pip install -q -e "$REPO[$EXTRAS]" \
         || { warn "package install failed (check network/disk)"; exit 1; }
 fi

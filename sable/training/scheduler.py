@@ -283,7 +283,14 @@ def _rocm_free_mib(device: Optional[str] = None) -> Optional[int]:
 
 
 def gpu_free_mib(device: Optional[str] = None) -> Optional[int]:
-    """Free VRAM in MiB on NVIDIA or AMD GPUs; None when unavailable (skip).
+    """Free GPU memory in MiB (NVIDIA, AMD discrete, or unified pools);
+    None when unavailable (skip).
+
+    Unified-memory systems (Strix Halo & co. under TTM/carve-out setups)
+    are checked FIRST via core.gpumem: rocm-smi/sysfs there report only the
+    BIOS carve-out (512 MiB on a 128 GiB pool) and would refuse every job.
+    The probe keys on the PCI class, so discrete-GPU machines never enter
+    it and keep their honest vendor numbers.
 
     Tries each vendor tool in turn so a failing/slow probe on one (e.g. a
     busy rocm-smi under memory pressure) still falls through to the other,
@@ -291,6 +298,14 @@ def gpu_free_mib(device: Optional[str] = None) -> Optional[int]:
     restricts the reading to one physical device id (the training scheduler's
     per-slot gate); None keeps the historical min-across-all-GPUs semantics.
     """
+    if device is None:
+        try:
+            from ..core import gpumem
+            pool = gpumem.unified_pool()
+            if pool is not None:
+                return pool.free_mib
+        except Exception:  # a probe failure must never block the gate
+            logger.debug("unified pool probe failed", exc_info=True)
     for probe in (_nvidia_free_mib, _rocm_free_mib):
         # device=None keeps the exact zero-arg historical call (stub-friendly).
         free = probe() if device is None else probe(device)

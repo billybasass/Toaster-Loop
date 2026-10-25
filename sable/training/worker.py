@@ -708,6 +708,88 @@ def tokenize_with_labels(tokenizer: Any, conversations: List[Dict[str, str]],
 
 # ---------------------------------------------------------------------- SFT
 
+def _combined_optimizer_cls():
+    """Build the _CombinedOptimizer class over the real torch base (this
+    module imports torch lazily; the class body needs it at definition
+    time, so it is constructed on first use and cached)."""
+    import torch as _t
+
+    class _CombinedOptimizer(_t.optim.Optimizer):
+        """Present N optimizers as one to the Trainer (one step/zero_grad/
+        state_dict for all). Param groups are concatenated; the Trainer
+        only reads param_groups on the paths we use."""
+
+        def __init__(self, optimizers):
+            self.optimizers = list(optimizers)
+            params = [p for o in self.optimizers
+                      for g in o.param_groups for p in g["params"]]
+            _t.optim.Optimizer.__init__(self, iter(params), {})
+            self.param_groups = [g for o in self.optimizers
+                                 for g in o.param_groups]
+
+        def zero_grad(self, set_to_none: bool = True):  # noqa: D102
+            for o in self.optimizers:
+                o.zero_grad(set_to_none=set_to_none)
+
+        def step(self, closure=None):  # noqa: D102
+            loss = None
+            if closure is not None:
+                with _t.enable_grad():
+                    loss = closure()
+            with _t.no_grad():
+                for o in self.optimizers:
+                    o.step()
+            return loss
+
+        def state_dict(self):  # noqa: D102
+            return {"optimizers": [o.state_dict()
+                                   for o in self.optimizers]}
+
+        def load_state_dict(self, state_dict):  # noqa: D102
+            for o, sd in zip(self.optimizers, state_dict["optimizers"]):
+                o.load_state_dict(sd)
+
+    return _CombinedOptimizer
+
+
+def muon_optimizer_factory(*, lr: float, weight_decay: float):
+    """Build an HF optimizer FACTORY for Muon + AdamW (opt-in: optim: muon).
+
+    transformers >= ~4.57 calls a factory with the (moved, possibly
+    wrapped) model and kwargs at create_optimizer() time — after device
+    placement, so no pre-instantiated optimizer state can go stale. We
+    split params here: ndim==2 gets torch.optim.Muon (Newton-Schulz
+    orthogonalized momentum), everything else (norms, biases, embeddings,
+    lm_head) gets AdamW — the published recipe (Moonlight; KellerJordan/
+    Muon README). Muon's own defaults (lr 1e-3, wd 0.1, momentum 0.95)
+    deliberately do NOT inherit the AdamW-tuned config: the run's lr/wd
+    drive the AdamW half; Muon trains at its published defaults.
+
+    Returns a closure — the closure object itself is not an Optimizer
+    subclass, which is exactly what HF's is_optimizer_factory() detects.
+    """
+    def factory(model, *, betas=None, eps=None, **ignored):
+        import torch as _t
+        from torch.optim import AdamW
+
+        muon_params, adam_params = [], []
+        for p in model.parameters():
+            if not p.requires_grad:
+                continue
+            (muon_params if p.ndim == 2 else adam_params).append(p)
+        if not muon_params:
+            raise RuntimeError(
+                "optim=muon but the model exposes no 2D trainable "
+                "parameters — Muon has nothing to orthogonalize")
+        opt_muon = _t.optim.Muon(muon_params, lr=1e-3, weight_decay=0.1,
+                                 momentum=0.95)
+        opt_adam = AdamW(adam_params, lr=lr, weight_decay=weight_decay,
+                         betas=tuple(betas) if betas else (0.9, 0.999),
+                         eps=eps or 1e-8)
+        return _combined_optimizer_cls()([opt_muon, opt_adam])
+    return factory
+
+
 def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict[str, Any]:
     """LoRA SFT via transformers + peft. Returns {adapter_dir, ...}.
 
@@ -738,6 +820,15 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     lora = cfg.get("lora") or {}
     out_dir = Path(tr.get("output_dir") or "outputs").expanduser()
     adapter_dir = out_dir / "adapter"
+    # training_type: "lora" (default) | "full" — full fine-tune of the base
+    # weights. Opt-in; every other behavior in this function is unchanged
+    # for lora. Full mode: no peft wrap, adapter_dir holds a complete HF
+    # checkpoint (+ marker file), export skips the merge step.
+    training_type = str(tr.get("training_type", "lora")).lower().strip()
+    if training_type not in ("lora", "full"):
+        raise ValueError(
+            f"training.training_type must be 'lora' or 'full', got {training_type!r}")
+    train_full = training_type == "full"
 
     # Dataset validation happens without GPU deps (json + line count).
     n_rows = sum(len(load_jsonl(Path(f))) for f in files)
@@ -751,6 +842,7 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         "rows": n_rows,
         "output_dir": str(out_dir),
         "adapter_dir": str(adapter_dir),
+        "training_type": training_type,
         "epochs": tr.get("num_epochs", 3),
         "lr": tr.get("learning_rate", 2e-4),
         "lora_r": lora.get("lora_r", 64),
@@ -779,15 +871,64 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
 
     _emit(log_path, "phase", phase="load_model", model=cfg["model"])
     max_seq = int(tr.get("max_seq_length") or 16384)
-    load_in_4bit = bool(tr.get("load_in_4bit", True))
+    # 4-bit tiering (auto unless pinned): explicit load_in_4bit wins;
+    # otherwise >=3B params -> nf4 QLoRA base, smaller -> bf16, full-FT /
+    # no-GPU -> never 4-bit. Same policy the VRAM gate uses (core.vram).
+    from ..core.vram import resolve_load_in_4bit
+    _explicit_4bit = tr.get("load_in_4bit")
+    if _explicit_4bit is not None and not isinstance(_explicit_4bit, bool):
+        _explicit_4bit = bool(_explicit_4bit)
+    _tier_dims = None
+    _tier_gpu = bool(torch.cuda.is_available())
+    try:
+        from ..core.vram import load_model_dims
+        _tier_dims = load_model_dims(str(cfg["model"]))
+    except Exception:
+        pass
+    load_in_4bit, _tier_why = resolve_load_in_4bit(
+        explicit=_explicit_4bit, dims=_tier_dims, train_full=train_full,
+        gpu_available=_tier_gpu)
+    _emit(log_path, "load_tier", load_in_4bit=load_in_4bit, reason=_tier_why)
 
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"], use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Device attestation: name the device training will actually use, and
+    # shout when the installed torch wheel can never see this machine's GPU
+    # (a CUDA build on a ROCm box imports fine and crawls on CPU — the
+    # silent-CPU-training incident; see core/torchenv.py).
+    try:
+        _gpu = torch.cuda.is_available()
+        _bad = None
+        try:
+            from ..core import torchenv
+            _bad = torchenv.installed_mismatch(torch, torchenv.detect_flavor())
+        except Exception:
+            pass
+        _dev = (f"cuda:{torch.cuda.current_device()} "
+                f"({torch.cuda.get_device_name(torch.cuda.current_device())})"
+                if _gpu else "cpu")
+        _emit(log_path, "device_info", device=_dev,
+              torch=torch.__version__, hip=(torch.version.hip or None),
+              cuda=(torch.version.cuda or None))
+        if _bad:
+            _emit(log_path, "warning", message=_bad)
+        elif not _gpu:
+            _emit(log_path, "warning", message=(
+                f"training will run on CPU (torch {torch.__version__}, "
+                "cuda.is_available()=False) — no accelerator visible"))
+    except Exception as e:  # attestation must never kill a run
+        _emit(log_path, "warning", message=f"device attestation failed: {e}")
+
     load_kwargs: Dict[str, Any] = {}
     if torch.cuda.is_available():
         load_kwargs["torch_dtype"] = "auto"
+    if train_full and torch.cuda.is_available():
+        # Full fine-tune: pin bf16 weights (matches the measured 5 GiB
+        # full-FT footprint of Qwen3-0.6B; "auto" on an fp32 checkpoint
+        # would train fp32 and 4x the optimizer memory).
+        load_kwargs["torch_dtype"] = torch.bfloat16
     if load_in_4bit and torch.cuda.is_available():
         try:
             from transformers import BitsAndBytesConfig  # type: ignore[import-not-found]
@@ -829,9 +970,13 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         _load_mode = LOAD_MODE_PREQUANTIZED
     else:
         _load_mode = LOAD_MODE_UNQUANTIZED
-    _emit(log_path, **worker_provenance_event(
+    # _emit's signature is (log_path, event, **fields); the provenance dict
+    # carries its own "type" key (parse_worker_provenance matches on it), so
+    # pass the event name positionally and splat the payload as fields.
+    _prov = worker_provenance_event(
         _load_mode, str(cfg["model"]),
-        extra={"requested_4bit": bool(load_in_4bit)}))
+        extra={"requested_4bit": bool(load_in_4bit)})
+    _emit(log_path, str(_prov.get("type") or "resource_provenance"), **_prov)
 
     lora_kwargs = lora_kwargs_from_config(cfg)  # backlog #13 (incl. rslora/DoRA)
 
@@ -869,14 +1014,30 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         return wrapped
 
     current_r = int(lora_kwargs["r"])
-    model = _wrap_adapter(model, current_r)
-    if scaler.enabled:
-        scaler.start_stage(current_r)
-        _emit(log_path, "rank_scaling_enabled", r=current_r,
-              max_rank=scaler.max_rank,
-              min_improvement_steps=scaler.min_improvement_steps,
-              min_rel_improvement=scaler.min_rel_improvement)
-
+    if train_full:
+        # Full fine-tune: no adapter wrap; all base params train. Gradient
+        # checkpointing stays on (consumer-memory default).
+        if scaler.enabled:
+            _emit(log_path, "warning", message=(
+                "rank_scaling is a LoRA feature — ignored for "
+                "training_type=full"))
+        model.train()
+        if tr.get("gradient_checkpointing", True):
+            try:
+                model.gradient_checkpointing_enable()
+                if hasattr(model, "enable_input_require_grads"):
+                    model.enable_input_require_grads()
+            except Exception as e:
+                _emit(log_path, "warning",
+                      message=f"gradient checkpointing disabled: {e}")
+    else:
+        model = _wrap_adapter(model, current_r)
+        if scaler.enabled:
+            scaler.start_stage(current_r)
+            _emit(log_path, "rank_scaling_enabled", r=current_r,
+                  max_rank=scaler.max_rank,
+                  min_improvement_steps=scaler.min_improvement_steps,
+                  min_rel_improvement=scaler.min_rel_improvement)
     _emit(log_path, "phase", phase="load_dataset", files=files, format_type=fmt)
     if fmt != "sharegpt":
         raise ValueError(f"worker only supports format_type=sharegpt, got {fmt!r}")
@@ -977,13 +1138,32 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         report_to=[],
         **cadence,
     )
+    # plan_cadence mirrors save cadence into eval cadence, but Trainer hard-
+    # errors (transformers >= 5) on eval_strategy != "no" without an
+    # eval_dataset — small/short runs get no eval split at all.
+    if eval_ds is None:
+        args_kwargs["eval_strategy"] = "no"
+        args_kwargs.pop("eval_steps", None)
     # Speed/VRAM knobs (opt-in; reference-style wins (no external trainer)):
     #   optim="paged_adamw_8bit" — optimizer states quantized to 8-bit, big
     #     VRAM saving on small-VRAM/unified-memory boxes (needs bitsandbytes).
     #   torch_compile=true — fuse the backward pass (~10-30% speedup; first
     #     step is slow to compile, and some ROCm builds fail — degrade warmly).
     optim = str(tr.get("optim", "") or "").strip()
-    if optim:
+    # optim: "muon" routes through the HF optimizer-FACTORY hook instead of
+    # the OptimizerNames registry (torch.optim.Muon + AdamW for non-2D;
+    # see muon_optimizer_factory). Everything else passes through as before.
+    muon_factory = None
+    if optim == "muon":
+        import functools
+        muon_factory = functools.partial(
+            muon_optimizer_factory,
+            lr=float(tr.get("learning_rate", 2e-4)),
+            weight_decay=float(tr.get("weight_decay", 0.01)))
+        _emit(log_path, "optimizer", name="muon+adamw",
+              note="Muon (Newton-Schulz) on 2D params @ lr 1e-3/wd 0.1; "
+                   "AdamW on the rest at the run's lr/wd")
+    elif optim:
         args_kwargs["optim"] = optim
     if bool(tr.get("torch_compile", False)):
         args_kwargs["torch_compile"] = True
@@ -1012,6 +1192,8 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
                 Trainer,
             )
 
+            opt_kw = ({"optimizer_cls_and_kwargs": (muon_factory, {})}
+                      if muon_factory else {})
             return Trainer(
                 model=peft_model,
                 train_dataset=train_ds,
@@ -1020,6 +1202,7 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
                 data_collator=DataCollatorForSeq2Seq(
                     tokenizer=tokenizer, padding=True, label_pad_token_id=-100),
                 callbacks=[cb],
+                **opt_kw,
             )
         from transformers import SFTTrainer  # type: ignore[import-not-found]
 
@@ -1030,6 +1213,8 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         trainer_kwargs: Dict[str, Any] = {}
         if packing:
             trainer_kwargs["packing"] = True
+        if muon_factory:
+            trainer_kwargs["optimizer_cls_and_kwargs"] = (muon_factory, {})
         try:
             return SFTTrainer(
                 model=peft_model,
@@ -1048,6 +1233,8 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
             _emit(log_path, "warning",
                   message=f"packing unsupported by this SFTTrainer API "
                           f"({e}) — training unpacked")
+            fallback_kwargs = dict(trainer_kwargs)
+            fallback_kwargs.pop("packing", None)
             return SFTTrainer(
                 model=peft_model,
                 processing_class=tokenizer,
@@ -1057,6 +1244,7 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
                 max_length=max_seq,
                 truncation=True,
                 callbacks=[cb],
+                **fallback_kwargs,
             )
 
     # Checkpoint resume (inspiration pass 3 #21): a cancel/crash/reboot left
@@ -1133,6 +1321,11 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     _emit(log_path, "phase", phase="save_adapter", adapter_dir=str(adapter_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(adapter_dir))
+    if train_full:
+        # Full fine-tune: adapter_dir carries a COMPLETE HF checkpoint plus a
+        # marker; export skips the peft merge (see run_export).
+        (adapter_dir / "training_type.json").write_text(json.dumps(
+            {"training_type": "full", "model": str(cfg["model"])}))
     try:
         tokenizer.save_pretrained(str(adapter_dir))
     except Exception:
@@ -1141,6 +1334,7 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     eval_loss = callback.last_eval_loss if callback else None  # (#4)
     _emit(log_path, "sft_done", adapter_dir=str(adapter_dir),
           train_loss=train_loss, eval_loss=eval_loss,
+          training_type=("full" if train_full else "lora"),
           **({"rank_history": scaler.rank_history}
              if scaler.enabled and scaler.rank_history else {}))
     out = {"adapter_dir": str(adapter_dir), "train_loss": train_loss,
@@ -1166,6 +1360,11 @@ def run_dpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
                 "'rejected': str}} (TRL preference schema)"
             )
     tr = cfg.get("training") or {}
+    if str(tr.get("training_type", "lora")).lower().strip() == "full":
+        raise ValueError(
+            "training_type: full is supported for SFT only — DPO/GRPO still "
+            "train LoRA adapters (TRL accepts non-PEFT models, but sable's "
+            "preference pipelines are adapter-shaped; see worker run_dpo).")
     out_dir = Path(tr.get("output_dir") or "outputs").expanduser()
     adapter_dir = out_dir / "adapter"
 
@@ -1218,6 +1417,11 @@ def run_dpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     callback = make_protocol_callback(log_path)
     dpo_kwargs: Dict[str, Any] = {}
     optim = str(tr.get("optim", "") or "").strip()
+    if optim == "muon":
+        raise ValueError(
+            "optim: muon is wired for the SFT path only (the factory hook "
+            "lives in Trainer; TRL's DPO/GRPO configs would need the same "
+            "treatment — see worker.muon_optimizer_factory).")
     if optim:
         dpo_kwargs["optim"] = optim
     if bool(tr.get("torch_compile", False)):
@@ -1365,6 +1569,11 @@ def run_grpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dic
     dataset_dir = Path(cfg.get("_dataset_dir") or ".").expanduser()
     rows = grpo_rows_from_dataset(dataset_dir)
     tr = cfg.get("training") or {}
+    if str(tr.get("training_type", "lora")).lower().strip() == "full":
+        raise ValueError(
+            "training_type: full is supported for SFT only — GRPO still "
+            "trains LoRA adapters (full-FT RL on consumer memory risks "
+            "policy collapse anyway).")
     out_dir = Path(tr.get("output_dir") or "outputs").expanduser()
     adapter_dir = out_dir / "adapter"
 
@@ -1654,17 +1863,24 @@ def run_export(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> D
 
     merged = out_dir / "merged"
     if not merged.is_dir():
-        # Merge step needs the torch env; only attempt when it's importable.
-        try:
-            merge_adapter(cfg, adapter_dir, merged, log_path)
-        except ImportError as e:
-            raise RuntimeError(
-                "GGUF export needs either a merged HF dir at "
-                f"{merged} or the torch env (peft/transformers) to merge the "
-                f"adapter first ({e}). Run the export job with the GPU/torch "
-                f"interpreter (config training.python). Adapter kept at "
-                f"{adapter_dir}."
-            ) from None
+        if adapter_is_full_finetune(adapter_dir):
+            # training_type=full: the "adapter" dir IS a complete HF
+            # checkpoint — no merge step exists (or is needed).
+            _emit(log_path, "phase", phase="export_full_checkpoint",
+                  source=str(adapter_dir))
+            merged = adapter_dir
+        else:
+            # Merge step needs the torch env; only when importable.
+            try:
+                merge_adapter(cfg, adapter_dir, merged, log_path)
+            except ImportError as e:
+                raise RuntimeError(
+                    "GGUF export needs either a merged HF dir at "
+                    f"{merged} or the torch env (peft/transformers) to merge "
+                    f"the adapter first ({e}). Run the export job with the "
+                    f"GPU/torch interpreter (config training.python). "
+                    f"Adapter kept at {adapter_dir}."
+                ) from None
 
     if export_format in ("awq", "gptq"):
         return quantize_merged_hf(cfg, merged, out_dir, export_format, log_path)
@@ -1684,6 +1900,18 @@ def run_export(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> D
     subprocess.run([str(quantize), str(f16), str(gguf_out), quant], check=True)
     _emit(log_path, "export_done", gguf_path=str(gguf_out), method="llama.cpp")
     return {"gguf_path": str(gguf_out), "method": "llama.cpp"}
+
+
+def adapter_is_full_finetune(adapter_dir: Path) -> bool:
+    """True when a run's artifact dir is a FULL checkpoint (training_type=full),
+    written by run_sft with a training_type.json marker."""
+    marker = Path(adapter_dir) / "training_type.json"
+    if not marker.is_file():
+        return False
+    try:
+        return json.loads(marker.read_text()).get("training_type") == "full"
+    except (OSError, ValueError):
+        return False
 
 
 def adapter_is_streamed(adapter_dir: Path) -> bool:

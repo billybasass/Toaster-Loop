@@ -132,6 +132,21 @@ def check_deps(find_spec: Callable[[str], Any] = importlib.util.find_spec
     lines.append(
         f"[training] extras: {len(have)}/{len(extras)} present"
         + ("" if have else " (train/export jobs need `pip install -e '.[training]'`)"))
+    if "torch" in have:
+        # Build-flavor check: a CUDA wheel on a ROCm box (the silent-CPU-
+        # training incident) imports happily and passes every other check.
+        try:
+            from .core import torchenv
+            ok_flavor, flavor_lines = torchenv.check_function(find_spec)
+            lines.extend(flavor_lines)
+            if not ok_flavor:
+                return CheckResult(
+                    "deps", "problem", lines,
+                    next_commands=["reinstall torch for this GPU; setup.sh "
+                                   "does it automatically, or see the "
+                                   "--index-url hint above"])
+        except Exception as e:  # never let the probe break the doctor
+            lines.append(f"torch flavor check skipped: {e}")
     if missing:
         return CheckResult("deps", "problem", lines,
                            next_commands=["run: pip install -e ."])
@@ -376,9 +391,18 @@ def free_vram_mib_via_smi(run: Callable[..., Any] = subprocess.run
 
 
 def free_vram_mib() -> Optional[int]:
-    """Min free VRAM across GPUs, vendor-chained: nvidia-smi first, then the
+    """Min free GPU memory across GPUs, vendor-chained: the unified-pool
+    probe first (integrated AMD/TTM setups — see core/gpumem.py; vendor
+    tools report only the BIOS carve-out there), then nvidia-smi, then the
     scheduler's AMD probe (rocm-smi). Keeps the doctor honest on AMD boxes
     instead of going dark off-NVIDIA. None when no telemetry exists."""
+    try:
+        from .core import gpumem
+        pool = gpumem.unified_pool()
+        if pool is not None:
+            return pool.free_mib
+    except Exception:  # noqa: BLE001 — probe failure => fall through
+        pass
     vram = free_vram_mib_via_smi()
     if vram is not None:
         return vram

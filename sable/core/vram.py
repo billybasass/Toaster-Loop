@@ -319,13 +319,16 @@ def estimate_from_train_yaml(
     if isinstance(target_modules, str):
         target_modules = [t.strip() for t in target_modules.split(",") if t.strip()]
 
-    load_in_4bit = bool(tr.get("load_in_4bit", True))
+    load_in_4bit_explicit = tr.get("load_in_4bit")
+    if load_in_4bit_explicit is not None and not isinstance(
+            load_in_4bit_explicit, bool):
+        load_in_4bit_explicit = bool(load_in_4bit_explicit)
+    train_full = str(tr.get("training_type", "lora")).lower().strip() == "full"
     has_cuda = _cuda_available()
-    if not has_cuda:
-        # The worker ignores load_in_4bit without CUDA (bf16 on CPU is out of
-        # scope for the gate anyway — no GPU, no VRAM question).
-        pass
-    return estimate_train_vram_mib(
+    load_in_4bit, tier_reason = resolve_load_in_4bit(
+        explicit=load_in_4bit_explicit, dims=dims, train_full=train_full,
+        gpu_available=has_cuda)
+    est = estimate_train_vram_mib(
         dims,
         lora_r=int(lora.get("lora_r", 64)),
         target_modules=target_modules,
@@ -335,7 +338,10 @@ def estimate_from_train_yaml(
         max_seq_length=int(tr.get("max_seq_length") or 16384),
         gradient_checkpointing=bool(tr.get("gradient_checkpointing", True)),
         attn_implementation=str(tr.get("attn_implementation", "sdpa") or "sdpa"),
+        train_full=train_full,
     )
+    est.notes.append(f"load tier: {tier_reason}")
+    return est
 
 
 def _cuda_available() -> bool:
@@ -343,3 +349,47 @@ def _cuda_available() -> bool:
     import shutil
 
     return bool(shutil.which("nvidia-smi") or shutil.which("rocm-smi"))
+
+
+# --------------------------------------------------------- 4-bit tier policy
+
+#: Auto-tier boundaries (params). < 3B: bf16 base (loads fast, fits, better
+#: gradients than a 4-bit base); >= 3B with a GPU: nf4 base (QLoRA) —
+#: bf16 would exceed consumer/unified pools. Chosen from the Strix Halo
+#: measurements: 0.6B bf16 full-FT peaked at 5 GiB; 4-bit base loaded at
+#: 0.96 GiB and trained correctly on the ROCm wheel.
+TIER_4BIT_MIN_PARAMS = 3_000_000_000
+
+
+def resolve_load_in_4bit(
+    *,
+    explicit: Optional[bool],
+    dims: Optional["ModelDims"],
+    train_full: bool,
+    gpu_available: bool,
+) -> Tuple[bool, str]:
+    """Decide base-weight quantization for a run. Returns (load_in_4bit, why).
+
+    Rules (the "works on close-to-all models, on consumer hardware" policy):
+      * an explicit train.yaml value always wins (back-compat: templates
+        that pin true/false keep their exact behavior);
+      * full fine-tunes never train on a 4-bit base (dequantized anyway,
+        half-precision is the sane floor);
+      * no GPU -> False (the worker ignores 4-bit without CUDA anyway);
+      * model >= 3B params -> 4-bit QLoRA; smaller -> bf16.
+    Unknown dims (no local config.json) keep the historical default (True
+    with a GPU): conservative on memory, which is the failure we can least
+    afford on a shared pool.
+    """
+    if explicit is not None:
+        return bool(explicit), f"explicit config ({explicit})"
+    if train_full:
+        return False, "full fine-tune: bf16 base"
+    if not gpu_available:
+        return False, "no GPU: native precision"
+    if dims is None:
+        return True, "auto-tier: model size unknown, defaulting to 4-bit"
+    n = base_param_count(dims)
+    if n >= TIER_4BIT_MIN_PARAMS:
+        return True, f"auto-tier: {n / 1e9:.1f}B params >= 3B -> 4-bit QLoRA"
+    return False, f"auto-tier: {n / 1e9:.1f}B params < 3B -> bf16 base"

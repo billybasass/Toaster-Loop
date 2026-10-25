@@ -451,7 +451,9 @@ def render_train_yaml(dataset_dir: Path, cfg: CurationConfig,
         "training": {
             "training_type": "lora",
             "max_seq_length": min(16384, max(2048, cfg.max_est_tokens)),
-            "load_in_4bit": True,
+            # load_in_4bit is AUTO-TIRED by model size (worker/core.vram:
+            # >=3B params -> nf4 QLoRA base, smaller -> bf16). Pin it here
+            # only to force a specific choice.
             "output_dir": cfg.output_dir or str(dataset_dir / "outputs"),
             "num_epochs": 3,
             "learning_rate": 2e-4,

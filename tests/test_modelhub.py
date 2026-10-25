@@ -5,6 +5,7 @@ real httpx paths run with zero network. Also covers dashboard route wiring.
 
 from __future__ import annotations
 
+import gzip
 import json
 import socket
 import sys
@@ -149,7 +150,25 @@ class _FakeHubHandler(BaseHTTPRequestHandler):
         elif p == "/api/models/org/Plain":
             self._json({"id": "org/Plain", "sha": "cafefood", "siblings": [
                 {"rfilename": "config.json", "size": 2},
-                {"rfilename": "model.safetensors", "size": 4}]})
+                {"rfilename": "model.safetensors", "size": 4},
+                {"rfilename": "README.md", "size": len(FILE_A)}]})
+        elif p.startswith("/org/Plain/resolve/"):
+            # Mimic HF: small text files are served gzip'd WHEN the client
+            # advertises gzip, with Content-Length describing the COMPRESSED
+            # body (real-HF behaviour that killed non-GGUF downloads).
+            rel = p.split("/resolve/")[1].split("/", 1)[1]
+            data = {"README.md": FILE_A, "config.json": b"xy",
+                    "model.safetensors": b"abcd"}.get(rel, b"")
+            enc = "gzip" in (self.headers.get("Accept-Encoding") or "")
+            if enc and rel == "README.md":
+                data = gzip.compress(data)
+                self.send_response(200)
+                self.send_header("Content-Encoding", "gzip")
+            else:
+                self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         elif p.startswith("/testorg/Test-GGUF/resolve/"):
             rel = p.split("/resolve/")[1].split("/", 1)[1]
             data = FILE_A if "00001" in rel else (
@@ -301,6 +320,58 @@ def test_variants_non_gguf(hub_server, hub):
     assert not info["gguf"]
     assert info["variants"][0]["variant"] == "full"
     assert info["default_variant"] == "full"
+
+
+def test_download_identity_encoding_non_gguf(hub_server, hub):
+    """Non-GGUF download must land identity bytes.
+
+    The fake server gzip-encodes README.md when the client advertises gzip
+    (what HF really does for small text files). With iter_raw() writing the
+    wire stream straight to disk, a gzip-capable request corrupts the file;
+    _headers() must therefore pin Accept-Encoding: identity.
+    """
+    assert "identity" in modelhub._headers().get("Accept-Encoding", "")
+    job = hub.download_sync("org/Plain", "full")
+    assert job.state == "done", job.error
+    snap = hub.snapshot_dir("org/Plain", "cafefood")
+    assert (snap / "README.md").read_bytes() == FILE_A
+    assert (snap / "config.json").read_bytes() == b"xy"
+
+
+def test_download_rejects_gzip_part_residue(hub_server, hub):
+    """A .part left by the gzip bug must not be resumed-into (append would
+    concatenate identity bytes onto a gzip stream); it is restarted clean."""
+    snap = hub.snapshot_dir("org/Plain", "cafefood")
+    (snap / "README.md").parent.mkdir(parents=True, exist_ok=True)
+    part = snap / "README.md.part"
+    part.write_bytes(gzip.compress(b"stale-garbage")[:16])
+    job = hub.download_sync("org/Plain", "full")
+    assert job.state == "done", job.error
+    assert (snap / "README.md").read_bytes() == FILE_A
+    assert not part.exists()
+
+
+def test_download_redownloads_gzip_poisoned_final(hub_server, hub):
+    """A *final* file that is gzip poison must be re-fetched, not skipped by
+    the size shortcut (real-HF corrupt .gitattributes was 1570 bytes of gzip
+    that coincidentally matched its declared size).
+
+    Two faces: size-coinciding poison (skippable -> must still re-download)
+    and short poison (would fail the size check if it were a .part)."""
+    snap = hub.snapshot_dir("org/Plain", "cafefood")
+    snap.mkdir(parents=True, exist_ok=True)
+    gz = gzip.compress(b"z" * len(FILE_A))
+    # Poison whose size coincides with the declared size: size shortcut
+    # would happily skip it.
+    (snap / "README.md").write_bytes(gz[:len(FILE_A)].ljust(len(FILE_A), b"z"))
+    job = hub.download_sync("org/Plain", "full")
+    assert job.state == "done", job.error
+    assert (snap / "README.md").read_bytes() == FILE_A
+    # Short poison: must be purged, not resumed-into or treated as final.
+    (snap / "README.md").write_bytes(gz[:16])
+    job2 = hub.download_sync("org/Plain", "full")
+    assert job2.state == "done", job2.error
+    assert (snap / "README.md").read_bytes() == FILE_A
 
 
 # ------------------------------------------------------------------ download

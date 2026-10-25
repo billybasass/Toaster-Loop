@@ -203,6 +203,10 @@ def test_detect_gpus_falls_back_to_vulkan_when_nothing_else(monkeypatch):
 
 def test_amdgpu_vram_fill_from_sysfs(monkeypatch, tmp_path):
     """sysfs mem_info_vram_* populates free/total on AMD entries."""
+    # The unified-pool override runs first; this test is about the sysfs
+    # fill path, and the *real* /sys on this box may be a TTM/APU setup.
+    from sable.core import gpumem as _gm
+    monkeypatch.setattr(_gm, "unified_pool", lambda **kw: None)
     card = tmp_path / "card0" / "device"
     card.mkdir(parents=True)
     (card / "mem_info_vram_total").write_text(str(16 * 2**30))
@@ -309,6 +313,10 @@ Pages speculative:                       8192.
 def test_free_vram_mib_chains_to_rocm(monkeypatch):
     from sable import doctor
 
+    # This box may itself BE a unified-pool machine; the chain under test
+    # starts at the vendor probes.
+    from sable.core import gpumem as _gm
+    monkeypatch.setattr(_gm, "unified_pool", lambda **kw: None)
     monkeypatch.setattr(doctor, "free_vram_mib_via_smi", lambda: None)
     monkeypatch.setattr("sable.training.scheduler._rocm_free_mib",
                         lambda device=None: 8192)

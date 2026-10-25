@@ -98,13 +98,19 @@ def amd_gpus() -> Optional[List[Dict[str, Any]]]:
             continue
 
         def _kb_to_mib(p: Path) -> Optional[int]:
+            # mem_info_* files report BYTES (docs/ABI say KiB; in practice
+            # every amdgpu kernel ships bytes). One //1024 here labeled KiB
+            # as MiB — a 1024x inflation, e.g. a 512 MiB carve-out showed
+            # as "524288 MiB".
             try:
-                return round(int(p.read_text().strip()) // 1024)
+                return round(int(p.read_text().strip()) // (1024 * 1024))
             except (OSError, ValueError):
                 return None
 
         total_mib = _kb_to_mib(dev / "mem_info_vram_total")
         used_mib = _kb_to_mib(dev / "mem_info_vram_used")
+        if used_mib is None:
+            used_mib = 0
         name = "AMD GPU"
         try:
             ue = (dev / "uevent").read_text()
@@ -119,6 +125,20 @@ def amd_gpus() -> Optional[List[Dict[str, Any]]]:
             mem = memory_info()
             total_mib = mem["total_mib"] if mem else None
             used_mib = mem["used_mib"] if mem else None
+        # TTM/carve-out setups: vram_total reads a tiny BIOS carve-out
+        # (512 MiB on a 128 GiB pool) while the GPU actually allocates
+        # against the shared pool. core.gpumem decides (PCI class + GTT
+        # dominance), so discrete cards keep their real VRAM numbers.
+        unified = None
+        try:
+            from ..core import gpumem
+            unified = gpumem.unified_pool()
+        except Exception:  # noqa: BLE001 — display probe failure => carve-out
+            pass
+        if (unified is not None and unified.card
+                and unified.card == card.name):
+            total_mib = unified.total_mib
+            used_mib = max(0, total_mib - unified.free_mib)
         util: Optional[int] = None
         try:
             util = int((dev / "gpu_busy_percent").read_text().strip())
