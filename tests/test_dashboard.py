@@ -1769,6 +1769,154 @@ def test_train_check_includes_resource_gate(app, home):
     assert "gate" in body and set(body["gate"]) == {"ok", "reasons"}
 
 
+def test_train_check_reports_cron_wiring(app, home):
+    """Honesty: auto_enabled only means something if cron calls auto-check.
+    /api/train/check must say whether the trigger is actually wired up."""
+    body = app.handle("GET", "/api/train/check").body
+    sched = body["scheduler"]
+    assert set(sched) >= {"installed", "line", "note"}
+    # the suggested line must NOT rely on `sable` being on cron's PATH
+    assert "train auto-check --trigger" in sched["line"]
+    command = sched["line"].split(" ", 5)[5].split(" ")[0]
+    assert command.startswith("/"), f"cron PATH is minimal; got {command!r}"
+
+
+def test_cron_line_uses_absolute_sable_path(tmp_path, monkeypatch):
+    import sys
+
+    from sable.training import scheduler as sch
+
+    line = sch.cron_line(str(tmp_path))
+    assert "train auto-check --trigger" in line
+    assert str(tmp_path) in line  # log path follows SABLE_HOME
+    command = line.split(" ", 5)[5].split(" ")[0]
+    # cron runs with a minimal PATH: a bare `sable` would exit 127 silently.
+    # The absolute sibling of the running interpreter is always used when it
+    # exists, which is the case for any venv/source install.
+    assert command == str(sch.Path(sys.executable).parent / "sable")
+    assert command.startswith("/")
+
+    # no sibling script (e.g. module-only install) => PATH fallback, documented
+    monkeypatch.setattr(sch.Path, "is_file", lambda self: False)
+    monkeypatch.setattr(sch.shutil, "which", lambda n: None)
+    assert sch.cron_line(str(tmp_path)).split(" ", 5)[5].startswith("sable ")
+
+
+# --- regression: the default index must never swallow SABLE_HOME ----------
+# (a dashboard launched from ~/.sable built a 9k-file / 185 MB index of
+# llama.cpp build trees, vendored engines and sable.yaml itself)
+
+def test_default_build_refused_when_rooted_at_home(tmp_path, monkeypatch):
+    h = tmp_path / "homeroot"
+    (h / "index").mkdir(parents=True)
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.chdir(h)  # the old default root was exactly this cwd
+    app = DashboardApp(SableConfig(indexing={"enabled": True}), home=h)
+    r = app.handle("POST", "/api/index/build", body={})
+    assert r.status == 409
+    assert r.body["error"]["code"] == "index_root_is_sable_home"
+    assert not (h / "index" / "default.db").exists()  # nothing was built
+
+
+def test_default_build_allowed_with_explicit_override(tmp_path, monkeypatch):
+    h = tmp_path / "homeok"
+    (h / "index").mkdir(parents=True)
+    ws = tmp_path / "realcode"
+    ws.mkdir()
+    (ws / "a.py").write_text("def a():\n    return 1\n")
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.chdir(h)
+    app = DashboardApp(SableConfig(indexing={
+        "enabled": True, "paths_override": [str(ws)]}), home=h)
+    r = app.handle("POST", "/api/index/build", body={})
+    assert r.status == 200 and r.body["state"] == "running"
+
+
+def test_startup_indexing_skips_home_rooted_default(tmp_path, monkeypatch):
+    import time as _t
+
+    h = tmp_path / "homestart"
+    (h / "index").mkdir(parents=True)
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.chdir(h)
+    app = DashboardApp(SableConfig(indexing={"enabled": True}), home=h)
+    sub = app.bus.subscribe()
+    try:
+        app.startup_indexing()
+        _t.sleep(0.6)
+        seen = []
+        while True:
+            ev = sub.poll(timeout=0.1)
+            if ev is None:
+                break
+            seen.append(ev)
+    finally:
+        sub.close()
+    assert not (h / "index" / "default.db").exists()
+    builds = [e for e in seen if e.get("kind") == "index.build"]
+    assert any("SABLE_HOME" in str(e.get("payload")) for e in builds), \
+        "the skip should be visible as an index.build event"
+
+
+def test_config_put_starts_index_build(tmp_path, monkeypatch):
+    """Applying indexing settings must kick a build (no restart needed)."""
+    import time as _t
+
+    h = tmp_path / "applybuild"
+    h.mkdir(parents=True)
+    ws = tmp_path / "code2"
+    ws.mkdir()
+    (ws / "b.py").write_text("def b():\n    return 2\n")
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("SABLE_CONFIG", str(h / "sable.yaml"))
+    monkeypatch.chdir(ws)  # default root = the real code dir, not home
+    app = DashboardApp(SableConfig(), home=h)
+    r = app.handle("PUT", "/api/config", body={
+        "section": "indexing",
+        "patch": {"enabled": True, "paths_override": [str(ws)]}})
+    assert r.status == 200
+    _t.sleep(0.6)  # the build runs in a background thread
+    st = app.handle("GET", "/api/index").body
+    assert st["enabled"] is True
+    assert st["files"] >= 1 or st["building"], \
+        "applying indexing config should have started a build"
+
+
+def test_cron_trigger_status_reads_crontab(tmp_path, monkeypatch):
+    import subprocess as sp
+
+    import sable.training.scheduler as sch
+
+    def fake_run(cmd, **kw):
+        class R:
+            returncode = 0
+            stdout = "15 3 * * * /abs/sable train auto-check --trigger\n"
+        return R()
+
+    monkeypatch.setattr(sp, "run", fake_run)
+    st = sch.cron_trigger_status(str(tmp_path))
+    assert st["installed"] is True
+
+    def fake_run_none(cmd, **kw):
+        class R:
+            returncode = 1
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(sp, "run", fake_run_none)
+    assert sch.cron_trigger_status(str(tmp_path))["installed"] is False
+
+    def fake_run_plain(cmd, **kw):
+        class R:
+            returncode = 0
+            stdout = "0 * * * * /usr/bin/backup.sh\n"
+        return R()
+
+    monkeypatch.setattr(sp, "run", fake_run_plain)
+    st2 = sch.cron_trigger_status(str(tmp_path))
+    assert st2["installed"] is False  # crontab exists, no auto-check
+
+
 def test_config_put_root_section(app, home):
     """5d: section="root" patches top-level keys; unknown ones still 400."""
     r = app.handle("PUT", "/api/config",
@@ -3445,6 +3593,164 @@ def test_get_index_cache_refreshes_on_config_change(home__test_indexing_phase5):
     i2 = get_index(home__test_indexing_phase5, cfg=cfg2)
     assert i2.output_dim == 256
     assert get_index(home__test_indexing_phase5, cfg=cfg2) is i2  # stable afterwards
+
+
+# --- regression: setting indexing.model after startup must take effect -----
+# (the "indexing does not start until I restart" report: get_index's
+# config-change rebuild carried the OLD lexical-only embed client over, and
+# embedder() only builds a client when _embed is None)
+
+def test_config_model_appears_without_restart(home__test_indexing_phase5):
+    cfg_off = SableConfig(indexing={"enabled": True})
+    idx = get_index(home__test_indexing_phase5, cfg=cfg_off)
+    assert idx.status()["embedding_mode"] == "none"  # builds a lexical client
+
+    model = str(home__test_indexing_phase5 / "embed.gguf")
+    cfg_on = SableConfig(indexing={"enabled": True, "model": model})
+    idx2 = get_index(home__test_indexing_phase5, cfg=cfg_on)
+    # the new model must be live on the cached slot WITHOUT a restart
+    assert idx2.embedder().model_path == model
+    assert idx2.status()["embedding_mode"] == "spawn"
+
+
+def test_config_model_removal_drops_client(home__test_indexing_phase5):
+    model = str(home__test_indexing_phase5 / "embed.gguf")
+    idx = get_index(home__test_indexing_phase5,
+                    cfg=SableConfig(indexing={"enabled": True,
+                                              "model": model}))
+    assert idx.embedder().model_path == model
+    idx2 = get_index(home__test_indexing_phase5,
+                     cfg=SableConfig(indexing={"enabled": True}))
+    assert idx2.status()["embedding_mode"] == "none"
+
+
+def test_running_embed_client_survives_unrelated_config_change(
+        home__test_indexing_phase5):
+    # an output_dim edit must NOT drop a compatible (same-model) client:
+    # that would kill a running embedding server on every settings save.
+    model = str(home__test_indexing_phase5 / "embed.gguf")
+    i1 = get_index(home__test_indexing_phase5,
+                   cfg=SableConfig(indexing={"enabled": True, "model": model,
+                                             "output_dim": 768}))
+    client = i1.embedder()
+    i2 = get_index(home__test_indexing_phase5,
+                   cfg=SableConfig(indexing={"enabled": True, "model": model,
+                                             "output_dim": 256}))
+    assert i2 is not i1 and i2.output_dim == 256
+    assert i2._embed is client
+
+
+# --- regression: a cfg-less cached instance must be able to adopt a config --
+# (search_codebase called get_index WITHOUT cfg; the poisoned cache entry
+# then reported "indexing is disabled" for every later caller)
+
+def test_get_index_repairs_cfg_less_instance(home__test_indexing_phase5):
+    i0 = get_index(home__test_indexing_phase5)  # no cfg -> disabled
+    assert i0.enabled is False
+    cfg = SableConfig(indexing={"enabled": True})
+    i1 = get_index(home__test_indexing_phase5, cfg=cfg)
+    assert i1.enabled is True
+    assert get_index(home__test_indexing_phase5, cfg=cfg) is i1
+
+
+def test_hand_seeded_instance_is_never_repaired(
+        home__test_indexing_phase5, monkeypatch):
+    import sable.core.indexer as indexer_mod
+    seed = indexer_mod.CodebaseIndex(home__test_indexing_phase5, cfg=None,
+                                     index_cfg={"enabled": True})
+    monkeypatch.setitem(indexer_mod._instances,
+                        (str(home__test_indexing_phase5), None), seed)
+    got = get_index(home__test_indexing_phase5,
+                    cfg=SableConfig(indexing={"enabled": False}))
+    assert got is seed  # the seeder owns it; not rebuilt out from under them
+
+
+# --- embed-server launch knobs (GPU contention with the chat model) --------
+
+def test_embed_gpu_layers_and_threads_from_config(home__test_indexing_phase5):
+    from sable.core.indexer import EmbeddingClient
+
+    cfg = SableConfig(indexing={"enabled": True, "model": "/x/m.gguf",
+                                "gpu_layers": 0, "threads": 4})
+    c = EmbeddingClient(model_path="/x/m.gguf", cfg=cfg)
+    assert c._resolve_gpu_layers() == 0  # 0 = CPU embeddings, must survive
+    assert c.threads == 4
+
+    cfg2 = SableConfig(indexing={"enabled": True, "model": "/x/m.gguf"})
+    c2 = EmbeddingClient(model_path="/x/m.gguf", cfg=cfg2)
+    assert c2.gpu_layers is None and c2.threads is None  # auto-detect
+
+
+def test_embed_launch_flags_reach_the_command(home__test_indexing_phase5):
+    # spawn-command assembly is checked without booting a server
+    from sable.core.indexer import EmbeddingClient
+
+    captured: dict = {}
+
+    class FakeProc:
+        def __init__(self, cmd):
+            captured["cmd"] = list(cmd)
+        def poll(self):
+            return 0  # "exited early" -> ensure_running raises after spawn
+
+    def fake_popen(cmd, **kw):
+        return FakeProc(cmd)
+
+    monkey = pytest.MonkeyPatch()
+    try:
+        monkey.setattr("subprocess.Popen", fake_popen)
+        monkey.setattr("sable.serving.supervisor.find_llama_server",
+                       lambda *a, **k: "/bin/true")
+        c = EmbeddingClient(model_path="/x/m.gguf",
+                            cfg=SableConfig(indexing={
+                                "enabled": True, "model": "/x/m.gguf",
+                                "gpu_layers": 0, "threads": 3}))
+        with pytest.raises(Exception):
+            c.ensure_running()  # fake server "exits"; cmd was already built
+        assert captured["cmd"], "Popen was never reached"
+        i = captured["cmd"].index("-ngl")
+        assert captured["cmd"][i + 1] == "0"
+        assert captured["cmd"][captured["cmd"].index("-t") + 1] == "3"
+    finally:
+        monkey.undo()
+
+
+# --- search_codebase must see the config ----------------------------------
+
+def test_search_codebase_with_bound_cfg_not_disabled(
+        tmp_path, home__test_indexing_phase5):
+    import sable.core.indexer as indexer_mod
+    import sable.core.tools as uf_tools
+    root = tmp_path / "ws"
+    root.mkdir()
+    (root / "alpha.py").write_text("# alpha widget factory\nx = 1\n")
+    cfg = SableConfig(indexing={"enabled": True,
+                                "paths_override": [str(root)]})
+    # build via a DIRECT instance: the cache slot must still be empty when
+    # the tool runs, so the tool itself is what creates the cached instance
+    # (pre-fix it created a cfg-less, disabled one and poisoned the slot).
+    indexer_mod.CodebaseIndex(home__test_indexing_phase5, cfg=cfg).build()
+    out = uf_tools.search_codebase("alpha widget", _cfg=cfg)
+    assert "alpha.py" in out, out
+    # and the poisoned-cache variant is gone: enabled, not "disabled"
+    assert "disabled" not in out
+
+
+def test_search_codebase_empty_config_never_disables_cache(
+        tmp_path, home__test_indexing_phase5):
+    # A tool-level config load with NO indexing section must not downgrade
+    # a properly-configured cached instance (a supplied section is
+    # authoritative for get_index rebuilds).
+    import sable.core.tools as uf_tools
+    root = tmp_path / "ws2"
+    root.mkdir()
+    (root / "beta.py").write_text("# beta gadget factory\ny = 2\n")
+    idx = get_index(home__test_indexing_phase5,
+                    cfg=SableConfig(indexing={"enabled": True,
+                                              "paths_override": [str(root)]}))
+    idx.build()
+    out = uf_tools.search_codebase("beta gadget")
+    assert "disabled" not in out, out
 
 
 # ------------------------------------------------------- 2. MRL truncation

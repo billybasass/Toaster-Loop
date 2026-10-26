@@ -429,6 +429,55 @@ def should_auto_train(
     }
 
 
+# ------------------------------------------------- cron trigger visibility
+
+def cron_line(cfg_home: Optional[str] = None) -> str:
+    """A cron line that actually resolves `sable` in cron's minimal PATH.
+
+    The panel used to suggest `cd ~ && sable train auto-check --trigger`,
+    which silently fails (exit 127, "command not found") whenever sable is
+    only installed in a venv — i.e. every source install. Anchor on this
+    interpreter's sibling script instead."""
+    exe_dir = Path(sys.executable).parent
+    cand = exe_dir / ("sable.exe" if os.name == "nt" else "sable")
+    sable = str(cand) if cand.is_file() else (shutil.which("sable") or "sable")
+    log = str(Path(cfg_home) if cfg_home else (Path.home() / ".sable"))
+    return (f"15 3 * * * {sable} train auto-check --trigger "
+            f">> {log}/auto_iterate.log 2>&1")
+
+
+def cron_trigger_status(cfg_home: Optional[str] = None) -> Dict[str, Any]:
+    """Is the external scheduler (cron) actually wired to `auto-check`?
+
+    Honesty fix: `training.auto_enabled: true` reads as "trains itself", but
+    the dashboard runs no ticker and the ONLY caller of auto-check --trigger
+    is the user's crontab. When no crontab mentions auto-check, the loop can
+    never fire — this reports that instead of leaving it implicit. Read-only:
+    sable never installs cron entries for you."""
+    line = cron_line(cfg_home)
+    out: Dict[str, Any] = {"installed": None, "line": line,
+                           "note": "could not inspect the crontab"}
+    if os.name == "nt":
+        out["note"] = ("Windows: schedule `sable train auto-check --trigger` "
+                       "in Task Scheduler (sable does not touch it)")
+        return out
+    try:
+        r = subprocess.run(["crontab", "-l"], capture_output=True,
+                           text=True, timeout=10)
+        if r.returncode != 0:
+            out["installed"] = False  # no crontab at all (or unreadable)
+            out["note"] = ("no crontab found — nothing ever calls "
+                           "`train auto-check --trigger`, so the autonomous "
+                           "loop cannot fire")
+            return out
+        out["installed"] = "auto-check" in (r.stdout or "")
+        out["note"] = ("crontab references auto-check" if out["installed"]
+                       else "crontab exists but has no auto-check entry")
+    except (OSError, subprocess.SubprocessError) as e:
+        out["note"] = f"crontab check failed: {e}"
+    return out
+
+
 # ---------------------------------------------------------------- scheduler
 
 class SchedulerError(RuntimeError):

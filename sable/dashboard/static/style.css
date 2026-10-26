@@ -148,6 +148,7 @@ h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; color: var(--d
 .mono { font-family: var(--mono); font-size: 12px; }
 .hint { color: var(--dim); font-size: 12px; }
 .err { color: var(--err); }
+.ok { color: var(--ok); }
 .hidden { display: none !important; }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }

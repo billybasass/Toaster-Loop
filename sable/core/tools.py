@@ -1059,6 +1059,7 @@ def search_traces(pattern: str = "", status: str = "", limit: int = 10,
 def search_codebase(query: str = "", mode: str = "",
                     _project_id: Optional[str] = None,
                     _workspace_dir: Optional[str] = None,
+                    _cfg: Any = None,
                     **_: Any) -> str:
     """Semantic/hybrid/lexical search over the indexed codebase(s).
 
@@ -1072,6 +1073,14 @@ def search_codebase(query: str = "", mode: str = "",
     default/no-project DB is searched. top_k is an internal constant
     (indexer.SEARCH_TOP_K) — a model-settable override would conflict with
     the Phase 5 config story; a stray `top_k` argument is absorbed by **_.
+
+    `_cfg` (bug fix): the active SableConfig, bound by create_runner. It MUST
+    reach get_index — CodebaseIndex reads `indexing:` off cfg, so a cfg-less
+    call built an instance with `enabled: False` and reported "codebase
+    indexing is disabled" for every agent on every call, however the Settings
+    page was configured, and cached that instance per (home, project). When
+    no cfg is bound (manual/CLI construction) load the config file rather
+    than indexing blind.
     """
     if not query.strip():
         return "error: query required"
@@ -1080,8 +1089,24 @@ def search_codebase(query: str = "", mode: str = "",
         from .indexer import get_index
     except ImportError as e:  # pragma: no cover
         return f"error: indexer unavailable: {e}"
+    cfg = _cfg
+    if cfg is None:
+        try:
+            from .config import load_config
+
+            loaded = load_config()
+        except Exception:
+            loaded = None  # degrade to the pre-fix behavior, never crash
+        # Only a config that actually SAYs something about indexing may be
+        # passed on: get_index treats a supplied section as authoritative and
+        # rebuilds the cached instance from it, so handing over an empty
+        # default config would DISABLE a correctly-configured live index.
+        # With nothing to say, pass None and leave the cached instance alone.
+        if loaded is not None and (getattr(loaded, "indexing", None) or {}):
+            cfg = loaded
     try:
-        idx = get_index(resolve_sable_home(), project_id=_project_id,
+        idx = get_index(resolve_sable_home(cfg), cfg=cfg,
+                        project_id=_project_id,
                         workspace_dir=_workspace_dir)
         if not idx.enabled:
             return ("codebase indexing is disabled (settings -> Indexing, or "

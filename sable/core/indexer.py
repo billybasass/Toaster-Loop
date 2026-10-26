@@ -96,6 +96,20 @@ class IndexRebuildRequired(RuntimeError):
     different embedding dim/model — the index needs rebuilding."""
 
 
+#: Sentinel for "attribute absent" on duck-typed embed clients.
+_MISSING = object()
+
+
+def _opt_int(value: Any) -> Optional[int]:
+    """Int coercion for optional config knobs: None/blank/bad -> None."""
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_textish(p: Path) -> bool:
     if p.name.lower() in ("makefile", "dockerfile", "cmakelists.txt"):
         return True
@@ -309,6 +323,13 @@ def get_embed_client(model_path: str, cfg: Any = None,
             _embed_registry[key] = client
         elif cfg is not None:
             client.cfg = cfg  # keep spawn options fresh after config edits
+        # Refresh the launch knobs from the CURRENT config so an edit to
+        # indexing.gpu_layers / indexing.threads reaches the next spawn. A
+        # server that is ALREADY running keeps the flags it booted with —
+        # Settings' "stop embedding server" (or a restart) applies the change.
+        ice = getattr(cfg, "indexing", None) or {}
+        client.gpu_layers = _opt_int(ice.get("gpu_layers"))
+        client.threads = _opt_int(ice.get("threads"))
         return client
 
 
@@ -340,10 +361,20 @@ class EmbeddingClient:
     """
 
     def __init__(self, model_path: Optional[str] = None, cfg: Any = None,
-                 ubatch: Optional[int] = None):
+                 ubatch: Optional[int] = None,
+                 gpu_layers: Optional[int] = None,
+                 threads: Optional[int] = None):
         self.model_path = str(Path(model_path).expanduser()) if model_path else None
         self.cfg = cfg
         self.ubatch = int(ubatch) if ubatch else EMBED_UBATCH
+        #: -ngl override (``indexing.gpu_layers``). None => auto-detect.
+        _ice = getattr(cfg, "indexing", None) or {}
+        self.gpu_layers = (_opt_int(gpu_layers)
+                           if gpu_layers is not None
+                           else _opt_int(_ice.get("gpu_layers")))
+        #: -t override (``indexing.threads``). None => llama.cpp default.
+        self.threads = (_opt_int(threads) if threads is not None
+                        else _opt_int(_ice.get("threads")))
         self.url: Optional[str] = None
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
@@ -362,6 +393,28 @@ class EmbeddingClient:
             "dim": self.dim,
         }
 
+    def _resolve_gpu_layers(self) -> Optional[int]:
+        """-ngl for the embedding server.
+
+        Auto-detect used to mean FULL_OFFLOAD_LAYERS (999) on every non-CPU
+        backend, so the embed server competed with the chat model for the
+        GPU/VRAM — painful on unified-memory APUs (Strix Halo, Jetson) where
+        the two share both bandwidth and memory. ``indexing.gpu_layers``
+        overrides: 0 runs the embeddings on CPU, any N offloads N layers.
+        Read from ``self.cfg`` at spawn time (get_embed_client refreshes it
+        on every config edit) so the knob takes effect without a restart.
+        """
+        if self.gpu_layers is not None:
+            return self.gpu_layers
+        cfg_ice = getattr(self.cfg, "indexing", None) or {}
+        want = _opt_int(cfg_ice.get("gpu_layers"))
+        if want is not None:
+            return want
+        from ..serving import runtime
+
+        ngl = runtime.gpu_layers(None)
+        return ngl if ngl else None
+
     def ensure_running(self) -> Optional[str]:
         """Return base_url, spawning the local server when needed."""
         with self._lock:
@@ -370,7 +423,6 @@ class EmbeddingClient:
             if self._proc is not None and self._proc.poll() is None and self.url:
                 return self.url
             from ..serving.supervisor import find_llama_server, _free_port
-            from ..serving import runtime
 
             try:
                 binary = find_llama_server(
@@ -394,9 +446,11 @@ class EmbeddingClient:
                    "-b", str(self.ubatch), "-ub", str(self.ubatch),
                    "-c", str(self.ubatch),
                    "--alias", "sable-embeddings"]
-            ngl = runtime.gpu_layers(None)
-            if ngl:
+            ngl = self._resolve_gpu_layers()
+            if ngl is not None:
                 cmd += ["-ngl", str(ngl)]
+            if self.threads:
+                cmd += ["-t", str(self.threads)]
             log_dir = None
             try:
                 from ..store.paths import resolve_sable_home
@@ -606,7 +660,7 @@ class CodebaseIndex:
             if isinstance(raw_roots, str):
                 raw_roots = [raw_roots]
             self.roots = [Path(str(r)).expanduser() for r in raw_roots] or \
-                [Path.cwd()]
+                [self._default_root(cfg)]
         db_id = self.project_id or DEFAULT_DB_ID
         self.db_path = self.home / "index" / f"{db_id}.db"
         self._embed: Optional[EmbeddingClient] = None
@@ -618,8 +672,26 @@ class CodebaseIndex:
         self._cancel = threading.Event()
         self.last_error: Optional[str] = None
         self._schema_ready = False
+        #: True once get_index owns this cached instance (see _needs_cfg_repair).
+        self._managed = False
 
     # -- storage --------------------------------------------------------
+    @staticmethod
+    def _default_root(cfg: Any) -> Path:
+        """Fallback root for the default (no-project, no-override) index.
+
+        Was a bare ``Path.cwd()``: launched from the dashboard (whose cwd is
+        SABLE_HOME) that silently indexed ``~/.sable`` — llama.cpp build trees
+        and vendored engines, 9k files / 57k chunks of noise, and the config
+        file itself. Prefer the configured workspace when there is one, so the
+        default index points at code the agent actually works on.
+        """
+        ws = str((getattr(cfg, "agent", None) or {}).get(
+            "workspace_root") or "").strip()
+        if ws and ws not in ("None", "null"):
+            return Path(ws).expanduser()
+        return Path.cwd()
+
     def _db(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         con = sqlite3.connect(str(self.db_path), timeout=30.0)
@@ -978,24 +1050,106 @@ def get_index(home: Path, cfg: Any = None,
         if idx is None:
             idx = CodebaseIndex(Path(home), cfg=cfg, project_id=project_id,
                                 workspace_dir=workspace_dir)
+            #: Marked as get_index-managed so _needs_cfg_repair can tell a
+            #: cfg-less instance IT created (repairable) from a hand-seeded
+            #: one (tests, manual seeding) which is left exactly as seeded.
+            idx._managed = True
             _instances[key] = idx
-        elif (ws and idx.roots
-              and str(idx.roots[0]).strip() != ws):
-            # project workspace moved: rebuild in place, keep the embed client
-            fresh = CodebaseIndex(Path(home), cfg=cfg or idx.cfg,
-                                  project_id=project_id,
-                                  workspace_dir=workspace_dir)
-            fresh._embed = idx._embed
+            return idx
+        # 1. adopt a config when the cached instance never had one (repair).
+        if _needs_cfg_repair(idx, cfg):
+            fresh = _rebuild_index(Path(home), cfg, idx, project_id,
+                                   workspace_dir)
             _instances[key] = fresh
             return fresh
-        elif (cfg is not None and idx.cfg is not None
+        # 2. project workspace moved -> follow the new directory.
+        if ws and idx.roots and str(idx.roots[0]).strip() != ws:
+            fresh = _rebuild_index(Path(home), cfg or idx.cfg, idx,
+                                   project_id, workspace_dir)
+            _instances[key] = fresh
+            return fresh
+        # 3. indexing config changed (dashboard PUT /api/config).
+        if (cfg is not None and idx.cfg is not None
                 and idx.index_cfg != (getattr(cfg, "indexing", None) or {})):
-            # config changed (dashboard PUT /api/config): rebuild in place.
-            # Instances built without a cfg (manually seeded, e.g. tests)
-            # are left untouched.
-            fresh = CodebaseIndex(Path(home), cfg=cfg, project_id=project_id,
-                                  workspace_dir=workspace_dir)
-            fresh._embed = idx._embed  # keep any running server
+            fresh = _rebuild_index(Path(home), cfg, idx, project_id,
+                                   workspace_dir)
             _instances[key] = fresh
             return fresh
         return idx
+
+
+def _needs_cfg_repair(idx: "CodebaseIndex", cfg: Any) -> bool:
+    """Should a cached instance adopt ``cfg`` because it never had one?
+
+    Bug fix: ``search_codebase`` used to call ``get_index`` without a cfg.
+    The instance it cached therefore carried ``indexing: {}`` ->
+    ``enabled: False``, and the config-change branch below required
+    ``idx.cfg is not None`` — so nothing could ever correct it: semantic
+    search reported "codebase indexing is disabled" for every agent until the
+    process restarted. Only adopt the config when it observably changes the
+    instance, so cfg-less callers and hand-seeded (duck-typed) cache entries
+    keep behaving exactly as before.
+    """
+    if cfg is None or getattr(idx, "cfg", None) is not None:
+        return False
+    if not getattr(idx, "_managed", False):
+        return False  # hand-seeded instance: owned by the seeder, not us
+    new = getattr(cfg, "indexing", None) or {}
+    if idx.index_cfg == new:
+        return False
+    enabled = bool(new.get("enabled", False))
+    model = str(new.get("model") or "").strip() or None
+    return enabled != bool(idx.enabled) or model != idx.model_path
+
+
+def _rebuild_index(home: Path, cfg: Any, idx: "CodebaseIndex",
+                   project_id: Optional[str],
+                   workspace_dir: Optional[str]) -> "CodebaseIndex":
+    """Fresh instance for the current config, reusing the old embed client
+    ONLY when it still serves what the new config wants.
+
+    Carrying ``idx._embed`` over unconditionally was the second half of the
+    "indexing does not start until I restart" report: a lexical-only client
+    (built when no model was configured) survived a config edit that DID set
+    ``indexing.model``, and ``embedder()`` only builds a client when
+    ``_embed is None`` — so the index reported ``embedding_mode: none`` and
+    embedded nothing forever. Dropping an incompatible client is safe: the
+    old server is still owned by stop_all_embed_servers/atexit, and sable
+    only ever terminates processes it spawned itself."""
+    fresh = CodebaseIndex(home, cfg=cfg, project_id=project_id,
+                          workspace_dir=workspace_dir)
+    fresh._managed = True
+    if _embed_compatible(getattr(idx, "_embed", None), fresh):
+        fresh._embed = idx._embed
+    return fresh
+
+
+def _embed_compatible(client: Optional["EmbeddingClient"],
+                      index: "CodebaseIndex") -> bool:
+    """Does an existing embed client serve what THIS index config wants?
+
+    The get_index rebuild paths carried ``idx._embed`` over unconditionally.
+    A lexical-only client (model_path None, built when indexing had no model
+    configured) therefore survived a config change that DID set
+    ``indexing.model`` — CodebaseIndex.embedder() only builds a client when
+    ``_embed is None``, so the index kept reporting ``embedding_mode: none``
+    and silently skipping every embedding until the process restarted. That
+    was the "indexing doesn't start until I restart" report.
+    """
+    if client is None:
+        return False
+    # Duck-typed / hand-seeded clients (test doubles) that lack these
+    # attributes are treated as incompatible: rebuild rather than guess.
+    have = getattr(client, "model_path", _MISSING)
+    ub = getattr(client, "ubatch", _MISSING)
+    if have is _MISSING or ub is _MISSING:
+        return False
+    want = index.model_path
+    if bool(want) != bool(have):
+        return False
+    if want and str(have) != str(Path(want).expanduser()):
+        return False
+    if want and client.ubatch != (_opt_int(index.index_cfg.get("batch_size"))
+                                  or EMBED_UBATCH):
+        return False
+    return True

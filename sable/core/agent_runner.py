@@ -322,6 +322,7 @@ class SableAgentClient:
         heal_tool_calls: bool = True,
         delegation_context: Optional[Dict[str, Any]] = None,
         search_project: Optional[Dict[str, Any]] = None,
+        search_cfg: Any = None,
         capabilities: Optional[Dict[str, bool]] = None,
         web_fetch_config: Optional[Dict[str, Any]] = None,
         run_command_argv_only: bool = False,
@@ -582,12 +583,18 @@ class SableAgentClient:
         # pattern as delegation's _ctx — the model cannot forge it), so the
         # tool routes to <SABLE_HOME>/index/<project_id>.db and never
         # returns cross-project results. No project => default DB.
+        # `_cfg` rides along for the same reason: CodebaseIndex reads its
+        # `indexing:` section off the config, and a cfg-less call silently
+        # reported "indexing is disabled" no matter the real setting.
+        _search_bind: Dict[str, Any] = {}
+        if search_cfg is not None:
+            _search_bind["_cfg"] = search_cfg
         if search_project:
-            if "search_codebase" in self.tool_impls:
-                self.tool_impls["search_codebase"] = functools.partial(
-                    self.tool_impls["search_codebase"],
-                    _project_id=search_project.get("id"),
-                    _workspace_dir=search_project.get("workspace_dir"))
+            _search_bind["_project_id"] = search_project.get("id")
+            _search_bind["_workspace_dir"] = search_project.get("workspace_dir")
+        if _search_bind and "search_codebase" in self.tool_impls:
+            self.tool_impls["search_codebase"] = functools.partial(
+                self.tool_impls["search_codebase"], **_search_bind)
         # Inspiration pass 3 #19: verification-stop nudge (core/verification.py).
         # A passive per-run ledger of code edits vs fresh evidence; when the
         # loop tries to finish with unverified edits it injects exactly ONE
@@ -1919,6 +1926,9 @@ def create_runner(cfg: SableConfig, base_url: str, model: str,
                                                "workspace_dir":
                                                    project_workspace_dir}
                                               if project_id else None),
+                              # Active config for search_codebase (its
+                              # indexing: section + enabled flag).
+                              search_cfg=cfg,
                               # Per-agent capabilities (internet / run_command)
                               # + web_fetch knobs from tools.web_fetch.*.
                               capabilities=resolved_caps,

@@ -469,7 +469,8 @@ rft/mine_goldens) and the train check/estimate endpoints.
         return out
 
     def h_train_check(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
-        from ...training.scheduler import resource_gate_ok, should_auto_train
+        from ...training.scheduler import (cron_trigger_status,
+                                           resource_gate_ok, should_auto_train)
 
         tc = self._training_config()
         store = self._store()
@@ -489,6 +490,11 @@ rft/mine_goldens) and the train check/estimate endpoints.
             "threshold": {"min_traces": d["min_traces"],
                           "min_score": d["min_score"]},
             "gate": gate,
+            # Whether ANYTHING will ever call auto-check. The dashboard runs
+            # no ticker by design, so thresholds alone never train: without a
+            # cron entry the loop is armed but never fired, which looked like
+            # "training never starts despite easy training being on".
+            "scheduler": cron_trigger_status(),
         }
 
 

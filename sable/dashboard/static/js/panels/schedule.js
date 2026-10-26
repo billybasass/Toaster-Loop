@@ -128,8 +128,24 @@ export default {
     }
 
     // ------------------------------------------------------------ cron card
-    function renderCron() {
-      const line = `15 3 * * * cd ~ && sable train auto-check --trigger >> $HOME/.sable/auto_iterate.log 2>&1`;
+    async function renderCron() {
+      // The line must resolve `sable` inside cron's minimal PATH (a venv
+      // install is not on it), and the panel must SAY whether any crontab
+      // actually calls auto-check — otherwise "auto enabled" reads as
+      // self-training while nothing can ever fire. Server-computed via
+      // GET /api/train/check -> scheduler.cron_trigger_status.
+      let sched = {};
+      let line = "15 3 * * * sable train auto-check --trigger >> ~/.sable/auto_iterate.log 2>&1";
+      try {
+        const chk = await api("/api/train/check");
+        sched = chk.scheduler || {};
+        if (sched.line) line = sched.line;
+      } catch { /* fall back to the generic line */ }
+      const status = sched.installed === true
+        ? el("p", { class: "ok", text: "✓ " + (sched.note || "crontab calls auto-check") })
+        : el("p", { class: "err", text:
+            "⚠ " + (sched.note || "cannot tell whether the scheduler is wired up") +
+            " — until it is, enabled thresholds never train on their own." });
       cronCard.replaceChildren(
         el("h3", { text: "Autonomous runs (cron)" }),
         el("p", { class: "hint", text:
@@ -138,6 +154,7 @@ export default {
           "`auto-check --trigger` exits 0 silently when thresholds or the " +
           "resource gate are not met, and runs the full iterate loop " +
           "(curate → train → export → validate → promote) when they are." }),
+        status,
         el("pre", { class: "log", text: line }),
         copyButton(line, "copy cron line"));
     }

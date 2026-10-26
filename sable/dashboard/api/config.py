@@ -130,6 +130,10 @@ class ConfigRoutes(ApiContext):
                 # Phase 5 schema
                 "enabled", "model", "output_dim", "search_mode",
                 "paths_override", "auto_retrieve_threshold",
+                # embed-server launch knobs (core/indexer.py): batch_size =
+                # -b/-ub; gpu_layers = -ngl (0 = CPU embeddings, leaves the
+                # GPU to the chat model); threads = -t.
+                "batch_size", "gpu_layers", "threads",
                 # legacy keys stay writable so old configs round-trip;
                 # load_config absorbs them (core/config._normalize_indexing)
                 "paths", "embedding_model", "embedding_url", "top_k",
@@ -241,10 +245,24 @@ class ConfigRoutes(ApiContext):
         os.replace(tmp, path)
 
         # Reflect the new config in this app instance (env overrides still win).
+        old_indexing = dict(getattr(self.cfg, "indexing", None) or {})
         try:
             self.cfg = load_config(str(path))
         except Exception:
             pass  # keep serving with the previous cfg; file is valid regardless
+
+        # Applying indexing settings should START indexing (incremental build),
+        # not wait for a program restart: previously a config PUT reloaded cfg
+        # but never kicked a build, so "apply" left the index un-embedded and
+        # only the restart-time startup_indexing hook did the work. Same
+        # non-blocking thread + SSE events as startup; builds are incremental,
+        # and a failed embed surfaces as an index.build error event.
+        new_indexing = dict(getattr(self.cfg, "indexing", None) or {})
+        if new_indexing != old_indexing and new_indexing.get("enabled"):
+            try:
+                self.startup_indexing()
+            except Exception:
+                pass
         return {"ok": True, "path": str(path), "backup": str(
             path.with_suffix(path.suffix + ".bak")) if (
             path.with_suffix(path.suffix + ".bak")).is_file() else None}

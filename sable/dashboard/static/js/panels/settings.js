@@ -403,6 +403,12 @@ export default {
       const iModeSel = el("select", {}, el("option", { value: "", text: "—" }),
         ...["hybrid", "semantic", "lexical"].map((m) => el("option",
           { value: m, text: m, selected: ix.search_mode === m })));
+      // Embed-server launch knobs: on a machine that already runs a chat
+      // model (especially unified-memory APUs) the default full GPU offload
+      // makes indexing starve the model. 0 GPU layers = CPU embeddings.
+      const iGpuIn = numInput(ix.gpu_layers, "auto (full offload)");
+      const iThreadsIn = numInput(ix.threads, "llama.cpp default");
+      const iBatchIn = numInput(ix.batch_size, "2048");
       const ixStatus = el("span", { class: "hint" });
       const ixBuildBtn = el("button", { class: "small", text: "build index now" });
       ixBuildBtn.addEventListener("click", async () => {
@@ -449,13 +455,26 @@ export default {
           field("output embedding dimension", iDimSel,
             "Matryoshka truncation (MRL); changing this requires rebuilding indexes"),
           field("search mode", iModeSel),
+          field("embedding GPU layers", iGpuIn,
+            "-ngl for the embedding server. 0 = run embeddings on the CPU and " +
+            "leave the GPU to your chat model (recommended while a model is " +
+            "loaded on a shared-memory machine); blank = auto (full offload). " +
+            "Applies the next time the embedding server starts — use “stop " +
+            "embedding server” to force a restart."),
+          field("embedding CPU threads", iThreadsIn,
+            "-t for the embedding server; blank = llama.cpp default (all cores)"),
+          field("embedding batch size", iBatchIn,
+            "-b/-ub of the embedding server (default 2048); smaller uses less " +
+            "memory at some throughput cost"),
           field("paths override", iPathsIn,
             "manual roots for the default/no-project index; projects index their workspace_dir"),
           el("div", { class: "field" }, ixBuildBtn, ixStatus));
         return () => {
           const p = collect([["enabled", iEnSel, "bool"],
             ["model", iModelSel, "text"],
-            ["output_dim", iDimSel, "num"], ["search_mode", iModeSel, "text"]]);
+            ["output_dim", iDimSel, "num"], ["search_mode", iModeSel, "text"],
+            ["gpu_layers", iGpuIn, "num"], ["threads", iThreadsIn, "num"],
+            ["batch_size", iBatchIn, "num"]]);
           if (iPathsIn.value.trim())
             p.paths_override = iPathsIn.value.split(",").map((s) => s.trim()).filter(Boolean);
           return p;

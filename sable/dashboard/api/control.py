@@ -112,6 +112,24 @@ class ControlRoutes(ApiContext):
             out[name] = {"exists": exists, "lines": lines}
         return out
 
+    def _default_root_is_home(self, idx) -> bool:
+        """True when the DEFAULT (no-project) index would index SABLE_HOME.
+
+        That fallback root is the process cwd, and the dashboard is normally
+        launched from ~/.sable — so the default index silently swallowed
+        llama.cpp build trees, vendored engines and sable.yaml itself (9k
+        files / 185 MB observed) instead of any code. An explicit
+        paths_override is honoured; the implicit home-rooted default is not."""
+        try:
+            if getattr(idx, "project_id", None) is not None:
+                return False
+            if idx.index_cfg.get("paths_override") or idx.index_cfg.get("paths"):
+                return False
+            return bool(idx.roots) and \
+                idx.roots[0].resolve() == Path(self.home).resolve()
+        except OSError:
+            return False
+
     def _index(self, project_id: Optional[str] = None):
         from ...core.indexer import get_index
 
@@ -143,6 +161,15 @@ class ControlRoutes(ApiContext):
         pid = (str(b.get("project") or "").strip()
                or str(q.get("project") or "").strip() or None)
         idx = self._index(pid)
+        if self._default_root_is_home(idx):
+            # Refuse loudly instead of silently building a 185 MB index of
+            # SABLE_HOME (build trees + vendored engines + sable.yaml).
+            raise HttpError(
+                409,
+                "the default index would index SABLE_HOME itself "
+                f"({self.home}); open a project (projects index their "
+                "workspace_dir) or set indexing.paths_override to pick roots",
+                code="index_root_is_sable_home") from None
 
         record = {"state": "running", "started": _utcnow()}
 
@@ -215,6 +242,20 @@ class ControlRoutes(ApiContext):
                 try:
                     idx = self._index(pid)
                     if not idx.roots or not any(r.is_dir() for r in idx.roots):
+                        continue
+                    # Never auto-index SABLE_HOME itself: the default
+                    # (no-project) index falls back to the process cwd, and
+                    # for a dashboard launched from ~/.sable that meant
+                    # startup silently built a 9k-file index of llama.cpp
+                    # build trees, vendored engines and the config file —
+                    # noise at best, a config leak at worst. Only an
+                    # explicit indexing.paths_override may target it.
+                    if pid is None and self._default_root_is_home(idx):
+                        self.bus.publish("index.build", {
+                            "state": "done", "project": None,
+                            "line": "default index skipped: its root is "
+                                    "SABLE_HOME; open a project or set "
+                                    "indexing.paths_override to index code"})
                         continue
                     self.bus.publish("index.build", {
                         "state": "running", "project": pid,
