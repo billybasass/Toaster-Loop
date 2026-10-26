@@ -366,13 +366,13 @@ def test_easy_run_fires_mining_pass(app, home, monkeypatch):
         "section": "easy_training", "patch": {"min_traces": 1}})
 
     calls = []
-    import sable.dashboard.app as appmod
+    import sable.dashboard.api.easy as easy_mod
 
     def fake_pass(cfg, home_):
         calls.append(home_)
         return {"ok": True, "mined": 0, "skipped_dedup": 0}
 
-    monkeypatch.setattr(appmod, "mine_goldens_pass", fake_pass)
+    monkeypatch.setattr(easy_mod, "mine_goldens_pass", fake_pass)
     monkeypatch.setattr(
         app, "submit_iterate",
         lambda b, *, on_done=None: {"ok": True, "run_id": "iter-m1",

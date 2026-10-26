@@ -1902,7 +1902,9 @@ def test_install_endpoint_reports_error(app__test_engine_installs, home__test_en
 
 
 def test_install_endpoint_conflict_while_running(app__test_engine_installs, home__test_engine_installs, cached_host):
-    app__test_engine_installs._engine_installs["vllm"] = {"state": "running", "log": []}
+    # Seed the per-recipe run-slot with a live (fake) install record.
+    task = app__test_engine_installs._install_task("vllm")
+    task.record = {"state": "running", "log": []}
     r = app__test_engine_installs.handle("POST", "/api/engine-catalog/vllm/install", body={})
     assert r.status == 409 and err_code(r) == "already_running"
 

@@ -1200,8 +1200,8 @@ def test_fs_read_sensitive_and_traversal(app, workspace):
 
 
 def test_fs_read_size_truncation(app, workspace, monkeypatch):
-    import sable.dashboard.app as app_mod
-    monkeypatch.setattr(app_mod, "FS_READ_MAX_CHARS", 10)
+    import sable.dashboard.api.fsbrowse as fsbrowse_mod
+    monkeypatch.setattr(fsbrowse_mod, "FS_READ_MAX_CHARS", 10)
     # between the char cap and the hard size gate (10 < 30 <= 40 bytes) so
     # the content-level truncation branch runs rather than the metadata-only one
     (workspace / "big.txt").write_text("x" * 30)
@@ -1220,8 +1220,8 @@ def test_fs_tree_truncated_flag(app, tmp_path, monkeypatch):
     # cap slice, making the exact entry count layout-dependent)
     ws = tmp_path / "ws-cap"
     ws.mkdir()
-    import sable.dashboard.app as app_mod
-    monkeypatch.setattr(app_mod, "FS_TREE_MAX_ENTRIES", 2)
+    import sable.dashboard.api.fsbrowse as fsbrowse_mod
+    monkeypatch.setattr(fsbrowse_mod, "FS_TREE_MAX_ENTRIES", 2)
     for n in range(10):
         (ws / f"n{n}.txt").write_text("x")
     pid = _mkproject(app, ws)
