@@ -1015,7 +1015,8 @@ def build_parser() -> argparse.ArgumentParser:
     rst.add_argument("--yes", action="store_true",
                      help="Confirm: actually delete (without it, dry-run listing only)")
     rst.add_argument("--keep-models", action="store_true",
-                     help="Keep registry artifacts/archive (wipe buffer/datasets/etc.)")
+                     help="Keep model artifacts: models/, archive/ and the "
+                          "registry DB (engine builds are always wiped)")
     rst.set_defaults(func=cmd_reset)
 
     # ----------------------------------------------------------------- bench
@@ -1618,6 +1619,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
 def cmd_reset(args: argparse.Namespace) -> int:
     """Restore sable to a fresh state by wiping SABLE_HOME contents."""
     import shutil as _shutil
+    import tempfile as _tempfile
 
     from .serving.deploy import stop_owned_server
     from .serving import runtime
@@ -1629,9 +1631,13 @@ def cmd_reset(args: argparse.Namespace) -> int:
         print(f"nothing to reset: {home} does not exist.")
         return 0
 
-    keep = {"llama.cpp"} if args.keep_models else set()
+    # --keep-models spares MODEL artifacts (exported GGUFs under models/,
+    # the registry archive/, and the registry DB that tracks them). The
+    # managed engine builds (llama.cpp / llama.cpp-<backend>) are NOT model
+    # artifacts: a fresh state always rebuilds them via `sable setup`.
+    keep_names = {"models", "archive"} if args.keep_models else set()
     entries = sorted(p.name for p in home.iterdir())
-    protected = [e for e in entries if e in keep]
+    protected = [e for e in entries if e in keep_names]
     print(f"SABLE_HOME: {home}")
     for e in entries:
         tag = "  (kept: --keep-models)" if e in protected else ""
@@ -1652,20 +1658,46 @@ def cmd_reset(args: argparse.Namespace) -> int:
             runtime.terminate_pid(pid)
     except Exception:
         pass
-    st_p.unlink(missing_ok=True)
+    # NB: launch_state.json itself is deliberately NOT unlinked here — it
+    # lives under home, so the wipe loop below removes (and counts) it. An
+    # early unlink made the "removed N entries" line disagree with the
+    # listing printed above.
+
+    # The registry DB lives inside buffer/ but tracks archive/; when models
+    # are kept we stash the DB outside home and restore it after the wipe,
+    # so keeping one without the other can never orphan the archive.
+    stash = None
+    if args.keep_models:
+        db_files = [p for g in ("buffer/sable.db", "buffer/sable.db-wal",
+                                "buffer/sable.db-shm")
+                    if (p := home / g).exists()]
+        if db_files:
+            stash = Path(_tempfile.mkdtemp(prefix="sable-reset-"))
+            for f in db_files:
+                _shutil.move(str(f), str(stash / f.name))
 
     removed = []
-    for p in home.iterdir():
-        if p.name in protected:
+    for name in entries:
+        if name in protected:
             continue
+        p = home / name
         try:
             _shutil.rmtree(p) if p.is_dir() and not p.is_symlink() else p.unlink()
-            removed.append(p.name)
+            removed.append(name)
         except OSError as e:
             print(f"warning: could not remove {p}: {e}", file=sys.stderr)
+    if stash is not None:
+        buf = home / "buffer"
+        buf.mkdir(parents=True, exist_ok=True)
+        for f in stash.iterdir():
+            _shutil.move(str(f), str(buf / f.name))
+        stash.rmdir()
     print(f"removed {len(removed)} entries; sable is back to a fresh state.")
     if protected:
-        print(f"kept: {', '.join(protected)}")
+        kept = list(protected)
+        if stash is not None:
+            kept.append("buffer/sable.db (registry)")
+        print(f"kept: {', '.join(kept)}")
     print("re-run `sable doctor` / `sable setup` to rebuild the runtime if needed.")
     return 0
 

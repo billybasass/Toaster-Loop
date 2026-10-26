@@ -10,7 +10,14 @@
 # records state under SABLE_HOME (default ~/.sable).
 set -euo pipefail
 
-cd "$(dirname "$(readlink -f "$0")")"
+# Portable script-dir resolution: BSD/macOS readlink has no -f, so resolve
+# $0 through a readlink loop when it is a symlink, else just cd to its dir.
+SELF="$0"
+while [ -L "$SELF" ]; do
+    LINK="$(readlink "$SELF")"
+    case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+done
+cd "$(dirname "$SELF")"
 
 if [ ! -x .venv/bin/sable ]; then
     echo "sable is not set up yet — running ./setup.sh first."
