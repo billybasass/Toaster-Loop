@@ -332,6 +332,8 @@ class SableAgentClient:
         cancel_event: Optional[threading.Event] = None,
         token_counter: Optional[TokenCounter] = None,
         skills_enabled: bool = False,
+        plan_ctx: Optional[Dict[str, Any]] = None,
+        plans_enabled: bool = False,
     ):
         self.base_url = base_url.rstrip("/")
         self.model = model
@@ -448,6 +450,30 @@ class SableAgentClient:
                           not in SKILL_TOOL_NAMES]
             for _sk in SKILL_TOOL_NAMES:
                 self.tool_impls.pop(_sk, None)
+        # WP12 plans (core/plans.py): the plan tool family is stripped unless
+        # config `plans.enabled` — same both-ways removal as skills/capabilities,
+        # so a hallucinated call with the knob off degrades to "unknown tool"
+        # and default prompts stay byte-identical. When enabled, bind the
+        # private `_plan_ctx` ({project, thread}) into each impl via partial
+        # (the schema gate refuses a model-supplied _plan_ctx exactly like
+        # _todos_path). plan_progress records this run under task.runs at
+        # finalize using the same ctx.
+        self._plan_ctx = plan_ctx
+        if not plans_enabled:
+            from .tools import PLAN_TOOL_NAMES as _PTN
+            self.tools = [s for s in self.tools
+                          if s.get("function", {}).get("name")
+                          not in _PTN]
+            for _pt in _PTN:
+                self.tool_impls.pop(_pt, None)
+        else:
+            from .tools import PLAN_TOOL_NAMES as _PTN
+            for _pt in _PTN:
+                if _pt in self.tool_impls and \
+                        not isinstance(self.tool_impls[_pt],
+                                       functools.partial):
+                    self.tool_impls[_pt] = functools.partial(
+                        self.tool_impls[_pt], _plan_ctx=plan_ctx or {})
         # Phase 5e agent profiles: when a profile lists enabled tool names,
         # restrict the loop to that subset. An ENABLED capability implies its
         # tool (unioned into the subset) — the capability toggle alone grants
@@ -1621,6 +1647,21 @@ class SableAgentClient:
             )
             if rec is not None:
                 result.trace_id = rec.trace_id
+        # WP12: fill this run's trace id under every plan task the run touched
+        # via plan_progress (the tool recorded thread/time mid-run; the trace
+        # only exists now). Best-effort — a store error never alters a result.
+        touched = list((self._plan_ctx or {}).get("_touched") or [])
+        if touched and result.trace_id:
+            try:
+                from . import plans as _plans
+
+                pstore = _plans.load_plan(
+                    (self._plan_ctx or {}).get("project"))
+                for tid in touched:
+                    _plans.record_run(pstore, tid, trace_id=result.trace_id)
+                _plans.save_plan(pstore)
+            except Exception:  # noqa: BLE001 - bookkeeping only
+                logger.debug("plan run linkage failed (ignored)", exc_info=True)
         return result
 
 
@@ -1741,6 +1782,50 @@ def _with_playbooks(cfg: SableConfig, system_prompt: Optional[str],
     return base.rstrip("\n") + "\n\n" + section
 
 
+#: Hard cap on the injected "## Project" section — description and roles
+#: are free user text; the block must never blow up the system prompt.
+MAX_PROJECT_CONTEXT_CHARS = 4000
+
+
+def _with_project_context(project: Optional[Dict[str, Any]],
+                          system_prompt: Optional[str],
+                          profile_name: Optional[str]) -> Optional[str]:
+    """Append a '## Project' section: the project description plus the
+    roster of agents working on the project and each one's job, so every
+    agent knows its own role and its teammates' (multi-agent awareness).
+
+    ``project`` is the active project record (name, description, agents,
+    agent_roles); None/empty — or a record with neither description nor
+    agents — returns ``system_prompt`` untouched (byte-identical prompt,
+    the no-project default path). ``profile_name`` marks the roster line
+    that belongs to the running agent ("that's you")."""
+    if not isinstance(project, dict):
+        return system_prompt
+    name = str(project.get("name") or "").strip()
+    desc = str(project.get("description") or "").strip()
+    agents_raw = project.get("agents")
+    agents = ([str(a).strip() for a in agents_raw if str(a).strip()]
+              if isinstance(agents_raw, list) else [])
+    roles = project.get("agent_roles")
+    roles = roles if isinstance(roles, dict) else {}
+    if not (desc or agents):
+        return system_prompt
+    lines = [f"## Project: {name}" if name else "## Project"]
+    if desc:
+        lines += ["", desc]
+    if agents:
+        lines += ["", "Agents working on this project:"]
+        for a in agents:
+            role = str(roles.get(a) or "").strip()
+            you = " (that's you)" if profile_name and a == profile_name else ""
+            lines.append(f"- {a}{you}" + (f": {role}" if role else ""))
+    section = "\n".join(lines)
+    if len(section) > MAX_PROJECT_CONTEXT_CHARS:
+        section = section[:MAX_PROJECT_CONTEXT_CHARS].rstrip() + "\u2026"
+    base = system_prompt or SYSTEM_PROMPT
+    return base.rstrip("\n") + "\n\n" + section
+
+
 def _with_skills_index(cfg: SableConfig,
                        system_prompt: Optional[str]) -> Optional[str]:
     """Append the capped '## Skills' index to a run's system prompt.
@@ -1764,6 +1849,38 @@ def _with_skills_index(cfg: SableConfig,
     return base.rstrip("\n") + "\n\n" + section
 
 
+def _with_plan(cfg: SableConfig, system_prompt: Optional[str],
+               project_id: Optional[str]) -> Optional[str]:
+    """Append the capped '## Project plan' section (WP12, core/plans.py).
+
+    Same never-fail bounded-injection discipline as _with_playbooks: with
+    plans.enabled off (the default) this performs ZERO store access and the
+    prompt is byte-identical. Enabled but inject_summary=false, an empty/
+    missing plan, or any store/render failure likewise return the prompt
+    unchanged. The section is hard-capped by plans.max_inject_chars.
+    """
+    from .plans import load_plan, plans_config, summary
+
+    pcfg = plans_config(cfg)
+    if not pcfg.get("enabled", False):
+        return system_prompt
+    if not pcfg.get("inject_summary", True):
+        return system_prompt
+    try:
+        store = load_plan(project_id)
+        if not store.get("tasks"):
+            return system_prompt  # empty plan => byte-identical prompt
+        max_chars = int(pcfg.get("max_inject_chars", 800))
+        section = summary(store, max_chars=max(120, max_chars))
+    except Exception as e:  # defensive: never fail a run over plans
+        logger.warning("plan injection skipped: %s", e)
+        return system_prompt
+    if not section:
+        return system_prompt
+    base = system_prompt or SYSTEM_PROMPT
+    return base.rstrip("\n") + "\n\n" + section
+
+
 def create_runner(cfg: SableConfig, base_url: str, model: str,
                   api_key: Optional[str] = None, recorder: Any = None,
                   system_prompt: Optional[str] = None,
@@ -1772,10 +1889,12 @@ def create_runner(cfg: SableConfig, base_url: str, model: str,
                   project_workspace_dir: Optional[str] = None,
                   delegation_context: Optional[Dict[str, Any]] = None,
                   project_id: Optional[str] = None,
+                  project_context: Optional[Dict[str, Any]] = None,
                   sampling_override: Optional[Dict[str, Any]] = None,
                   capabilities: Optional[Dict[str, Any]] = None,
                   profile_name: Optional[str] = None,
                   cancel_event: Optional[Any] = None,
+                  plan_store: Optional[Dict[str, Any]] = None,
                   ) -> SableAgentClient:
     """Build the built-in agent runtime.
 
@@ -1799,6 +1918,13 @@ def create_runner(cfg: SableConfig, base_url: str, model: str,
     `project_id` (Phase 5): active project id; bound into search_codebase so
     semantic search routes to that project's index DB (no cross-project
     results). None => the default/no-project DB.
+
+    `project_context`: the active project record (name, description, agents,
+    agent_roles). When it carries a description or an agent roster, a
+    '## Project' section is appended to the system prompt so every agent on
+    the project knows what it is about, what its own job is, and which other
+    agents (and their jobs) share it. None/empty (the no-project default)
+    leaves the prompt byte-identical.
 
     `sampling_override` (Phase 6 multi-instance serving): per-server-instance
     sampling parameters merged ON TOP of the global `sampling:` section — a
@@ -1855,6 +1981,27 @@ def create_runner(cfg: SableConfig, base_url: str, model: str,
     skills_enabled = bool((getattr(cfg, "skills", None) or {})
                           .get("enabled", False))
     system_prompt = _with_skills_index(cfg, system_prompt)
+    # Projects: active project's description + agent roster (description +
+    # agents), then the WP12 plan summary appended last — closest to the
+    # conversation. No project / empty plan / knob off => prompt untouched.
+    system_prompt = _with_project_context(project_context, system_prompt,
+                                          profile_name)
+    from .plans import plans_config as _plans_config
+
+    plans_enabled = bool(_plans_config(cfg).get("enabled", False))
+    system_prompt = _with_plan(cfg, system_prompt, project_id)
+    # WP12: private plan context bound into the plan tools via partial (the
+    # model cannot forge it — schema gate). `plan_store` (accepted for API
+    # symmetry with the WP12 spec) may carry {"thread": ...}; otherwise the
+    # delegation context's thread rides along.
+    _plan_ctx: Dict[str, Any] = {
+        "project": project_id,
+        "thread": (plan_store or {}).get("thread")
+        or (delegation_context or {}).get("thread"),
+        # Shared mutable list: plan_progress appends touched task ids during
+        # the run; _finish fills the trace id under them at finalize.
+        "_touched": [],
+    }
     return SableAgentClient(base_url=base_url, model=model, api_key=api_key,
                               recorder=recorder, system_prompt=system_prompt,
                               enabled_tool_names=enabled_tool_names,
@@ -1951,7 +2098,11 @@ def create_runner(cfg: SableConfig, base_url: str, model: str,
                               # the client against base_url (agent.tokenizer_
                               # exact config knob intentionally not added —
                               # graceful fallback makes it always-on-safe).
-                              cancel_event=cancel_event)
+                              cancel_event=cancel_event,
+                              # WP12: plan tool family + private ctx binding
+                              # (stripped entirely when plans.enabled is off).
+                              plan_ctx=_plan_ctx,
+                              plans_enabled=plans_enabled)
 
 def _sampling_without_logprobs(cfg: SableConfig,
                                sampling_override: Optional[Dict[str, Any]]

@@ -170,7 +170,133 @@ def build_parser() -> argparse.ArgumentParser:
         "route to that project's codebase index — same behavior as "
         "dashboard chat runs. Unknown ids are an error.",
     )
+    # WP12: bind a one-shot run to a persistent plan task (requires
+    # plans.enabled). Seeds the first message with build_task_prompt and
+    # stamps the trace's plan_task field. Named --plan-task because --task is
+    # already the free-text prompt (see cmd_run comment).
+    run.add_argument(
+        "--plan-task",
+        metavar="TASK_ID",
+        help="WP12: start this run from plan task ID (e.g. t3): first message "
+        "= build_task_prompt(task), trace stamped with plan_task. Requires "
+        "plans.enabled and --project for non-default plans.",
+    )
     run.set_defaults(func=cmd_run)
+
+    # ------------------------------------------------------------------ plan
+    # WP12: persistent per-project task graphs (core/plans.py). Every
+    # subcommand takes an optional --project ID (default plan when omitted).
+    plan = sub.add_parser(
+        "plan",
+        help="Persistent per-project task graphs (WP12)",
+        description=(
+            "Dependency-aware task graphs that survive runs and threads: "
+            "add/list/show/next/depends/validate/set-status/export/import/"
+            "expand, plus the guarded autonomous loop. State lives at "
+            "<home>/plans/<project>.json. Requires config plans.enabled."),
+    )
+    psub = plan.add_subparsers(dest="plan_command", required=True)
+
+    def _pcommon(p: argparse.ArgumentParser) -> None:
+        _add_common(p)
+        p.add_argument("--project", metavar="PROJECT_ID", default=None,
+                       help="Project id whose plan to use (default plan "
+                            "when omitted)")
+
+    padd = psub.add_parser("add", help="Add a task")
+    _pcommon(padd)
+    padd.add_argument("title", help="Short imperative title")
+    padd.add_argument("--description", default="", metavar="TEXT")
+    padd.add_argument("--details", default="", metavar="TEXT")
+    padd.add_argument("--test-strategy", default="", metavar="TEXT")
+    padd.add_argument("--priority", choices=["high", "medium", "low"],
+                      default="medium")
+    padd.add_argument("--deps", default="", metavar="IDS",
+                      help="Comma-separated task ids this depends on")
+    padd.add_argument("--parent", default="", metavar="ID",
+                      help="Parent task id (makes this a subtask)")
+    padd.set_defaults(func=cmd_plan)
+
+    plist = psub.add_parser("list", help="List tasks with status marks")
+    _pcommon(plist)
+    plist.set_defaults(func=cmd_plan)
+
+    pshow = psub.add_parser("show", help="Show one task in full")
+    _pcommon(pshow)
+    pshow.add_argument("task_id", metavar="TASK_ID")
+    pshow.set_defaults(func=cmd_plan)
+
+    pnext = psub.add_parser("next", help="Next unblocked task (ranked)")
+    _pcommon(pnext)
+    pnext.set_defaults(func=cmd_plan)
+
+    pdep = psub.add_parser(
+        "depends", help="Wire/remove a dependency (refuses cycles/self-dep)")
+    _pcommon(pdep)
+    pdep.add_argument("task_id", metavar="TASK_ID")
+    pdep.add_argument("dep_id", metavar="DEP_ID")
+    pdep.add_argument("--remove", action="store_true",
+                      help="Remove the dependency instead of adding it")
+    pdep.set_defaults(func=cmd_plan)
+
+    pval = psub.add_parser(
+        "validate", help="Check for cycles + dangling refs (machine-readable)")
+    _pcommon(pval)
+    pval.set_defaults(func=cmd_plan)
+
+    pss = psub.add_parser("set-status", help="Set a task's status")
+    _pcommon(pss)
+    pss.add_argument("task_id", metavar="TASK_ID")
+    pss.add_argument("status", choices=["pending", "in_progress", "blocked",
+                                        "done", "cancelled"])
+    pss.add_argument("--note", default="", metavar="TEXT",
+                     help="Timestamped line appended to task details")
+    pss.set_defaults(func=cmd_plan)
+
+    prm = psub.add_parser("remove", help="Remove a task (rewires deps)")
+    _pcommon(prm)
+    prm.add_argument("task_id", metavar="TASK_ID")
+    prm.set_defaults(func=cmd_plan)
+
+    pexp = psub.add_parser("export", help="Canonical JSON to stdout")
+    _pcommon(pexp)
+    pexp.set_defaults(func=cmd_plan)
+
+    pimp = psub.add_parser(
+        "import", help="Import a brief (text file, - for stdin, or --use-ai)")
+    _pcommon(pimp)
+    pimp.add_argument("file", metavar="FILE",
+                      help="Brief file ('-' reads stdin); plain text lines "
+                           "'title [deps=t1,t2] [priority=high]' or a JSON "
+                           "task array. Binaries rejected.")
+    pimp.add_argument("--use-ai", action="store_true",
+                      help="Ask the served model to structure the brief "
+                           "(one bounded call; occupies GPU briefly)")
+    pimp.add_argument("--num-tasks", type=int, default=8, metavar="N",
+                      help="Cap imported/generated tasks (default 8, max 32)")
+    pimp.set_defaults(func=cmd_plan)
+
+    pexp2 = psub.add_parser("expand", help="Decompose one task into subtasks")
+    _pcommon(pexp2)
+    pexp2.add_argument("task_id", metavar="TASK_ID")
+    pexp2.add_argument("--num", type=int, default=3, metavar="N",
+                       help="How many subtasks to generate (default 3)")
+    pexp2.add_argument("--prompt", default="", metavar="TEXT",
+                       help="Extra guidance for the model")
+    pexp2.set_defaults(func=cmd_plan)
+
+    ploop = psub.add_parser(
+        "loop", help="Run tasks unattended (guarded; single-flight)")
+    _pcommon(ploop)
+    ploop.add_argument("--max-tasks", type=int, default=None, metavar="N",
+                       help="Override plans.loop.max_tasks for this run")
+    ploop.add_argument("--resume", action="store_true",
+                       help="Continue from the project's .loop.json progress")
+    ploop.set_defaults(func=cmd_plan)
+
+    ploopst = psub.add_parser("loop-status", help="Show loop progress file")
+    _pcommon(ploopst)
+    ploopst.set_defaults(func=cmd_plan)
 
     # ---------------------------------------------------------------- traces
     traces = sub.add_parser("traces", help="Inspect the experience buffer")
@@ -245,6 +371,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Filter by agent profile/backend (e.g. sable)")
     cur.add_argument("--model-alias", metavar="ALIAS",
                      help="Filter by model alias that served the traces")
+    # WP12: project filter (same stamp `sable run --project` writes) — pairs
+    # naturally with per-project plans: curate just this project's work.
+    cur.add_argument("--project", metavar="ID",
+                     help="Only traces stamped with project ID "
+                          "(see `sable run --project`)")
     cur.add_argument("--include-failures", action="store_true",
                      help="Let failure traces into selection (DPO negatives; "
                           "they still must pass quality gates for SFT)")
@@ -1761,6 +1892,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     # and per-project codebase index routing. Unknown ids fail fast.
     project_id = getattr(args, "project", None) or None
     project_workspace_dir = None
+    project_context = None
     if project_id:
         from .core.delegation import load_project
 
@@ -1770,6 +1902,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                   "(create it in the dashboard first)", file=sys.stderr)
             return 1
         project_workspace_dir = str(proj.get("workspace_dir") or "") or None
+        project_context = proj  # '## Project' prompt section (dashboard parity)
 
     # Backlog #8: batch mode parses its input before touching the GPU so a
     # malformed task file fails fast with the line number.
@@ -1797,6 +1930,35 @@ def cmd_run(args: argparse.Namespace) -> int:
         # curation/RFT filters and the trace panel scope CLI runs too.
         recorder = make_recorder(cfg, project=project_id)
 
+        # WP12: --plan-task ID seeds the first message from the persistent plan
+        # (build_task_prompt: title/description/details/test-strategy +
+        # completed-dependency context) and stamps the trace's plan_task so it
+        # links task<->trace both ways. The spec's shorthand was
+        # `sable run --project X --task ID`, but `--task` already means "the
+        # one-shot prompt text"; overloading it would make `--task "fix login"`
+        # ambiguous, so the plan binding is a distinct flag (documented per
+        # AGENTS.md). Needs plans.enabled and a known task id.
+        plan_task_id = getattr(args, "plan_task", None) or None
+        seed_prompt = ""
+        if plan_task_id:
+            from .core.plans import (build_task_prompt, get_task, load_plan,
+                                     plans_config)
+
+            if not plans_config(cfg).get("enabled", False):
+                print("error: --plan-task requires plans.enabled: true",
+                      file=sys.stderr)
+                return 1
+            pstore = load_plan(project_id)
+            if get_task(pstore, plan_task_id) is None:
+                print(f"error: no task {plan_task_id!r} in project "
+                      f"{project_id or 'default'} plan", file=sys.stderr)
+                return 1
+            seed_prompt = build_task_prompt(pstore, plan_task_id)
+            try:
+                recorder.plan_task = plan_task_id
+            except Exception:  # noqa: BLE001 - NullRecorder has no attr set
+                pass
+
         # No profile_name here on purpose: `sable run` has no profile
         # concept (profiles are a dashboard-chat/delegation construct — their
         # system_prompt/tools/capabilities all stay unset for CLI runs). With
@@ -1808,14 +1970,22 @@ def cmd_run(args: argparse.Namespace) -> int:
             recorder=recorder,
             project_workspace_dir=project_workspace_dir,
             project_id=project_id,
+            project_context=project_context,
         )
         print(f"Agent backend: {getattr(runner, 'name', 'unknown')}")
 
         if batch_tasks is not None:
             return _cmd_run_batch(cfg, args, runner, batch_tasks)
 
-        if args.task:
-            result = runner.run(args.task)
+        # WP12: with --plan-task the first message is seeded from the graph
+        # (build_task_prompt); any free --task text rides along as extra
+        # instruction. Without it, behavior is exactly as before.
+        first_message = args.task
+        if plan_task_id:
+            first_message = (f"{seed_prompt}\n\n{args.task}"
+                             if args.task else seed_prompt)
+        if first_message:
+            result = runner.run(first_message)
             print("\n" + result.final_response)
             if getattr(result, "trace_id", None):
                 print(f"\n[trace {result.trace_id} recorded to buffer]")
@@ -1921,9 +2091,13 @@ def cmd_traces_list(args: argparse.Namespace) -> int:
     for r in rows:
         score = "" if r.outcome_score is None else f" score={r.outcome_score:+.2f}"
         cur = " [curated]" if r.curated else ""
+        # WP12: plan-task chip — traces started from a plan task show the link.
+        task = getattr(r, "plan_task", None)
+        tchip = f" [{task}]" if task else ""
         print(
             f"{r.timestamp}  {r.trace_id}  {r.status:<8}{score}  "
             f"{r.agent_profile}/{r.model_alias}  tools={r.num_tool_calls}{cur}"
+            f"{tchip}"
         )
     return 0
 
@@ -2029,6 +2203,301 @@ def cmd_traces_prune(args: argparse.Namespace) -> int:
         print(f"  warning:  {err}", file=sys.stderr)
     if summary["dry_run"] and summary["deleted"]:
         print("  (re-run with --yes to delete)")
+    return 0
+
+
+# ------------------------------------------------------------------ plan
+# WP12: persistent per-project task graphs (core/plans.py). All subcommands
+# require config plans.enabled (the store is never touched otherwise); errors
+# exit 1 like every other sable command — the exit-code taxonomy is unchanged.
+
+def _plan_enabled_or_exit(cfg) -> Optional[int]:
+    from .core.plans import plans_config
+
+    if not plans_config(cfg).get("enabled", False):
+        print("error: plans are disabled — set plans.enabled: true in your "
+              "config (see config.example.yaml)", file=sys.stderr)
+        return 1
+    return None
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    """`sable plan ...` dispatcher (add/list/show/next/depends/validate/
+    set-status/remove/export/import/expand/loop/loop-status)."""
+    _setup_logging(args.verbose, args.config)
+    cfg = load_config(args.config)
+    rc = _plan_enabled_or_exit(cfg)
+    if rc is not None:
+        return rc
+
+    from .core import plans as P
+    from .core.plans import PlanError
+
+    project = getattr(args, "project", None) or None
+    cmd = args.plan_command
+
+    def _load():
+        return P.load_plan(project)
+
+    try:
+        if cmd == "add":
+            store = _load()
+            fields = {"title": args.title, "description": args.description,
+                      "details": args.details,
+                      "test_strategy": args.test_strategy,
+                      "priority": args.priority}
+            deps = [d.strip() for d in str(args.deps or "").split(",")
+                    if d.strip()]
+            if deps:
+                fields["deps"] = deps
+            if str(args.parent or "").strip():
+                fields["parent"] = args.parent.strip()
+            t = P.add_task(store, fields)
+            report = P.validate(store)
+            if not report["ok"]:
+                print("error: plan invalid after add "
+                      f"({report}); task NOT saved", file=sys.stderr)
+                return 1
+            P.save_plan(store)
+            print(f"added {t['id']}: {t['title']} [{t['priority']}]")
+            return 0
+
+        if cmd == "list":
+            store = _load()
+            if not store["tasks"]:
+                print("(plan is empty)")
+                return 0
+            marks = {"pending": "[ ]", "in_progress": "[~]", "blocked": "[!]",
+                     "done": "[x]", "cancelled": "[-]"}
+            for t in store["tasks"]:
+                dep = f" (deps: {', '.join(t['deps'])})" if t["deps"] else ""
+                par = f" (parent: {t['parent']})" if t["parent"] else ""
+                print(f"{marks.get(t['status'], '[?]')} {t['id']} "
+                      f"[{t['priority']}] {t['title']}{dep}{par}")
+            c = P.counts(store)
+            print(f"-- {c['done']}/{c['total']} done, "
+                  f"{len(P.ready(store))} ready")
+            return 0
+
+        if cmd == "show":
+            store = _load()
+            t = P.get_task(store, args.task_id)
+            if t is None:
+                print(f"error: no task {args.task_id!r}", file=sys.stderr)
+                return 1
+            print(json.dumps(t, indent=2, ensure_ascii=False))
+            return 0
+
+        if cmd == "next":
+            store = _load()
+            t = P.next_task(store)
+            if t is None:
+                print("(no unblocked tasks)")
+                return 0
+            bl = P.blockers(store, t["id"])
+            line = f"{t['id']} [{t['priority']}] {t['title']}"
+            if bl:
+                line += " (blocked by " + ", ".join(b["id"] for b in bl) + ")"
+            print(line)
+            return 0
+
+        if cmd == "depends":
+            store = _load()
+            if args.remove:
+                t = P.remove_dependency(store, args.task_id, args.dep_id)
+                P.save_plan(store)
+                print(f"{t['id']} no longer depends on {args.dep_id}")
+            else:
+                t = P.add_dependency(store, args.task_id, args.dep_id)
+                P.save_plan(store)
+                print(f"{t['id']} now depends on {args.dep_id}")
+            return 0
+
+        if cmd == "validate":
+            store = _load()
+            report = P.validate(store)
+            print(json.dumps(report, indent=2, ensure_ascii=False))
+            return 0 if report["ok"] else 1
+
+        if cmd == "set-status":
+            store = _load()
+            t = P.set_status(store, args.task_id, args.status,
+                             note=str(args.note or "") or None)
+            P.save_plan(store)
+            print(f"{t['id']} -> {t['status']}")
+            return 0
+
+        if cmd == "remove":
+            store = _load()
+            removed, rewired = P.remove_task(store, args.task_id)
+            P.save_plan(store)
+            print(f"removed {args.task_id}")
+            for r in rewired:
+                print(f"  rewired deps of {r}")
+            return 0
+
+        if cmd == "export":
+            store = _load()
+            print(json.dumps(store, indent=2, ensure_ascii=False))
+            return 0
+
+        if cmd == "import":
+            return _cmd_plan_import(cfg, args, project)
+
+        if cmd == "expand":
+            from .core.plan_llm import PlanImportError, plan_expand
+            from .curate.judge import make_chat_client
+
+            try:
+                base_url, model, sup = _resolve_endpoint(
+                    cfg, spawn_if_needed=True)
+            except ServeError as e:
+                print(f"error: no endpoint for expansion ({e})",
+                      file=sys.stderr)
+                return 1
+            try:
+                client = make_chat_client(base_url,
+                                          api_key=cfg.attach_api_key or None,
+                                          max_tokens=1200)
+                rep = plan_expand(project, args.task_id, num=args.num,
+                                  prompt=args.prompt or None,
+                                  client_fn=client, model=model)
+            except (PlanImportError, PlanError) as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+            finally:
+                if sup is not None:
+                    sup.stop()
+            for w in rep["warnings"]:
+                print(f"warning: {w}", file=sys.stderr)
+            if not rep["ok"]:
+                print("error: no subtasks could be parsed", file=sys.stderr)
+                return 1
+            for t in rep["added"]:
+                print(f"subtask {t['id']}: {t['title']}")
+            return 0
+
+        if cmd == "loop":
+            from .core.plan_loop import LoopConflictError, start_plan_loop
+
+            print("plan loop: running tasks unattended under each task's "
+                  "profile grants (Ctrl-C to cancel)")
+            try:
+                loop = start_plan_loop(cfg, project,
+                                       max_tasks=args.max_tasks,
+                                       resume=bool(args.resume))
+            except LoopConflictError as e:
+                print(f"error: {e}", file=sys.stderr)
+                return 1
+            try:
+                while True:
+                    prog = loop.wait(timeout=1.0)
+                    cur = prog.get("current_task")
+                    entries = prog.get("tasks") or []
+                    if entries:
+                        last = entries[-1]
+                        print(f"  iter {last['iteration']} {last['id']}: "
+                              f"{last['outcome']}"
+                              + (f" ({last['reason']})" if last["reason"]
+                                 else ""))
+                    elif cur:
+                        print(f"  iter {prog.get('iteration')} {cur}: running")
+                    if loop.finished:
+                        break
+            except KeyboardInterrupt:
+                loop.cancel()
+                print("cancelling… (current task finishes or is left "
+                      "in_progress in the progress file)")
+                loop.wait()
+            prog = loop.progress
+            done = sum(1 for e in prog.get("tasks") or []
+                       if e["outcome"] == "done")
+            print(f"loop {prog.get('status')}: {done} task(s) done — "
+                  f"{prog.get('stop_reason')}")
+            return 0
+
+        if cmd == "loop-status":
+            from .core.plan_loop import read_loop_progress
+            from .store.paths import resolve_sable_home
+
+            prog = read_loop_progress(project, resolve_sable_home(cfg))
+            if prog is None:
+                print("(no loop progress file for this project)")
+                return 0
+            print(json.dumps(prog, indent=2, ensure_ascii=False))
+            return 0
+
+        print(f"error: unknown plan command {cmd!r}", file=sys.stderr)
+        return 1
+    except (PlanError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+
+def _cmd_plan_import(cfg, args, project) -> int:
+    """`sable plan import FILE` — text/JSON brief; '-' reads stdin; binaries
+    rejected with a clear error (core/plan_llm.clean_text_input)."""
+    from pathlib import Path as _P
+
+    path = args.file
+    try:
+        if path == "-":
+            raw = sys.stdin.buffer.read()
+        else:
+            p = _P(path)
+            if not p.exists():
+                print(f"error: no such file {path}", file=sys.stderr)
+                return 1
+            raw = p.read_bytes()
+    except OSError as e:
+        print(f"error: cannot read {path}: {e}", file=sys.stderr)
+        return 1
+
+    client = model = None
+    if args.use_ai:
+        from .curate.judge import make_chat_client
+
+        try:
+            base_url, model, sup = _resolve_endpoint(cfg, spawn_if_needed=True)
+        except ServeError as e:
+            print(f"error: no endpoint for --use-ai ({e})", file=sys.stderr)
+            return 1
+        try:
+            client = make_chat_client(base_url,
+                                      api_key=cfg.attach_api_key or None,
+                                      max_tokens=1200)
+            return _do_plan_import(cfg, args, project, raw, client, model)
+        finally:
+            if sup is not None:
+                sup.stop()
+    return _do_plan_import(cfg, args, project, raw, None, None)
+
+
+def _do_plan_import(cfg, args, project, raw, client, model) -> int:
+    from .core.plan_llm import PlanImportError, plan_import
+    from .core.plans import PlanError
+
+    # A .json brief is passed through as text either way: the deterministic
+    # parser rejects JSON arrays (no title lines), so sniff and hand JSON to
+    # the salvage path directly when --use-ai is off.
+    try:
+        rep = plan_import(project, raw, use_ai=bool(args.use_ai),
+                          num_tasks=args.num_tasks,
+                          client_fn=client, model=model)
+    except PlanImportError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    except PlanError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    for w in rep["warnings"]:
+        print(f"warning: {w}", file=sys.stderr)
+    if not rep["ok"]:
+        print("error: no tasks imported (see warnings)", file=sys.stderr)
+        return 1
+    for t in rep["added"]:
+        print(f"imported {t['id']}: {t['title']} [{t['priority']}]")
+    print(f"-- {len(rep['added'])} task(s) added ({rep['source']} mode)")
     return 0
 
 
@@ -2464,6 +2933,10 @@ def _curation_config(cfg: SableConfig, args: argparse.Namespace):
         cc.agent_profile = args.profile
     if getattr(args, "model_alias", None):
         cc.model_alias = args.model_alias
+    # WP12: --project filters by the existing trace project stamp (the
+    # Curater passes CurationConfig.project straight to query_for_curation).
+    if getattr(args, "project", None):
+        cc.project = args.project
     if getattr(args, "include_failures", False):
         cc.include_failures = True
     if getattr(args, "limit", None) is not None:

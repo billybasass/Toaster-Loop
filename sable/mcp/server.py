@@ -141,10 +141,43 @@ class McpServer:
             raise _RpcError(_INVALID_REQUEST,
                             "server not initialized — call initialize first")
         if method == "tools/list":
-            return {"tools": [self._tool_spec(t) for t in self.tools]}
+            return {"tools": [self._tool_spec(t)
+                              for t in self.tools
+                              if self._tool_visible(t)]}
         if method == "tools/call":
             return self._call_tool(msg.get("params"))
         raise _RpcError(_METHOD_NOT_FOUND, f"unknown method: {method}")
+
+    # -------------------------------------------------------- family gating
+
+    def _plans_enabled(self) -> bool:
+        """Config gate for the WP12 plan tool family. Cheap + never raises:
+        reads the live app config when one exists; loads config from the
+        server's own path otherwise. Any read failure => disabled (the gate
+        fails CLOSED, matching "absent from tools/list AND refused if called
+        anyway")."""
+        try:
+            from ..core.plans import plans_config
+
+            cfg = None
+            if self._app is not None:
+                cfg = getattr(self._app, "cfg", None)
+            elif self._ctx is not None:
+                cfg = getattr(self._ctx.app, "cfg", None)
+            if cfg is None:
+                from ..core.config import load_config
+
+                cfg = load_config(self.config_path)
+            return bool(plans_config(cfg).get("enabled", False))
+        except Exception:  # noqa: BLE001 - gate fails closed
+            return False
+
+    def _tool_visible(self, t: Tool) -> bool:
+        """WP12: family="plans" tools exist ONLY while plans.enabled (spec:
+        absent from tools/list AND refused if called anyway)."""
+        if t.family == "plans":
+            return self._plans_enabled()
+        return True
 
     # ----------------------------------------------------------- handlers
 
@@ -179,6 +212,15 @@ class McpServer:
         args = params.get("arguments")
         if args is None:
             args = {}
+
+        # WP12 family gate: a plans tool called while plans.enabled is off is
+        # as good as nonexistent (it never appeared in tools/list). Refuse as
+        # unknown — same shape as any other unknown tool, no plan machinery
+        # runs and no pending-plan state is touched.
+        if not self._tool_visible(tool):
+            raise _RpcError(_METHOD_NOT_FOUND,
+                            f"unknown tool {name!r} (plans are disabled; "
+                            "enable config plans.enabled)")
 
         # ---- strict schema validation (before any plan or execution) ----
         err = validate_args(tool.input_schema, args)

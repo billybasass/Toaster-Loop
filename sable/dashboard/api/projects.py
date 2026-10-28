@@ -1,4 +1,13 @@
-"""Project records (<home>/projects/*.json) CRUD."""
+"""Project records (<home>/projects/*.json) CRUD.
+
+Record fields: id, name, workspace_dir, agents (profile names),
+description (free text shown to every agent working on the project),
+agent_roles ({profile name: that agent's job on this project}),
+created, updated. description/agent_roles reach the model through
+``agent_runner.create_runner(project_context=...)``; the delete endpoint
+removes the project + its per-project index DB and NEVER touches the
+workspace directory.
+"""
 
 # Domain slice of the former monolithic dashboard/app.py: a pure move,
 # no behavior change. Handlers resolve through DashboardApp attribute
@@ -89,8 +98,34 @@ class ProjectsRoutes(ApiContext):
         if not isinstance(agents, list) or any(
                 not isinstance(a, str) for a in agents):
             raise HttpError(400, "agents must be a list of profile names")
+        # Project description: free text injected into every agent run on
+        # this project (see agent_runner._with_project_context).
+        description = b.get("description",
+                            (existing or {}).get("description"))
+        if description is None:
+            description = ""
+        if not isinstance(description, str):
+            raise HttpError(400, "description must be a string")
+        # agent_roles: {profile name: that agent's job on this project}.
+        # Keys outside the final agent list are dropped (roles belong to
+        # attached agents; removing an agent prunes its role), as are
+        # blank roles. An omitted key keeps the existing map (PUT fallback).
+        roles_raw = b.get("agent_roles",
+                          (existing or {}).get("agent_roles") or {})
+        if not isinstance(roles_raw, dict) or any(
+                not isinstance(k, str) or not isinstance(v, str)
+                for k, v in roles_raw.items()):
+            raise HttpError(400, "agent_roles must be an object mapping "
+                                 "profile names to role descriptions")
+        agents = sorted(set(agents))
+        agent_roles = {}
+        for k, v in roles_raw.items():
+            k, v = k.strip(), v.strip()
+            if k and v and k in agents:
+                agent_roles[k] = v
         return {"name": name.strip(), "workspace_dir": str(ws),
-                "agents": sorted(set(agents))}
+                "agents": agents, "description": description.strip(),
+                "agent_roles": agent_roles}
 
     def h_projects_list(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         d = self.home / PROJECTS_DIRNAME
@@ -111,6 +146,11 @@ class ProjectsRoutes(ApiContext):
         now = _utcnow()
         project = {"id": project_id, "created": now, "updated": now, **fields}
         self._save_project(project)
+        # A new project enrolls in codebase indexing immediately: with
+        # indexing.enabled, its workspace_dir becomes the root of its OWN
+        # sqlite DB (<home>/index/<project_id>.db) and a background build
+        # starts — other projects' indexes are untouched.
+        self._kick_project_index(project_id)
         return ApiResponse(201, {"ok": True, "project": project})
 
     def h_project_put(self, q: Dict[str, str], b: Dict[str, Any],
@@ -122,7 +162,27 @@ class ProjectsRoutes(ApiContext):
         project = {**existing, **fields, "id": project_id,
                    "updated": _utcnow()}
         self._save_project(project)
+        # Re-enroll: builds are incremental, and get_index() rebuilds the
+        # cached instance in place when workspace_dir changed, so an edit
+        # keeps the project's own DB pointed at the right directory.
+        self._kick_project_index(project_id)
         return {"ok": True, "project": project}
+
+    def _kick_project_index(self, project_id: str) -> None:
+        """Start this project's index build when indexing is enabled.
+
+        Best-effort by design: the project record is already saved, and an
+        index hiccup (no embedding model, bus failure, ...) must never fail
+        or roll back a create/update. The build runs in the same background
+        thread + index.build SSE stream the manual "build index now"
+        button uses, scoped to this project's DB only."""
+        ix = getattr(self.cfg, "indexing", None) or {}
+        if not ix.get("enabled"):
+            return
+        try:
+            self.h_index_build({}, {"project": project_id})
+        except Exception:
+            pass  # indexing is best-effort; the project exists regardless
 
     def h_project_delete(self, q: Dict[str, str], b: Dict[str, Any],
                          project_id: str) -> Dict[str, Any]:

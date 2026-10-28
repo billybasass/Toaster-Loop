@@ -79,6 +79,7 @@ from .api.iterate import IterateRoutes
 from .api.jobs import DEFAULT_JOB_LOG_TAIL, JobsRoutes  # noqa: F401
 from .api.models import ModelsRoutes
 from .api.overview import OverviewRoutes
+from .api.plans import PlansRoutes
 from .api.playbooks import PlaybooksRoutes
 from .api.profiles import ProfilesRoutes
 from .api.projects import PROJECTS_DIRNAME, ProjectsRoutes  # noqa: F401
@@ -93,7 +94,7 @@ from .hardware import HardwareSampler
 logger = logging.getLogger("sable.dashboard")
 
 
-class DashboardApp(OverviewRoutes, ServeRoutes, RemoteRoutes, ServersRoutes, HardwareOpsRoutes, ConfigRoutes, ControlRoutes, ChatRoutes, TracesRoutes, PlaybooksRoutes, DatasetsRoutes, ModelsRoutes, HubRoutes, JobsRoutes, EasyRoutes, IterateRoutes, EvolveRoutes, ProfilesRoutes, ProjectsRoutes, FsBrowseRoutes):
+class DashboardApp(OverviewRoutes, ServeRoutes, RemoteRoutes, ServersRoutes, HardwareOpsRoutes, ConfigRoutes, ControlRoutes, ChatRoutes, TracesRoutes, PlaybooksRoutes, DatasetsRoutes, ModelsRoutes, HubRoutes, JobsRoutes, EasyRoutes, IterateRoutes, EvolveRoutes, ProfilesRoutes, ProjectsRoutes, FsBrowseRoutes, PlansRoutes):
     """JSON API over the sable home. One instance per server process.
 
     Domains are mixins under ``dashboard/api/``; this class owns routing and
@@ -344,6 +345,11 @@ dependency wiring only. Route handlers resolve by name via getattr.
         ("POST", "/api/projects", "h_projects_create"),
         ("PUT", "/api/projects/<project_id>", "h_project_put"),
         ("DELETE", "/api/projects/<project_id>", "h_project_delete"),
+        # WP12 plans: per-project task graphs (summary+tasks+validate report;
+        # POST op-routed: add/update/set-status/depends/validate/import/
+        # expand/start/loop-start/loop-cancel). 404 when plans.enabled is off.
+        ("GET", "/api/plans/<project_id>", "h_plan_get"),
+        ("POST", "/api/plans/<project_id>", "h_plan_post"),
         # workspace file explorer (read-only lazy tree + file preview)
         ("GET", "/api/fs/tree", "h_fs_tree"),
         ("GET", "/api/fs/read", "h_fs_read"),

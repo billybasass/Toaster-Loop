@@ -57,7 +57,10 @@ logger = logging.getLogger("sable.store")
 # cumulative counter instead of a gauge over jobs._gate_reason (which the
 # scheduler clears on unblock). New table again: idempotent CREATE TABLE IF
 # NOT EXISTS is the whole migration.
-SCHEMA_VERSION = 9
+# v10 (WP12 plans): traces.plan_task (nullable) — plan task id the run was
+# started from ("Start task" / plan loop / delegate_task plan_task=); NULL for
+# every other run and every pre-WP12 row (tolerant read, no data migration).
+SCHEMA_VERSION = 10
 
 STATUS_VALUES = ("success", "failure", "partial", "unknown")
 
@@ -99,7 +102,9 @@ CREATE TABLE IF NOT EXISTS traces (
     project         TEXT,
     -- v4 (pass 4 #40): confidence aggregates; NULL without logprob data
     conf_mean               REAL,
-    conf_p90_negentropy     REAL
+    conf_p90_negentropy     REAL,
+    -- v10 (WP12 plans): plan task id the run was started from; NULL = none
+    plan_task       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_traces_timestamp ON traces(timestamp);
@@ -255,6 +260,9 @@ class TraceRow:
     # logprob data (knob off / unsupported backend). Absent in old DBs.
     conf_mean: Optional[float] = None
     conf_p90_negentropy: Optional[float] = None
+    # v10 (WP12 plans): plan task id the run was started from, or None.
+    # Absent in old DBs (tolerant read via _row_to_trace defaults).
+    plan_task: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -320,6 +328,12 @@ class TraceStore:
             if "conf_p90_negentropy" not in cols:
                 self._conn.execute(
                     "ALTER TABLE traces ADD COLUMN conf_p90_negentropy REAL")
+            if "plan_task" not in cols:
+                # v9 -> v10 (WP12 plans): nullable column, same tolerant
+                # pattern — old rows read as NULL (no plan linkage), no data
+                # migration needed.
+                self._conn.execute(
+                    "ALTER TABLE traces ADD COLUMN plan_task TEXT")
             # HIGH #4 (cancelled-run score neutrality): pre-fix recorders
             # stamped cancelled runs with the -0.5 non-completion penalty,
             # dragging down should_auto_train's mean and every score aggregate.
@@ -363,18 +377,20 @@ class TraceStore:
                        model_version, endpoint_label, task_summary, status,
                        outcome_score, num_tool_calls, tokens_in, tokens_out,
                        duration_s, jsonl_path, schema_version, curated, dataset_id,
-                       failure_reason, project, conf_mean, conf_p90_negentropy
-                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       failure_reason, project, conf_mean, conf_p90_negentropy,
+                       plan_task
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(trace_id) DO NOTHING""",
-                (
-                    row.trace_id, row.session_id, row.timestamp, row.agent_profile,
-                    row.model_alias, row.model_version, row.endpoint_label,
-                    row.task_summary, row.status, row.outcome_score,
-                    row.num_tool_calls, row.tokens_in, row.tokens_out,
-                    row.duration_s, row.jsonl_path, row.schema_version,
-                    int(row.curated), row.dataset_id, row.failure_reason,
-                    row.project, row.conf_mean, row.conf_p90_negentropy,
-                ),
+                 (
+                     row.trace_id, row.session_id, row.timestamp, row.agent_profile,
+                     row.model_alias, row.model_version, row.endpoint_label,
+                     row.task_summary, row.status, row.outcome_score,
+                     row.num_tool_calls, row.tokens_in, row.tokens_out,
+                     row.duration_s, row.jsonl_path, row.schema_version,
+                     int(row.curated), row.dataset_id, row.failure_reason,
+                     row.project, row.conf_mean, row.conf_p90_negentropy,
+                     row.plan_task,
+                 ),
             )
             self._conn.commit()
             inserted = (cur.rowcount or 0) > 0
@@ -1110,4 +1126,5 @@ def _row_to_trace(r: sqlite3.Row) -> TraceRow:
     d.setdefault("project", None)
     d.setdefault("conf_mean", None)
     d.setdefault("conf_p90_negentropy", None)
+    d.setdefault("plan_task", None)
     return TraceRow(**d)

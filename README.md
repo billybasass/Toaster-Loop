@@ -115,7 +115,15 @@ header; when the pill is grey, reconnecting EventSource retries automatically.
     trace into the buffer (built-in runner) and carries a per-run
     **profile selector**; Playground
     mode hits the served model raw and records nothing. 👍/👎 feedback per
-    assistant message.
+    assistant message. Threads live in a **project tree**: a project carries a
+    name, a `workspace_dir` (the agents' containment root for its runs), a
+    free-text **description** and one **job line per attached agent** — every
+    agent run on that project (chat, delegated children, `sable run --project`)
+    gets a `## Project` section with the description and the full roster, each
+    agent's own line marked "that's you". Project nodes expose **edit** (✎) and
+    **delete** (✕); deleting removes the record + its codebase index and moves
+    its threads to Unfiled, and NEVER touches the workspace directory or the
+    files the agents wrote.
 - **Serving**
   - **Serve** — start/stop the sable-owned llama-server (model picker from
     local GGUFs), attach to an external OpenAI endpoint, live state via
@@ -322,7 +330,8 @@ Commands that grew on top of the closed loop:
   hash diff) and `datasets lint [id]` (re-run the ingestion quality gate);
   `train start --depends-on <job_id>` (repeatable job dependencies) and
   `train resume <job_id>` (re-queue from the newest checkpoint);
-  `run --project <id>` (project workspace containment + index routing).
+  `run --project <id>` (project workspace containment + index routing, plus the
+  project description + agent roster as a `## Project` prompt section).
 
 ```
         ┌─────────────────────────── the loop (Phase 4) ───────────────────────────┐
@@ -813,7 +822,8 @@ Root = `SABLE_HOME` env > config `home:` > `~/.sable`:
   index/
     <project_id>.db             # per-project codebase index (Phase 5);
     default.db                  # fallback DB for no-project/config-driven use
-  projects/<id>.json            # project records (workspace_dir, agents)
+  projects/<id>.json            # project records (workspace_dir, agents,
+                                # description, agent_roles {profile: their job})
   chat/                         # dashboard chat threads (one JSON per thread)
   uploads/                      # chat image attachments (janitor-pruned)
   batches/<run-name>.json       # batch-run checkpoints (stats only)
@@ -1039,8 +1049,11 @@ dim/model differs from the built index reports "index needs rebuild" instead
 of returning garbage), `search_mode` (`hybrid|semantic|lexical`) and the
 advanced `paths_override` (manual roots for the default/no-project DB only —
 each project indexes its own `workspace_dir`). One sqlite DB per project lives
-at `<SABLE_HOME>/index/<project_id>.db` (+ `default.db`); deleting a project
-deletes its index DB. Legacy keys (`embedding_url`, `embedding_model`,
+at `<SABLE_HOME>/index/<project_id>.db` (+ `default.db`). Projects enroll
+themselves: creating or editing a project from the Chat page (or the API)
+starts a build of **that project's own** DB when `enabled` — nothing is ever
+appended to `paths_override`, and one project's build/search never sees another
+project's files. Deleting a project deletes its index DB (and only that file). Legacy keys (`embedding_url`, `embedding_model`,
 `top_k`, `paths`) load without crashing: `embedding_model` maps to `model`,
 `paths` to `paths_override`, and the url/`top_k` are dropped (sable owns
 the server; top_k is an internal constant).

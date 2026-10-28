@@ -290,7 +290,9 @@ indexing:
   #                            # mismatch vs a built index reports "needs rebuild")
   search_mode: hybrid          # hybrid | semantic | lexical
   # paths_override: []         # advanced: manual roots for the default
-                               # (no-project) DB only; projects ignore this
+                               # (no-project) DB only; projects ignore this —
+                               # creating a project enrolls its workspace_dir
+                               # into its OWN <home>/index/<project_id>.db
 # Migration: legacy keys embedding_url / embedding_model / top_k / paths are
 # absorbed on load (embedding_model -> model, paths -> paths_override; url
 # and top_k dropped — sable now owns the server and top_k is internal).
@@ -557,6 +559,31 @@ skills:
   index_total_cap_chars: 1500  # hard cap on the "## Skills" index section;
                                # most-recently-updated first, entries that do
                                # not fit are OMITTED whole
+
+# Plans (WP12, core/plans.py) — persistent per-project task graphs with
+# dependencies: visible to agents (plan_next/plan_view/plan_progress/plan_add),
+# editable from the Chat page, importable from a pasted brief (deterministic
+# text or the served model), expandable into subtasks, and runnable
+# unattended by a guarded loop (core/plan_loop.py). State lives at
+# <SABLE_HOME>/plans/<project_id>.json (one graph per project; "default.json"
+# when no project). CLI: `sable plan add|list|show|next|depends|validate|
+# set-status|export|import|expand|loop|loop-status`. Design adapted from the
+# open-source Taskmaster project — inspiration only, re-implemented inline.
+plans:
+  enabled: false           # master switch — OFF means ZERO behavior change: no
+                           # plan tools registered, no prompt injection, no MCP
+                           # plan tools listed, <home>/plans/ never touched
+  inject_summary: true     # with enabled: append the bounded "## Project plan"
+                           # section (done/total + next ready tasks) to run
+                           # system prompts; off keeps tools but never injects
+  max_inject_chars: 800    # hard cap on that section (lines omitted whole,
+                           # never sliced mid-id)
+  loop:                    # guarded autonomous loop (`sable plan loop`)
+    require_verification: true   # a run ending on the verification-stop nudge
+                                 # marks its task blocked (never auto-done)
+    max_tasks: 10          # tasks per loop invocation (CLI --max-tasks caps)
+    per_task_timeout_seconds: 900  # hard cap on one task run
+    max_consecutive_failures: 1    # stop the loop after N non-done in a row
 
 # Easy training — turnkey loop for one or more agent profiles (dashboard "Easy"
 # panel). Pick agent profiles that are already bound to managed server

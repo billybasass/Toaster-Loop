@@ -14,6 +14,7 @@ export default {
     const loopCard = el("div", { class: "card" });
     const insightsCard = el("div", { class: "card" });
     const ledgerCard = el("div", { class: "card" }); // pass4 #31 lineage
+    const plansCard = el("div", { class: "card" });  // WP12 per-project plans
     const unsubs = [];
 
     function card(title, value, href = null) {
@@ -165,6 +166,43 @@ export default {
           : []));
     }
 
+    // WP12 plans: small per-project card (tasks done/total + loop state).
+    // Hidden entirely when config plans.enabled is off (API answers 404
+    // plans_disabled) — same "off means invisible" contract everywhere else.
+    async function loadPlans() {
+      let projs = [];
+      try { projs = (await api("/api/projects")).projects || []; }
+      catch { /* fresh home */ }
+      const keys = [...projs.map((p) => [p.id, p.name]),
+                    ["default", "Unfiled"]];
+      const rows = [];
+      let disabled = false;
+      for (const [id, name] of keys) {
+        let d;
+        try {
+          d = await api("/api/plans/" + encodeURIComponent(id));
+        } catch (e) {
+          if (e.code === "plans_disabled") disabled = true;
+          continue;
+        }
+        const c = d.counts || {};
+        if (!c.total) continue;
+        const looping = d.loop && d.loop.running;
+        rows.push(el("div", { class: "hint" },
+          el("a", { href: "#/chat", class: "mono", text: name }),
+          ` ${c.done}/${c.total} done` +
+          (c.blocked ? ` · ${c.blocked} blocked` : "") +
+          (looping ? " · ↻ loop running" : "")));
+      }
+      if (disabled) { plansCard.classList.add("hidden"); return; }
+      plansCard.classList.remove("hidden");
+      plansCard.replaceChildren(
+        el("h3", { text: "Project plans" }),
+        ...(rows.length ? rows : [el("p", { class: "hint" },
+          "no plan tasks yet — open a project's ▤ drawer on the Chat page " +
+          "to add tasks or import a brief.")]));
+    }
+
     // Operation ledger (pass4 #31): last ~10 hash-chained registry mutations.
     function renderLedger(ops) {
       const rows = ops.map((o) => el("div", { class: "hint" },
@@ -179,13 +217,16 @@ export default {
     }
 
     mount.replaceChildren(el("h2", { text: "Overview" }), cards, loopCard,
-      insightsCard, ledgerCard);
+      plansCard, insightsCard, ledgerCard);
 
     load().catch((e) => toast(e.message, "error"));
     loadInsights();
+    loadPlans();
     const timer = setInterval(() => load().catch(() => {}), 8000);
     unsubs.push(bus.on("job.state", () => load().catch(() => {})));
     unsubs.push(bus.on("serve.state", () => load().catch(() => {})));
+    unsubs.push(bus.on("plan.updated", () => loadPlans()));
+    unsubs.push(bus.on("plan.loop", () => loadPlans()));
 
     return { destroy() { clearInterval(timer); for (const u of unsubs) u(); } };
   },

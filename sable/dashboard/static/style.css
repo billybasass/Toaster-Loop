@@ -271,9 +271,20 @@ pre.log.json { max-height: 260px; overflow: auto; }
 .thread-meta { color: var(--dim); font-size: 11px; }
 .thread-x { opacity: 0; border: none; background: none; color: var(--dim); }
 .thread-item:hover .thread-x, .thread-item:focus .thread-x { opacity: 1; }
-/* new-project dialog form */
+/* project nodes reveal their edit/delete buttons the same way */
+.project-node:hover .proj-x, .project-node:focus .proj-x,
+.proj-x:focus { opacity: 1; }
+/* new/edit-project dialog form */
 .modal .field label { display: block; margin-top: 8px; }
-.modal .field input, .modal .field select { width: 100%; box-sizing: border-box; }
+.modal .field input, .modal .field select,
+.modal .field textarea { width: 100%; box-sizing: border-box; }
+.modal .field textarea { resize: vertical; }
+/* per-agent roster rows: checkbox + name + "job on this project" input */
+.proj-agents { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.proj-agent-row { display: flex !important; gap: 6px; align-items: center; margin-top: 2px !important; }
+.proj-agent-row input[type="checkbox"] { width: auto; flex: 0 0 auto; }
+.proj-agent-name { flex: 0 0 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proj-agent-row input[type="text"] { flex: 1 1 auto; width: auto; }
 
 /* workspace file explorer drawer (right side of the chat page) */
 .explorer {
@@ -602,3 +613,21 @@ input[type="search"], input[type="date"] {
   overflow: hidden; margin: 4px 0 2px; }
 .hub-progress-fill { height: 100%; background: var(--accent);
   transition: width .4s ease; }
+
+/* WP12 plan drawer (Chat page): task rows, status dots, chip colors. */
+.plan-drawer { padding: 4px 8px 8px; margin-left: 10px;
+  border-left: 2px solid var(--line); }
+.plan-task { display: flex; gap: 6px; align-items: baseline; padding: 2px 0;
+  border-bottom: 1px solid var(--line); }
+.plan-dot { font-size: 11px; }
+.plan-dot-pending { color: var(--muted-fg); }
+.plan-dot-in_progress { color: var(--warn); }
+.plan-dot-blocked { color: var(--err); }
+.plan-dot-done { color: var(--ok); }
+.plan-dot-cancelled { color: var(--muted-fg); }
+.plan-title { flex: 1; overflow-wrap: anywhere; }
+.plan-title.closed { opacity: .55; text-decoration: line-through; }
+.plan-prio { color: var(--warn); font-size: 11px; }
+.plan-blockers { color: var(--err); font-size: 11px; }
+.plan-invalid { color: var(--err); font-size: 11px; }
+.plan-chip-complete { color: var(--ok); }

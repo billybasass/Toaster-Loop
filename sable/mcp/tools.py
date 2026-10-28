@@ -65,6 +65,12 @@ class Tool:
     risks: List[str] = field(default_factory=list)
     #: arg name whose value names the plan target (for the PLAN envelope).
     target_arg: Optional[str] = None
+    #: Optional capability family. "plans" tools exist ONLY when config
+    #: plans.enabled is true — the server filters them out of tools/list and
+    #: refuses calls when the knob is off (documented choice over a cfg-aware
+    #: build_tools(): the server owns config/app lifecycle, so it can check
+    #: cheaply at list time; tests monkeypatch app.cfg directly).
+    family: str = ""
 
 
 @dataclass
@@ -280,6 +286,126 @@ def _exec_bench(ctx: ToolContext, args: Dict[str, Any]) -> Any:
     }
 
 
+# ------------------------------------------------------------ plan tools
+# WP12: the MCP mirror of the dashboard /api/plans handlers — every executor
+# calls the SAME op-routed endpoints via _api() (no new authority, no paths:
+# project ids + task ids only, pattern-validated). Reads execute immediately;
+# everything that writes, spawns agents, or burns the GPU is mutating with the
+# full plan-then-confirm flow. When config plans.enabled is off these tools
+# are absent from tools/list AND refuse if called anyway (server-side family
+# gate).
+
+#: Project ids are file names under <home>/plans/ — same pattern as the
+#: projects API; "default" addresses the no-project plan.
+_PROJECT_ID_SCHEMA = {
+    "type": "string",
+    "pattern": "^[A-Za-z0-9._-]{1,64}$",
+    "description": ("Project id (see projects_list); 'default' is the "
+                    "no-project plan."),
+}
+
+_TASK_ID_SCHEMA = {
+    "type": "string",
+    "pattern": "^t[0-9]{1,6}$",
+    "description": "Plan task id like t3 (see plans_list).",
+}
+
+#: deps: real string list via the WP12 array validator (scalar items only,
+#: pattern-checked, hard-capped at 64).
+_DEPS_ARG = {
+    "type": "array",
+    "items": {"type": "string", "pattern": "^t[0-9]{1,6}$"},
+    "maxItems": 32,
+    "description": "Task ids this task depends on (must exist in the plan).",
+}
+
+
+def _plans_api(ctx: ToolContext, project_id: str, method: str = "POST",
+               body: Optional[Dict[str, Any]] = None) -> Any:
+    return _api(ctx, method, f"/api/plans/{project_id}", body)
+
+
+def _exec_plans_list(ctx: ToolContext, args: Dict[str, Any]) -> Any:
+    return _plans_api(ctx, str(args["project"]), "GET")
+
+
+def _exec_plan_loop_status(ctx: ToolContext, args: Dict[str, Any]) -> Any:
+    data = _plans_api(ctx, str(args["project"]), "GET")
+    return {"project": str(args["project"]),
+            "loop": (data or {}).get("loop")}
+
+
+def _exec_projects_list(ctx: ToolContext, args: Dict[str, Any]) -> Any:
+    # Mirrors GET /api/projects so clients can DISCOVER project ids to use
+    # with the plan tools (ids only ever leave as ids).
+    return _api(ctx, "GET", "/api/projects")
+
+
+def _exec_plan_add(ctx: ToolContext, args: Dict[str, Any]) -> Any:
+    body = {"op": "add"}
+    for k in ("title", "description", "details", "test_strategy",
+              "priority", "deps", "parent"):
+        if args.get(k) is not None:
+            body[k] = args[k]
+    return _plans_api(ctx, str(args["project"]), body=body)
+
+
+def _exec_plan_update(ctx: ToolContext, args: Dict[str, Any]) -> Any:
+    body = {"op": "update", "task_id": args["task_id"]}
+    for k in ("title", "description", "details", "test_strategy",
+              "priority"):
+        if args.get(k) is not None:
+            body[k] = args[k]
+    return _plans_api(ctx, str(args["project"]), body=body)
+
+
+def _exec_plan_set_status(ctx: ToolContext, args: Dict[str, Any]) -> Any:
+    body = {"op": "set-status", "task_id": args["task_id"],
+            "status": args["status"]}
+    if args.get("note") is not None:
+        body["note"] = args["note"]
+    return _plans_api(ctx, str(args["project"]), body=body)
+
+
+def _exec_plan_depends(ctx: ToolContext, args: Dict[str, Any]) -> Any:
+    body = {"op": "depends", "task_id": args["task_id"],
+            "dep_id": args["dep_id"]}
+    if args.get("remove"):
+        body["remove"] = True
+    return _plans_api(ctx, str(args["project"]), body=body)
+
+
+def _exec_plan_import(ctx: ToolContext, args: Dict[str, Any]) -> Any:
+    body = {"op": "import", "text": args["text"],
+            "use_ai": bool(args.get("use_ai"))}
+    if args.get("num_tasks") is not None:
+        body["num_tasks"] = int(args["num_tasks"])
+    return _plans_api(ctx, str(args["project"]), body=body)
+
+
+def _exec_plan_expand(ctx: ToolContext, args: Dict[str, Any]) -> Any:
+    body = {"op": "expand", "task_id": args["task_id"]}
+    if args.get("num") is not None:
+        body["num"] = int(args["num"])
+    if args.get("prompt") is not None:
+        body["prompt"] = args["prompt"]
+    return _plans_api(ctx, str(args["project"]), body=body)
+
+
+def _exec_plan_loop_start(ctx: ToolContext, args: Dict[str, Any]) -> Any:
+    body: Dict[str, Any] = {"op": "loop-start"}
+    if args.get("max_tasks") is not None:
+        body["max_tasks"] = int(args["max_tasks"])
+    if args.get("resume"):
+        body["resume"] = True
+    return _plans_api(ctx, str(args["project"]), body=body)
+
+
+def _exec_plan_loop_cancel(ctx: ToolContext, args: Dict[str, Any]) -> Any:
+    return _plans_api(ctx, str(args["project"]),
+                      body={"op": "loop-cancel"})
+
+
 def _require_loopback_url(url: str) -> None:
     """Refuse any attach target whose host is not loopback."""
     from urllib.parse import urlparse
@@ -451,6 +577,12 @@ def build_tools() -> List[Tool]:
                 "since": {"type": "string",
                           "description": "ISO8601 lower bound."},
                 "profile": {"type": "string"},
+                # WP12: project id filter (mirrors `sable curate --project`);
+                # the dashboard handler already honors body["project"].
+                "project": {"type": "string",
+                            "description": ("Only curate traces stamped with "
+                                            "this project id (see "
+                                            "projects_list).")},
                 "model_alias": {"type": "string"},
                 "include_failures": {"type": "boolean"},
                 "limit": {"type": "integer", "minimum": 1},
@@ -547,5 +679,212 @@ def build_tools() -> List[Tool]:
             effect="Runs N temperature-0 measurement passes and persists a "
                    "bench record under <home>/bench/.",
             risks=["May spawn llama-server (GPU) if none is running"],
+        ),
+        # ------------------------------------------------------- plan tools
+        # WP12 mirror of /api/plans (family="plans": listed ONLY while
+        # config plans.enabled — the server filters + refuses otherwise).
+        Tool(
+            name="projects_list",
+            description=("Every project id/name/workspace (mirrors GET "
+                         "/api/projects) — discover ids for the plan tools."),
+            input_schema=_obj({}),
+            mutating=False,
+            executor=_exec_projects_list,
+            family="plans",
+        ),
+        Tool(
+            name="plans_list",
+            description=("One project's task graph: summary counts, every "
+                         "task (status/priority/deps/labels), the cycle/"
+                         "dangling validate report, and loop state (mirrors "
+                         "GET /api/plans/<project>)."),
+            input_schema=_obj({"project": _PROJECT_ID_SCHEMA},
+                              required=["project"]),
+            mutating=False,
+            executor=_exec_plans_list,
+            family="plans",
+        ),
+        Tool(
+            name="plan_loop_status",
+            description=("Autonomous-loop state for a project: running flag "
+                         "+ the iteration/task progress record (mirrors GET "
+                         "/api/plans/<project> loop field)."),
+            input_schema=_obj({"project": _PROJECT_ID_SCHEMA},
+                              required=["project"]),
+            mutating=False,
+            executor=_exec_plan_loop_status,
+            family="plans",
+        ),
+        Tool(
+            name="plan_add",
+            description=("Add a task to a project's persistent plan (mirrors "
+                         "POST /api/plans/<project> op=add). "
+                         "Plan-then-confirm."),
+            input_schema=_obj({**{
+                "project": _PROJECT_ID_SCHEMA,
+                "title": {"type": "string", "description": "Task title."},
+                "description": {"type": "string"},
+                "details": {"type": "string"},
+                "test_strategy": {"type": "string"},
+                "priority": {"type": "string",
+                             "enum": ["high", "medium", "low"]},
+                "deps": _DEPS_ARG,
+                "parent": _TASK_ID_SCHEMA,
+            }, **_CONFIRM_ARG}, required=["project", "title"]),
+            mutating=True,
+            executor=_exec_plan_add,
+            effect="Appends one task to the project's persistent plan graph.",
+            risks=["Agents and loops may later execute this task under "
+                   "their profile grants"],
+            target_arg="project",
+            family="plans",
+        ),
+        Tool(
+            name="plan_update",
+            description=("Edit a task's title/description/details/"
+                         "test_strategy/priority (mirrors op=update). "
+                         "Plan-then-confirm."),
+            input_schema=_obj({**{
+                "project": _PROJECT_ID_SCHEMA,
+                "task_id": _TASK_ID_SCHEMA,
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "details": {"type": "string"},
+                "test_strategy": {"type": "string"},
+                "priority": {"type": "string",
+                             "enum": ["high", "medium", "low"]},
+            }, **_CONFIRM_ARG}, required=["project", "task_id"]),
+            mutating=True,
+            executor=_exec_plan_update,
+            effect="Overwrites editable fields of one plan task.",
+            risks=["Changes what future runs/loops are told to do"],
+            target_arg="project",
+            family="plans",
+        ),
+        Tool(
+            name="plan_set_status",
+            description=("Set a task's status (pending|in_progress|blocked|"
+                         "done|cancelled; done cascades to subtasks) — "
+                         "mirrors op=set-status. Plan-then-confirm."),
+            input_schema=_obj({**{
+                "project": _PROJECT_ID_SCHEMA,
+                "task_id": _TASK_ID_SCHEMA,
+                "status": {"type": "string",
+                           "enum": ["pending", "in_progress", "blocked",
+                                    "done", "cancelled"]},
+                "note": {"type": "string",
+                         "description": "Timestamped line appended to the "
+                                        "task details."},
+            }, **_CONFIRM_ARG}, required=["project", "task_id", "status"]),
+            mutating=True,
+            executor=_exec_plan_set_status,
+            effect="Flips one task's status (done cascades to its subtasks) "
+                   "and unblocks/blocks dependents.",
+            risks=["Marking done releases dependent tasks for execution"],
+            target_arg="project",
+            family="plans",
+        ),
+        Tool(
+            name="plan_depends",
+            description=("Add (or with remove=true drop) a dependency edge "
+                         "task->dep; cycles and self-deps are refused — "
+                         "mirrors op=depends. Plan-then-confirm."),
+            input_schema=_obj({**{
+                "project": _PROJECT_ID_SCHEMA,
+                "task_id": _TASK_ID_SCHEMA,
+                "dep_id": _TASK_ID_SCHEMA,
+                "remove": {"type": "boolean"},
+            }, **_CONFIRM_ARG},
+                required=["project", "task_id", "dep_id"]),
+            mutating=True,
+            executor=_exec_plan_depends,
+            effect="Wires (or removes) one dependency edge in the graph.",
+            risks=["Reorders what agents/loops may run next"],
+            target_arg="project",
+            family="plans",
+        ),
+        Tool(
+            name="plan_import",
+            description=("Import a brief into the plan: deterministic line "
+                         "format by default, use_ai=true asks the served "
+                         "model for a structured task list (mirrors "
+                         "op=import). Plan-then-confirm."),
+            input_schema=_obj({**{
+                "project": _PROJECT_ID_SCHEMA,
+                "text": {"type": "string",
+                         "description": "Pasted brief (plain text lines or "
+                                        "a JSON task array)."},
+                "use_ai": {"type": "boolean",
+                           "description": "Structure the brief with the "
+                                          "served model (one bounded call)."},
+                "num_tasks": {"type": "integer", "minimum": 1,
+                              "maximum": 32},
+            }, **_CONFIRM_ARG}, required=["project", "text"]),
+            mutating=True,
+            executor=_exec_plan_import,
+            effect="Appends N parsed/generated tasks to the project plan.",
+            risks=["use_ai=true occupies the model/GPU for one bounded call"],
+            target_arg="project",
+            family="plans",
+        ),
+        Tool(
+            name="plan_expand",
+            description=("Decompose one task into subtasks with the served "
+                         "model (parent set; parent status untouched; "
+                         "mirrors op=expand). Plan-then-confirm."),
+            input_schema=_obj({**{
+                "project": _PROJECT_ID_SCHEMA,
+                "task_id": _TASK_ID_SCHEMA,
+                "num": {"type": "integer", "minimum": 1, "maximum": 12},
+                "prompt": {"type": "string",
+                           "description": "Extra guidance for the model."},
+            }, **_CONFIRM_ARG}, required=["project", "task_id"]),
+            mutating=True,
+            executor=_exec_plan_expand,
+            effect="Appends generated subtasks (parent=task) to the plan.",
+            risks=["Occupies the model/GPU for one bounded call"],
+            target_arg="project",
+            family="plans",
+        ),
+        Tool(
+            name="plan_loop_start",
+            description=("Start the guarded autonomous loop over a project's "
+                         "plan (mirrors op=loop-start). Single-flight: a "
+                         "second start returns a conflict error. Tasks close "
+                         "only when the agent explicitly marks them done. "
+                         "Plan-then-confirm."),
+            input_schema=_obj({**{
+                "project": _PROJECT_ID_SCHEMA,
+                "max_tasks": {"type": "integer", "minimum": 1,
+                              "maximum": 50,
+                              "description": "Overrides plans.loop.max_tasks "
+                                             "for this run."},
+                "resume": {"type": "boolean",
+                           "description": "Continue from the progress file."},
+            }, **_CONFIRM_ARG}, required=["project"]),
+            mutating=True,
+            executor=_exec_plan_loop_start,
+            effect="Autonomously runs agents that write files in the "
+                   "project workspace under that profile's grants, one "
+                   "unblocked task at a time.",
+            risks=["Agents execute with the profile's tool subset (no "
+                   "permission bypass); GPU busy until done/blocked/cancel"],
+            target_arg="project",
+            family="plans",
+        ),
+        Tool(
+            name="plan_loop_cancel",
+            description=("Cancel a project's running autonomous loop at the "
+                         "current task boundary (mirrors op=loop-cancel). "
+                         "Plan-then-confirm."),
+            input_schema=_obj({**{"project": _PROJECT_ID_SCHEMA},
+                               **_CONFIRM_ARG}, required=["project"]),
+            mutating=True,
+            executor=_exec_plan_loop_cancel,
+            effect="Requests cancellation of the running plan loop.",
+            risks=["The in-flight task run finishes or stays in_progress "
+                   "(no forced kill)"],
+            target_arg="project",
+            family="plans",
         ),
     ]

@@ -990,6 +990,168 @@ def todo_read(*, _todos_path: Optional[str] = None, **_: Any) -> str:
     return "\n".join(out)
 
 
+# ------------------------------------------------------------ plan tools
+# WP12: persistent per-project task graphs (core/plans.py). Registered into
+# TOOL_SCHEMAS/TOOL_IMPLS like every other tool, but EXPOSED only when config
+# plans.enabled — core/agent_runner strips PLAN_TOOL_NAMES otherwise (same
+# both-ways discipline as skills/capabilities), so default prompts stay
+# byte-identical. The private `_plan_ctx` kwarg ({project, cfg} dict) is bound
+# per-run by the runner via functools.partial; the schema gate rejects a
+# model-supplied _plan_ctx exactly like _todos_path.
+
+PLAN_TOOL_NAMES = frozenset(
+    {"plan_next", "plan_view", "plan_progress", "plan_add"})
+
+#: Mirror of plans.TASK_STATUSES for the schema (kept literal so tools.py
+#: stays import-light; core/plans.py is the authority and tests pin equality).
+TASK_STATUSES_PUBLIC = ("pending", "in_progress", "blocked", "done",
+                        "cancelled")
+
+
+def _plan_store(_plan_ctx: Optional[Dict[str, Any]]):
+    """(plans module, store) for this run's project. None when unbound."""
+    from . import plans as _plans
+
+    ctx = _plan_ctx or {}
+    return _plans, _plans.load_plan(ctx.get("project"))
+
+
+def plan_next(*, _plan_ctx: Optional[Dict[str, Any]] = None,
+              **_: Any) -> str:
+    """Show the next unblocked task in the project plan (id, title, deps)."""
+    try:
+        plans, store = _plan_store(_plan_ctx)
+        t = plans.next_task(store)
+    except Exception as e:  # noqa: BLE001 - tool never crashes the loop
+        return f"error: plan unavailable: {e}"
+    if t is None:
+        return "(no unblocked tasks — everything is done, blocked, or the plan is empty; use plan_view all)"
+    bl = plans.blockers(store, t["id"])
+    lines = [f"{t['id']} [{t['priority']}] {t['title']} (status={t['status']})"]
+    if bl:
+        lines.append("blocked by: " + ", ".join(b["id"] for b in bl))
+    if t["description"]:
+        lines.append(t["description"][:500])
+    return "\n".join(lines)
+
+
+def plan_view(view: str = "ready", *,
+              _plan_ctx: Optional[Dict[str, Any]] = None, **_: Any) -> str:
+    """View the project plan: view="ready" (unblocked), "all", or a task id."""
+    from .plans import PlanError
+
+    try:
+        plans, store = _plan_store(_plan_ctx)
+        sel = str(view or "ready").strip()
+        if sel == "all":
+            if not store["tasks"]:
+                return "(plan is empty)"
+            marks = {"pending": "[ ]", "in_progress": "[~]", "blocked": "[!]",
+                     "done": "[x]", "cancelled": "[-]"}
+            lines = []
+            for t in store["tasks"]:
+                dep = f" (deps: {', '.join(t['deps'])})" if t["deps"] else ""
+                par = f" (parent: {t['parent']})" if t.get("parent") else ""
+                lines.append(f"{marks.get(t['status'], '[?]')} {t['id']} "
+                             f"[{t['priority']}] {t['title']}{dep}{par}")
+            return "\n".join(lines)
+        if sel == "ready":
+            r = plans.ready(store)
+            if not r:
+                return "(no ready tasks)"
+            return "\n".join(f"{t['id']} [{t['priority']}] {t['title']}"
+                             for t in r)
+        t = plans.get_task(store, sel)
+        if t is None:
+            return f"error: no such task {sel!r}"
+        parts = [f"{t['id']} [{t['status']}] [{t['priority']}] {t['title']}"]
+        for label in ("description", "details", "test_strategy"):
+            if t[label]:
+                parts.append(f"{label}: {t[label][:1200]}")
+        if t["deps"]:
+            by_id = {x["id"]: x for x in store["tasks"]}
+            parts.append("deps: " + ", ".join(
+                f"{d}({by_id[d]['status']})" if d in by_id else f"{d}(missing)"
+                for d in t["deps"]))
+        return "\n".join(parts)
+    except PlanError as e:
+        return f"error: {e}"
+    except Exception as e:  # noqa: BLE001 - never crash the loop over a store
+        return f"error: plan unavailable: {e}"
+
+
+def plan_progress(task_id: str = "", status: str = "", note: str = "",
+                  *, _plan_ctx: Optional[Dict[str, Any]] = None,
+                  **_: Any) -> str:
+    """Update YOUR project-plan task's status (pending|in_progress|blocked|
+    done|cancelled). Mark a task in_progress when you start it and done ONLY
+    when it is actually complete; `note` appends a timestamped line to the
+    task details. This is how runs close tasks — the autonomous loop only
+    considers a task finished when you flip it to done here."""
+    from . import plans as _plans
+
+    if not str(task_id).strip():
+        return "error: task_id required (see plan_next / plan_view ready)"
+    try:
+        ctx = _plan_ctx or {}
+        store = _plans.load_plan(ctx.get("project"))
+        task = _plans.set_status(store, str(task_id).strip(),
+                                 str(status or "").strip().lower(),
+                                 note=str(note or "") or None)
+        # Record this run's linkage (thread id when the runner bound one). The
+        # trace id is unknown mid-run, so touched task ids also ride in the
+        # shared ctx list and the runner's _finish fills them under task.runs
+        # once the trace exists ("records the run under task.runs at finalize").
+        _plans.record_run(store, task["id"],
+                          thread=str(ctx.get("thread") or "") or None)
+        touched = ctx.get("_touched")
+        if isinstance(touched, list) and task["id"] not in touched:
+            touched.append(task["id"])
+        _plans.save_plan(store)
+    except _plans.PlanError as e:
+        return f"error: {e}"
+    except Exception as e:  # noqa: BLE001
+        return f"error: plan update failed: {e}"
+    return (f"task {task['id']} -> {task['status']}\n"
+            + plan_next(_plan_ctx=_plan_ctx))
+
+
+def plan_add(title: str = "", description: str = "", details: str = "",
+             deps: Optional[List[str]] = None, priority: str = "medium",
+             parent: str = "", test_strategy: str = "",
+             *, _plan_ctx: Optional[Dict[str, Any]] = None, **_: Any) -> str:
+    """Capture a follow-up task in the persistent project plan (survives this
+    run). deps lists existing task ids this new task requires."""
+    from . import plans as _plans
+
+    if not str(title).strip():
+        return "error: title required"
+    try:
+        ctx = _plan_ctx or {}
+        store = _plans.load_plan(ctx.get("project"))
+        fields: Dict[str, Any] = {"title": title, "description": description,
+                                  "details": details,
+                                  "test_strategy": test_strategy,
+                                  "priority": priority}
+        if deps:
+            if not isinstance(deps, list):
+                return "error: deps must be a list of task ids"
+            fields["deps"] = [str(d) for d in deps]
+        if str(parent or "").strip():
+            fields["parent"] = str(parent).strip()
+        t = _plans.add_task(store, fields)
+        # Validate the new edges before committing (cycles refused up front).
+        report = _plans.validate(store)
+        if not report["ok"]:
+            return f"error: plan invalid after add ({report}); task NOT saved"
+        _plans.save_plan(store)
+    except _plans.PlanError as e:
+        return f"error: {e}"
+    except Exception as e:  # noqa: BLE001
+        return f"error: plan add failed: {e}"
+    return f"added task {t['id']}: {t['title']} [{t['priority']}]"
+
+
 # ---------------------------------------------------------- search_traces
 
 def search_traces(pattern: str = "", status: str = "", limit: int = 10,
@@ -1407,12 +1569,19 @@ def list_agents(**kwargs: Any) -> str:
 
 
 def delegate_task(agent: str = "", task: str = "", context: str = "",
-                  timeout_seconds: Optional[float] = None, **kwargs: Any) -> str:
-    """Delegate a subtask to another agent profile on the same project."""
+                  timeout_seconds: Optional[float] = None,
+                  plan_task: str = "", **kwargs: Any) -> str:
+    """Delegate a subtask to another agent profile on the same project.
+
+    ``plan_task`` (WP12, optional): id of a task in the active project's
+    persistent plan — the child prompt is then built from that task
+    (title/description/details/test-strategy + completed-dependency context)
+    instead of only the free-text ``task``. Existing callers are unchanged."""
     from .delegation import execute_delegation
 
     return execute_delegation(agent=agent, task=task, context=context,
                               timeout_seconds=timeout_seconds,
+                              plan_task=str(plan_task or "") or None,
                               _ctx=kwargs.get("_ctx"))
 
 
@@ -1698,6 +1867,13 @@ TOOL_SCHEMAS: list[dict] = [
                 "type": "number",
                 "description": "Max seconds to wait for the child (default from "
                                "config delegation.timeout_seconds)"},
+            # WP12: optional plan-task binding (additive; existing callers
+            # unchanged). When set, the child prompt is built from that task.
+            "plan_task": {"type": "string",
+                          "description": "Optional id of a task in the active "
+                                         "project's plan (e.g. 't3'): the "
+                                         "child receives its full context "
+                                         "(details + completed dependencies)"},
         },
         ["agent", "task"],
     ),
@@ -1755,6 +1931,69 @@ TOOL_SCHEMAS: list[dict] = [
         },
         ["name"],
     ),
+    # WP12 plan tools (core/plans.py). Exposed only when config
+    # `plans.enabled` is on — core/agent_runner strips PLAN_TOOL_NAMES
+    # otherwise, keeping disabled-feature prompts byte-identical. The private
+    # _plan_ctx kwarg ({project} + thread) is bound per-run by the runner;
+    # the schema gate refuses it if a model tries to pass one.
+    _schema(
+        "plan_next",
+        "Show the next unblocked task of the persistent project plan (the "
+        "highest-priority task whose dependencies are all done/cancelled). "
+        "Use it to decide what to work on when the user hands you the plan.",
+        {},
+        [],
+    ),
+    _schema(
+        "plan_view",
+        "View the persistent project plan: view='ready' lists unblocked "
+        "tasks, 'all' shows every task with status marks, or pass a task id "
+        "for its full details (description, notes, deps and their statuses).",
+        {
+            "view": {"type": "string",
+                     "description": "'ready' (default), 'all', or a task id "
+                                    "like 't3'"},
+        },
+        [],
+    ),
+    _schema(
+        "plan_progress",
+        "Update one project-plan task's status: pending|in_progress|blocked|"
+        "done|cancelled. Set in_progress when you start a task and done ONLY "
+        "when it is genuinely complete (the autonomous loop closes tasks "
+        "exclusively through this tool). `note` appends a timestamped line to "
+        "the task details — record what you did or why you are blocked.",
+        {
+            "task_id": {"type": "string", "description": "Task id (e.g. t2)"},
+            "status": {"type": "string", "enum": list(TASK_STATUSES_PUBLIC),
+                       "description": "New status"},
+            "note": {"type": "string",
+                     "description": "Optional note appended to details"},
+        },
+        ["task_id", "status"],
+    ),
+    _schema(
+        "plan_add",
+        "Capture a follow-up task in the persistent project plan (it survives "
+        "this run): use it when you discover work that belongs in the graph. "
+        "deps lists existing task ids the new task requires.",
+        {
+            "title": {"type": "string", "description": "Short imperative title"},
+            "description": {"type": "string", "description": "What to do"},
+            "details": {"type": "string",
+                        "description": "Supporting detail / findings"},
+            "test_strategy": {"type": "string",
+                              "description": "How to verify completion"},
+            "deps": {"type": "array", "items": {"type": "string"},
+                     "description": "Existing task ids this requires"},
+            "priority": {"type": "string",
+                         "enum": ["high", "medium", "low"],
+                         "description": "Default medium"},
+            "parent": {"type": "string",
+                       "description": "Parent task id (subtask), optional"},
+        },
+        ["title"],
+    ),
 ]
 
 TOOL_IMPLS: dict[str, Callable[..., str]] = {
@@ -1777,6 +2016,12 @@ TOOL_IMPLS: dict[str, Callable[..., str]] = {
     "read_skill": read_skill,
     "list_skills": list_skills,
     "delete_skill": delete_skill,
+    # WP12 plan tools (core/plans.py). Exposed only when config
+    # `plans.enabled` — core/agent_runner strips PLAN_TOOL_NAMES otherwise.
+    "plan_next": plan_next,
+    "plan_view": plan_view,
+    "plan_progress": plan_progress,
+    "plan_add": plan_add,
     # Capability-gated (see CAPABILITY_TOOLS): present in TOOL_IMPLS so a
     # runner can bind them, but NEVER exposed unless the capability is on —
     # core/agent_runner filters both schemas and impls.

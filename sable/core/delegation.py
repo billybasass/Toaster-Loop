@@ -255,11 +255,16 @@ def _resolve_timeout(cfg: Any, timeout_seconds: Any) -> float:
 
 
 def _run_child(cfg: Any, prof: Dict[str, Any], task: str, ctx: Dict[str, Any],
-               delegation_id: str, out: Dict[str, Any]) -> None:
+               delegation_id: str, out: Dict[str, Any],
+               plan_task: Optional[str] = None) -> None:
     """Execute the child run in-place (called on the worker thread). Reuses
     create_runner so guardrails/compaction/recording are identical to a
     normal run. Results land in `out` (the caller's result box) so a timed-out
-    parent never races with a still-running child's registry record."""
+    parent never races with a still-running child's registry record.
+
+    ``plan_task`` (WP12): task id whose prompt text was already resolved by
+    execute_delegation; it stamps the child trace (additive plan_task field)
+    so the traces panel links child runs to graph nodes."""
     from .agent_runner import create_runner
     from ..store.recorder import make_recorder
 
@@ -285,7 +290,8 @@ def _run_child(cfg: Any, prof: Dict[str, Any], task: str, ctx: Dict[str, Any],
         "parent_trace_id": ctx.get("trace_id"),
         "delegated_from": ctx.get("profile") or "default",
     }
-    recorder = make_recorder(cfg, project=project_id, metadata=metadata)
+    recorder = make_recorder(cfg, project=project_id, metadata=metadata,
+                             plan_task=plan_task)
     tools = prof.get("tools")
     runner = create_runner(
         cfg, base_url, model, api_key=api_key,
@@ -295,6 +301,10 @@ def _run_child(cfg: Any, prof: Dict[str, Any], task: str, ctx: Dict[str, Any],
         workspace_root_override=prof.get("workspace_root"),
         project_workspace_dir=(proj or {}).get("workspace_dir"),
         delegation_context=child_ctx,
+        # Projects: the child sees the same '## Project' section as its
+        # parent (description + full agent roster with roles), so a
+        # delegated agent knows the project and every teammate's job.
+        project_context=proj,
         # Per-agent capabilities: the CHILD profile governs its own reach-out
         # (merged over global agent.capabilities inside create_runner).
         capabilities=prof.get("capabilities"),
@@ -312,8 +322,15 @@ def _run_child(cfg: Any, prof: Dict[str, Any], task: str, ctx: Dict[str, Any],
 
 def execute_delegation(agent: str, task: str, context: str = "",
                        timeout_seconds: Any = None,
+                       plan_task: Optional[str] = None,
                        _ctx: Optional[Dict[str, Any]] = None) -> str:
-    """Core of the delegate_task tool. Returns a JSON payload string."""
+    """Core of the delegate_task tool. Returns a JSON payload string.
+
+    ``plan_task`` (WP12, optional): id of a task in the active project's
+    persistent plan; when set the child prompt is built from that task with
+    build_task_prompt (title/description/details/test-strategy + completed-
+    dependency context) and the child trace is stamped with plan_task. The
+    free-text ``task`` still rides along as extra instruction."""
     ctx = dict(_ctx or {})
     cfg = ctx.get("cfg")
     if cfg is None:
@@ -382,11 +399,26 @@ def execute_delegation(agent: str, task: str, context: str = "",
     thread_record_delegation(cfg, record.get("thread"), record)
 
     full_task = task if not context else f"{task}\n\nContext:\n{context}"
+    # WP12: a plan-task id upgrades the child prompt to the full task graph
+    # context (bounded); the free-text instruction stays appended. A bad/
+    # unknown id degrades to the plain prompt with a note — delegation must
+    # never fail just because the graph moved under us.
+    if plan_task:
+        try:
+            from .plans import build_task_prompt, load_plan
+
+            pstore = load_plan(ctx.get("project"))
+            full_task = (build_task_prompt(pstore, str(plan_task))
+                         + f"\n\nExtra instruction:\n{full_task}")
+        except Exception as e:  # noqa: BLE001 - degrade, never break delegation
+            full_task = (f"{full_task}\n\n(Note: plan task {plan_task!r} "
+                         f"could not be expanded: {e})")
     box: Dict[str, Any] = {}
 
     def _worker() -> None:
         try:
-            _run_child(cfg, prof, full_task, ctx, record["delegation_id"], box)
+            _run_child(cfg, prof, full_task, ctx, record["delegation_id"],
+                       box, plan_task=str(plan_task or "") or None)
         except Exception as e:  # child blew up; surfaced below as failed
             box["exception"] = f"{type(e).__name__}: {e}"
 

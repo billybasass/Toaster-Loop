@@ -191,32 +191,113 @@ export default {
       renderThreadList();
     }
 
-    // ------------------------------------------------- new-project dialog
-    async function newProjectDialog() {
-      const nameIn = el("input", { type: "text", placeholder: "project name" });
+    // ---------------------------------------------------- project dialogs
+    // Shared create/edit form. Besides name + workspace dir it captures:
+    //   * Description — what the project is about; injected into every
+    //     agent run on the project (backend: project_context).
+    //   * Agents — checkbox per profile, each with a "job on this project"
+    //     role line. Every agent on the project sees the full roster with
+    //     roles, so each one knows its own job and its teammates'.
+    async function projectForm(p) {
+      const nameIn = el("input", { type: "text", placeholder: "project name",
+        value: p ? p.name || "" : "" });
       const dirIn = el("input", { type: "text",
-        placeholder: "/absolute/path/to/workspace" });
-      const agentsSel = el("select", { multiple: "multiple", size: "5",
-        title: "ctrl/cmd-click to select several agent profiles" });
-      try {
-        const d = await api("/api/profiles");
-        for (const p of d.profiles || [])
-          agentsSel.appendChild(el("option", { value: p.name, text: p.name }));
-      } catch { /* no profiles yet — empty multi-select is fine */ }
+        placeholder: "/absolute/path/to/workspace",
+        value: p ? p.workspace_dir || "" : "" });
+      const descIn = el("textarea", { rows: "3",
+        placeholder: "what this project is about — shown to every agent "
+          + "working on it" });
+      descIn.value = (p && p.description) || "";
+      const knownRoles = (p && p.agent_roles) || {};
+      const chosen = new Set((p && p.agents) || []);
+      let profList = [];
+      try { profList = (await api("/api/profiles")).profiles || []; }
+      catch { /* no profiles yet — roster below shows the hint instead */ }
+      // An attached agent whose profile was since deleted must stay visible
+      // (checked) so the user can edit or drop it deliberately.
+      for (const a of chosen)
+        if (!profList.some((x) => x.name === a)) profList.push({ name: a });
+      const rows = [];
+      const list = el("div", { class: "proj-agents" });
+      for (const pr of profList) {
+        const cb = el("input", { type: "checkbox" });
+        cb.checked = chosen.has(pr.name);
+        const roleIn = el("input", { type: "text",
+          placeholder: "job on this project (optional)",
+          title: `what ${pr.name} is responsible for — every agent on the `
+            + "project sees the full roster with roles" });
+        roleIn.value = knownRoles[pr.name] || "";
+        roleIn.disabled = !cb.checked;
+        cb.addEventListener("change", () => { roleIn.disabled = !cb.checked; });
+        rows.push({ name: pr.name, cb, roleIn });
+        list.appendChild(el("label", { class: "proj-agent-row" },
+          cb, el("span", { class: "proj-agent-name mono", text: pr.name }),
+          roleIn));
+      }
+      if (!rows.length)
+        list.appendChild(el("div", { class: "thread-meta",
+          text: "no agent profiles yet — add some on the Profiles page" }));
       const form = el("div", { class: "field" },
         el("label", { text: "Name" }), nameIn,
         el("label", { text: "Workspace directory" }), dirIn,
-        el("label", { text: "Agent profiles" }), agentsSel);
-      const ok = await confirmDialog({ title: "New project", body: form,
-        confirmLabel: "Create" });
-      if (!ok) return;
-      const agents = [...agentsSel.selectedOptions].map((o) => o.value);
+        el("label", { text: "Description" }), descIn,
+        el("label", { text: "Agents on this project" }), list);
+      return {
+        form,
+        read() {
+          const agents = [], agent_roles = {};
+          for (const r of rows) if (r.cb.checked) {
+            agents.push(r.name);
+            const role = r.roleIn.value.trim();
+            if (role) agent_roles[r.name] = role;
+          }
+          return { name: nameIn.value.trim(),
+            workspace_dir: dirIn.value.trim(),
+            description: descIn.value.trim(), agents, agent_roles };
+        },
+      };
+    }
+
+    async function newProjectDialog() {
+      const f = await projectForm(null);
+      if (!await confirmDialog({ title: "New project", body: f.form,
+        confirmLabel: "Create" })) return;
       try {
-        const d = await api("/api/projects", { method: "POST", body: {
-          name: nameIn.value.trim(), workspace_dir: dirIn.value.trim(),
-          agents } });
+        const d = await api("/api/projects", { method: "POST",
+          body: f.read() });
         setActiveProject(d.project.id);
         toast("project created", "ok");
+        await loadProjects();
+        renderThreadList();
+      } catch (e) { toast(e.message, "error"); }
+    }
+
+    async function editProjectDialog(p) {
+      const f = await projectForm(p);
+      if (!await confirmDialog({ title: "Edit project", body: f.form,
+        confirmLabel: "Save" })) return;
+      try {
+        await api("/api/projects/" + encodeURIComponent(p.id),
+          { method: "PUT", body: f.read() });
+        toast("project saved", "ok");
+        await loadProjects();
+        renderThreadList();
+      } catch (e) { toast(e.message, "error"); }
+    }
+
+    async function deleteProjectDialog(p) {
+      const ok = await confirmDialog({
+        title: "Delete project?",
+        body: `“${p.name}” is removed from sable (its threads move to `
+          + "Unfiled) together with its codebase index. Nothing under "
+          + `“${p.workspace_dir}” is deleted — the workspace and all files `
+          + "the agents worked on stay exactly where they are.",
+        confirmLabel: "Delete project", danger: true });
+      if (!ok) return;
+      try {
+        await api("/api/projects/" + encodeURIComponent(p.id),
+          { method: "DELETE" });
+        toast("project deleted — workspace files kept", "ok");
         await loadProjects();
         renderThreadList();
       } catch (e) { toast(e.message, "error"); }
@@ -274,10 +355,24 @@ export default {
         text: isCollapsed ? "▸" : "▾" });
       const head = el("div", { class: "project-node" + (isActive ? " active" : ""),
         tabindex: 0, role: "button",
-        title: "click: set active project · caret: expand/collapse" },
+        title: ["click: set active project · caret: expand/collapse",
+          p.description ? "— " + p.description : ""].filter(Boolean).join(" ") },
         caret,
         el("span", { class: "thread-title", text: p.name }),
-        el("span", { class: "thread-meta", text: `${itsThreads.length}` }));
+        el("span", { class: "thread-meta", text: `${itsThreads.length}` }),
+        planChip(p.id), planToggleBtn(p.id),
+        el("button", { class: "thread-x proj-x small", text: "✎",
+          title: "edit project (name, workspace, description, agents)",
+          onclick: (ev) => {
+            ev.stopPropagation();
+            editProjectDialog(p);
+          } }),
+        el("button", { class: "thread-x proj-x small", text: "✕",
+          title: "delete project (workspace files are kept)",
+          onclick: (ev) => {
+            ev.stopPropagation();
+            deleteProjectDialog(p);
+          } }));
       // caret toggles expansion; the node body selects the active project.
       caret.addEventListener("click", (ev) => {
         ev.stopPropagation();
@@ -293,6 +388,317 @@ export default {
       return [head, ...kids];
     }
 
+    // ------------------------------------------------- WP12 plan chips/drawer
+    // One persistent task graph per project (backend: /api/plans/<project>).
+    // Project nodes get a done/total chip; the ▤ button opens a drawer with
+    // task rows (start / in-progress / done / blocked / inline edit), an add
+    // form, an import box (paste brief -> preview parsed tasks -> confirm)
+    // and the guarded loop controls. When config plans.enabled is off the
+    // API answers 404 plans_disabled and ALL of this hides itself — the same
+    // "off means invisible" contract the agent tool family honors.
+    // Colors come from .plan-dot-* classes (style.css, design tokens only —
+    // the hygiene test forbids raw hex in JS).
+    const planState = new Map();   // store key ("default"|pid) -> GET payload
+    const planCtlCache = new Map(); // key -> persistent form controls (value
+                                    // survives SSE re-renders; nodes are moved)
+    let plansDisabled = false;
+    let openPlanKey = sget(skey("ui", "", "plan-open")) || null;
+
+    function planKey(pid) { return pid || "default"; }
+
+    async function loadPlan(key, silent = true) {
+      if (plansDisabled) return null;
+      try {
+        const d = await api("/api/plans/" + encodeURIComponent(key));
+        planState.set(key, d);
+        renderThreadList();
+        return d;
+      } catch (e) {
+        if (e.code === "plans_disabled") {
+          plansDisabled = true;
+          openPlanKey = null;
+          sdel(skey("ui", "", "plan-open"));
+          renderThreadList();
+        } else if (!silent) toast(e.message, "error");
+        return planState.get(key) || null;
+      }
+    }
+
+    async function loadAllPlans() {
+      await loadPlan("default");     // first: detects plans_disabled once
+      if (plansDisabled) return;
+      for (const p of projects) loadPlan(p.id);
+    }
+
+    function planChip(pid) {
+      const d = plansDisabled ? null : planState.get(planKey(pid));
+      if (!d || !(d.counts && d.counts.total)) return el("span");
+      const c = d.counts;
+      const looping = d.loop && d.loop.running;
+      return el("span", { class: "thread-meta " +
+        (c.done === c.total ? "plan-chip-complete" : ""),
+        title: `plan: ${c.done}/${c.total} done` +
+          (looping ? " · loop running" : ""),
+        text: `${c.done}/${c.total}` + (looping ? " ↻" : "") });
+    }
+
+    function planToggleBtn(pid) {
+      const key = planKey(pid);
+      const isOpen = openPlanKey === key;
+      return el("button", { class: "thread-x proj-x small", text: "▤",
+        title: isOpen ? "hide project plan" : "show project plan (WP12)",
+        onclick: async (ev) => {
+          ev.stopPropagation();
+          if (isOpen) {
+            openPlanKey = null;
+            sdel(skey("ui", "", "plan-open"));
+            renderThreadList();
+            return;
+          }
+          openPlanKey = key;
+          sset(skey("ui", "", "plan-open"), key);
+          await loadPlan(key, false);
+          renderThreadList();
+        } });
+    }
+
+    // Deterministic mirror of the server's brief line format for PREVIEW
+    // only ("title [deps=t1,t2] [priority=high]"); confirm re-sends the raw
+    // text so the server (or the model, with use-ai) stays authoritative.
+    function parsePlanBrief(text) {
+      const out = [];
+      for (const raw of String(text || "").split("\n")) {
+        let s = raw.trim();
+        if (!s || s.startsWith("#")) continue;
+        const deps = []; let prio = "medium";
+        s = s.replace(/\[(deps|dependencies|priority|prio)\s*=\s*([^\]]*)\]/gi,
+          (_m, k, v) => {
+            k = String(k).toLowerCase(); v = String(v).trim();
+            if (k.startsWith("dep"))
+              deps.push(...v.split(/[,\s]+/).filter(Boolean));
+            else if (["high", "medium", "low"].includes(v.toLowerCase()))
+              prio = v.toLowerCase();
+            return "";
+          }).trim().replace(/^[-*]\s*/, "");
+        if (s) out.push({ title: s, deps, priority: prio });
+      }
+      return out;
+    }
+
+    function planCtl(key) {
+      let c = planCtlCache.get(key);
+      if (c) return c;
+      const addTitle = el("input", { type: "text",
+        placeholder: "new task title" });
+      const addDesc = el("input", { type: "text",
+        placeholder: "description (optional)" });
+      const addPrio = el("select", {},
+        ...["medium", "high", "low"].map((v) =>
+          el("option", { value: v, text: v })));
+      const addDeps = el("input", { type: "text",
+        placeholder: "deps e.g. t1,t2" });
+      const btnAdd = el("button", { class: "small", text: "＋ add task",
+        onclick: async () => {
+          const title = addTitle.value.trim();
+          if (!title) { toast("title required", "error"); return; }
+          try {
+            const body = { op: "add", title,
+              description: addDesc.value.trim(), priority: addPrio.value };
+            const deps = addDeps.value.split(/[,\s]+/).filter(Boolean);
+            if (deps.length) body.deps = deps;
+            await api("/api/plans/" + encodeURIComponent(key),
+              { method: "POST", body });
+            addTitle.value = ""; addDesc.value = ""; addDeps.value = "";
+            toast("task added", "ok");
+            await loadPlan(key);
+          } catch (e) { toast(e.message, "error"); }
+        } });
+      const impText = el("textarea", { rows: 4, class: "mono",
+        placeholder: "paste a brief — one task per line:\n" +
+          "Set up auth [priority=high]\nAdd login form [deps=t1]" });
+      const impAi = el("input", { type: "checkbox" });
+      const impPrev = el("div", { class: "hint" });
+      const btnPreview = el("button", { class: "small", text: "preview",
+        onclick: () => {
+          const parsed = parsePlanBrief(impText.value);
+          impPrev.replaceChildren(...(parsed.length
+            ? parsed.map((t) => el("div", {},
+                `• ${t.title}` + (t.deps.length
+                  ? ` (deps: ${t.deps.join(", ")})` : "") +
+                (t.priority !== "medium" ? ` [${t.priority}]` : "")))
+            : [el("i", { text: "no task lines detected" })]));
+        } });
+      const btnImport = el("button", { class: "small primary",
+        text: "import → confirm",
+        onclick: async () => {
+          const text = impText.value.trim();
+          if (!text) { toast("paste a brief first", "error"); return; }
+          if (impAi.checked && !await confirmDialog({
+            title: "Import with AI?", body: el("p", {},
+              "The served model structures the brief (one bounded call, " +
+              "occupies the GPU briefly). Continue?"),
+            confirmLabel: "Import" })) return;
+          btnImport.disabled = true;
+          try {
+            const d = await api("/api/plans/" + encodeURIComponent(key),
+              { method: "POST", body: { op: "import", text,
+                use_ai: impAi.checked } });
+            for (const w of (d.warnings || [])) toast(w, "error");
+            toast(`imported ${d.added.length} task(s) (${d.source})`, "ok");
+            impText.value = ""; impPrev.replaceChildren();
+            await loadPlan(key);
+          } catch (e) { toast(e.message, "error"); }
+          finally { btnImport.disabled = false; }
+        } });
+      const loopMax = el("input", { type: "number", min: 1, max: 50, value: 5,
+        style: "width:4.5em", title: "max tasks this loop run" });
+      const btnLoop = el("button", { class: "small", text: "▶ run loop",
+        title: "guarded autonomous loop: agents close tasks only via " +
+          "plan_progress; stops on blocked/max-tasks/cancel" });
+      const btnCancel = el("button", { class: "small danger hidden",
+        text: "■ cancel loop" });
+      btnLoop.addEventListener("click", async () => {
+        if (!await confirmDialog({ title: "Start autonomous loop?", body:
+          el("p", {}, "Runs agents unattended in the project workspace " +
+            "under each task's profile grants, one unblocked task at a " +
+            "time. Tasks close only on explicit completion."),
+          confirmLabel: "Start loop" })) return;
+        try {
+          await api("/api/plans/" + encodeURIComponent(key),
+            { method: "POST", body: { op: "loop-start",
+              max_tasks: parseInt(loopMax.value, 10) || undefined } });
+          toast("loop started", "ok");
+          await loadPlan(key);
+        } catch (e) { toast(e.message, "error"); }
+      });
+      btnCancel.addEventListener("click", async () => {
+        try {
+          await api("/api/plans/" + encodeURIComponent(key),
+            { method: "POST", body: { op: "loop-cancel" } });
+          toast("loop cancellation requested", "ok");
+          await loadPlan(key);
+        } catch (e) { toast(e.message, "error"); }
+      });
+      c = { addTitle, addDesc, addPrio, addDeps, btnAdd, impText, impAi,
+        impPrev, btnPreview, btnImport, loopMax, btnLoop, btnCancel };
+      planCtlCache.set(key, c);
+      return c;
+    }
+
+    function planTaskRow(key, t, byId) {
+      const blockers = (t.deps || []).filter((d) => {
+        const dt = byId[d];
+        return dt && !["done", "cancelled"].includes(dt.status);
+      });
+      const setStatus = async (status) => {
+        try {
+          await api("/api/plans/" + encodeURIComponent(key),
+            { method: "POST", body: { op: "set-status", task_id: t.id,
+              status } });
+          await loadPlan(key);
+        } catch (e) { toast(e.message, "error"); }
+      };
+      const startTask = async () => {
+        try {
+          const d = await api("/api/plans/" + encodeURIComponent(key),
+            { method: "POST", body: { op: "start", task_id: t.id } });
+          toast(`task ${t.id} started in a new thread`, "ok");
+          await loadThreads();
+          openThread(d.thread);
+        } catch (e) { toast(e.message, "error"); }
+      };
+      const editTask = async () => {
+        const titleIn = el("input", { type: "text", value: t.title });
+        const descIn = el("textarea", { rows: 3 }); descIn.value = t.description || "";
+        const detIn = el("textarea", { rows: 4 }); detIn.value = t.details || "";
+        const testIn = el("textarea", { rows: 2 }); testIn.value = t.test_strategy || "";
+        const form = el("div", {},
+          el("label", { text: "Title" }), titleIn,
+          el("label", { text: "Description" }), descIn,
+          el("label", { text: "Details / notes" }), detIn,
+          el("label", { text: "Test strategy" }), testIn);
+        if (!await confirmDialog({ title: `Edit ${t.id}`, body: form,
+          confirmLabel: "Save" })) return;
+        try {
+          await api("/api/plans/" + encodeURIComponent(key),
+            { method: "POST", body: { op: "update", task_id: t.id,
+              title: titleIn.value.trim(), description: descIn.value,
+              details: detIn.value, test_strategy: testIn.value } });
+          await loadPlan(key);
+        } catch (e) { toast(e.message, "error"); }
+      };
+      const done = ["done", "cancelled"].includes(t.status);
+      return el("div", { class: "plan-task" },
+        el("span", { class: "plan-dot plan-dot-" + t.status,
+          title: t.status, text: "●" }),
+        el("span", { class: "mono hint", text: t.id }),
+        el("span", { class: "plan-title" + (done ? " closed" : ""),
+          text: t.title + (t.parent ? ` ↳${t.parent}` : "") }),
+        t.priority !== "medium"
+          ? el("span", { class: "plan-prio", text: t.priority })
+          : el("span"),
+        blockers.length
+          ? el("span", { class: "plan-blockers",
+            title: "waiting on unfinished dependencies",
+            text: `blocked by ${blockers.join(", ")}` }) : el("span"),
+        (t.labels || []).length
+          ? el("span", { class: "hint",
+            text: (t.labels || []).join(" ") }) : el("span"),
+        !done ? el("button", { class: "small", title: "start task " +
+          "(new thread seeded with the full task context)", text: "▶",
+          onclick: startTask }) : el("span"),
+        !done && t.status !== "in_progress"
+          ? el("button", { class: "small", title: "mark in progress",
+            text: "◐", onclick: () => setStatus("in_progress") })
+          : el("span"),
+        !done ? el("button", { class: "small", title: "mark done",
+          text: "✔", onclick: () => setStatus("done") }) : el("span"),
+        !done && t.status !== "blocked"
+          ? el("button", { class: "small", title: "mark blocked",
+            text: "⛔", onclick: () => setStatus("blocked") }) : el("span"),
+        el("button", { class: "small", title: "edit task", text: "✎",
+          onclick: editTask }));
+    }
+
+    function planDrawer(key) {
+      const d = planState.get(key);
+      if (!d) return null;
+      const c = planCtl(key);
+      const byId = {};
+      for (const t of d.tasks) byId[t.id] = t;
+      const rows = d.tasks.length
+        ? d.tasks.map((t) => planTaskRow(key, t, byId))
+        : [el("p", { class: "hint", text: "plan is empty — add a task or " +
+            "import a brief" })];
+      if (d.validate && !d.validate.ok)
+        rows.unshift(el("p", { class: "plan-invalid",
+          text: "⚠ graph invalid: " + JSON.stringify(d.validate) }));
+      const looping = d.loop && d.loop.running;
+      c.btnLoop.classList.toggle("hidden", !!looping);
+      c.btnCancel.classList.toggle("hidden", !looping);
+      const prog = (d.loop && d.loop.progress) || {};
+      const loopLine = looping
+        ? `loop running · iteration ${prog.iteration ?? "?"} · ` +
+          `${(prog.tasks || []).filter((e) => e.outcome === "done").length} done`
+        : prog.status
+          ? `last loop: ${prog.status}` +
+            (prog.stop_reason ? ` (${prog.stop_reason})` : "")
+          : "";
+      return el("div", { class: "plan-drawer" },
+        el("div", { class: "btnrow" }, c.btnLoop, c.btnCancel),
+        loopLine ? el("div", { class: "hint mono", text: loopLine }) : el("span"),
+        ...rows,
+        el("div", { class: "btnrow", style: "flex-wrap:wrap;gap:4px" },
+          c.addTitle, c.addDesc, c.addPrio, c.addDeps, c.btnAdd),
+        el("details", {}, el("summary", { class: "hint", text: "import brief" }),
+          c.impText,
+          el("label", { class: "hint" }, c.impAi, " use AI (served model) "),
+          el("div", { class: "btnrow" }, c.btnPreview, c.btnImport),
+          c.impPrev),
+        el("div", { class: "btnrow" }, c.loopMax,
+          el("span", { class: "hint", text: "max tasks per loop run" })));
+    }
+
     function renderThreadList() {
       const nodes = [
         el("button", { class: "new-project", text: "＋ New project",
@@ -302,9 +708,14 @@ export default {
       ];
       // Project nodes (sorted by name), each with its threads beneath.
       for (const p of [...projects].sort((a, b) =>
-          String(a.name).localeCompare(String(b.name))))
+          String(a.name).localeCompare(String(b.name)))) {
         nodes.push(...projectNode(p, threads.filter(
           (t) => t.project === p.id)));
+        if (openPlanKey === planKey(p.id)) {
+          const drawer = planDrawer(planKey(p.id));
+          if (drawer) nodes.push(drawer);
+        }
+      }
       // Unfiled: threads with null/absent project — including legacy chat
       // files written before projects existed — and threads pointing at a
       // deleted project id.
@@ -319,7 +730,8 @@ export default {
         el("span", { class: "proj-caret", text: collapsed.has("__unfiled")
           ? "▸" : "▾" }),
         el("span", { class: "thread-title", text: "Unfiled" }),
-        el("span", { class: "thread-meta", text: `${unfiled.length}` }));
+        el("span", { class: "thread-meta", text: `${unfiled.length}` }),
+        planChip(null), planToggleBtn(null));
       uHead.querySelector(".proj-caret").addEventListener("click", (ev) => {
         ev.stopPropagation();
         if (collapsed.has("__unfiled")) collapsed.delete("__unfiled");
@@ -333,6 +745,10 @@ export default {
       nodes.push(uHead);
       if (!collapsed.has("__unfiled"))
         nodes.push(...unfiled.map(threadRow));
+      if (openPlanKey === "default") {
+        const drawer = planDrawer("default");
+        if (drawer) nodes.push(drawer);
+      }
       threadList.replaceChildren(...nodes);
     }
 
@@ -1454,8 +1870,17 @@ export default {
     renderMsgs();
     applyExplorerWidth();
     syncExplorerAvailability();
-    loadProjects().then(() => { renderThreadList(); syncExplorerAvailability(); });
+    loadProjects().then(() => { renderThreadList(); syncExplorerAvailability(); loadAllPlans(); });
     loadProfiles();
+    // WP12: live plan updates from any surface (agent runs, CLI, the loop).
+    unsubs.push(bus.on("plan.updated", (p) => {
+      // Refresh just the changed project's drawer/chip (cheap single GET).
+      loadPlan((p && p.project) || "default");
+    }));
+    unsubs.push(bus.on("plan.loop", () => {
+      for (const key of planState.keys()) loadPlan(key);
+      renderThreadList();
+    }));
     // Reopen the thread that was open before navigating away (bug fix: the
     // panel used to start blank, hiding both the transcript and any run
     // still executing on the server — which read as "the agent stopped").

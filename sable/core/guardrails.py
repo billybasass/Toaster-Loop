@@ -32,10 +32,14 @@ from .failure_types import classify_tool_result
 # ---------------------------------------------------------------------------
 
 IDEMPOTENT_TOOL_NAMES = frozenset(
-    {"read_file", "list_dir", "search_files", "todo_read", "search_traces"}
+    {"read_file", "list_dir", "search_files", "todo_read", "search_traces",
+     # WP12 plan reads (pure store reads; safe for no-progress detection).
+     "plan_next", "plan_view"}
 )
 
-MUTATING_TOOL_NAMES = frozenset({"write_file", "patch", "todo_write"})
+MUTATING_TOOL_NAMES = frozenset({"write_file", "patch", "todo_write",
+                                 # WP12 plan writes (graph mutations).
+                                 "plan_progress", "plan_add"})
 
 
 def _sha256(value: str) -> str:

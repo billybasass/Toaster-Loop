@@ -94,7 +94,7 @@ _DICT_FIELDS = frozenset({
     "curation", "training", "validation", "dashboard", "agent", "tools",
     "janitor", "run_settings", "sampling", "indexing", "evolution",
     "playbooks", "skills", "logging", "rft", "goldens_mine", "easy_training",
-    "routing", "serve",
+    "routing", "serve", "plans",
 })
 _LIST_FIELDS = frozenset({"extra_llama_args", "profiles"})
 
@@ -212,6 +212,11 @@ _NESTED_SECTIONS = {
     "recording": {"enabled": "bool", "redact_secrets": "bool",
                   "retention_days": "int"},
     "delegation": {"enabled": "bool", "timeout_seconds": "float"},
+    # WP12 plans: sub-keys registered for the consolidated report; `loop` is
+    # a dict of loop knobs validated leniently by core/plans.plans_config and
+    # consumed by core/plan_loop.py.
+    "plans": {"enabled": "bool", "inject_summary": "bool",
+              "max_inject_chars": "int", "loop": "dict"},
 }
 
 
@@ -506,6 +511,22 @@ class SableConfig:
     #   index_total_cap_chars: int  — hard cap on the whole index section
     #     (default 1500; entries that do not fit are omitted whole)
     skills: dict[str, Any] = field(default_factory=dict)
+    # Raw `plans:` YAML section (WP12, core/plans.py). Keys (read leniently —
+    # invalid values fall back to the defaults below):
+    #   enabled: bool               — master switch for per-project task
+    #     graphs (default false; when off NO plan tools are registered, no
+    #     prompt section is injected, MCP lists no plan tools and nothing in
+    #     this module touches <home>/plans/ — byte-identical everything)
+    #   inject_summary: bool        — append the bounded "## Project plan"
+    #     section to run system prompts when enabled (default true; off keeps
+    #     the tools but never injects)
+    #   max_inject_chars: int       — hard cap on that section (default 800)
+    #   loop: dict                  — guarded autonomous loop knobs
+    #     (core/plan_loop.py): require_verification: bool (default true — a
+    #     run ending on the verification nudge blocks the task), max_tasks:
+    #     int (default 10), per_task_timeout_seconds: float (default 900),
+    #     max_consecutive_failures: int (default 1 — stop after one non-done)
+    plans: dict[str, Any] = field(default_factory=dict)
     # Raw `logging:` YAML section (consumed by cli._setup_logging). Keys:
     #   level: str              — root level for non-verbose runs
     #     (DEBUG|INFO|WARNING|ERROR; -v always wins)

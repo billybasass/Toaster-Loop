@@ -5956,6 +5956,222 @@ def test_project_validation_errors(app__test_projects, tmp_path):
     assert r.status == 400
 
 
+# ------------------------------------- project description + per-agent roles
+
+def test_project_description_and_agent_roles_roundtrip(app__test_projects,
+                                                       tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "atlas", "workspace_dir": str(ws),
+                         "agents": ["coder", "reviewer"],
+                         "description": "  map the terrain  ",
+                         "agent_roles": {"coder": " writes the python ",
+                                         "reviewer": "   ",
+                                         "ghost": "not an agent here"}})
+    assert r.status == 201, r.body
+    p = r.body["project"]
+    assert p["description"] == "map the terrain"
+    # values stripped; blank roles dropped; roles for agents that are not
+    # attached are pruned (roles belong to the roster)
+    assert p["agent_roles"] == {"coder": "writes the python"}
+
+    # PUT without the keys keeps the stored values; PUT with them replaces
+    r = app__test_projects.handle("PUT", f"/api/projects/{p['id']}",
+                   body={"name": "atlas2"})
+    assert r.status == 200
+    assert r.body["project"]["description"] == "map the terrain"
+    assert r.body["project"]["agent_roles"] == {"coder":
+                                                "writes the python"}
+
+    # removing an agent prunes its role even when agent_roles is untouched
+    r = app__test_projects.handle("PUT", f"/api/projects/{p['id']}",
+                   body={"agents": ["reviewer"]})
+    assert r.body["project"]["agent_roles"] == {}
+
+    # empty description clears it (explicit empty string)
+    r = app__test_projects.handle("PUT", f"/api/projects/{p['id']}",
+                   body={"description": ""})
+    assert r.body["project"]["description"] == ""
+
+
+def test_project_description_and_roles_validation(app__test_projects,
+                                                  tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "x", "workspace_dir": str(ws),
+                         "description": 42})
+    assert r.status == 400 and "description" in r.body["error"]["message"]
+
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "x", "workspace_dir": str(ws),
+                         "agent_roles": ["coder"]})
+    assert r.status == 400 and "agent_roles" in r.body["error"]["message"]
+
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "x", "workspace_dir": str(ws),
+                         "agent_roles": {"coder": 7}})
+    assert r.status == 400
+
+    # legacy records keep working: description defaults to "", roles to {}
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "legacy", "workspace_dir": str(ws)})
+    assert r.status == 201
+    assert r.body["project"]["description"] == ""
+    assert r.body["project"]["agent_roles"] == {}
+
+
+# ------------------------------------------------- workspace-safety + index
+
+def test_delete_project_keeps_workspace_files(app__test_projects, tmp_path):
+    """Deleting a project removes it from sable (+ its index DB) but NEVER
+    the workspace directory or the files the agents worked on."""
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    src = ws / "agent_work.py"
+    src.write_text("print('keep me')\n")
+    sub = ws / "sub"
+    sub.mkdir()
+    (sub / "notes.md").write_text("important")
+
+    pid = app__test_projects.handle("POST", "/api/projects",
+                     body={"name": "doomed", "workspace_dir": str(ws)}
+                     ).body["project"]["id"]
+    r = app__test_projects.handle("DELETE", f"/api/projects/{pid}")
+    assert r.status == 200 and r.body["ok"]
+
+    # sable forgot the project...
+    assert app__test_projects.handle("GET", "/api/projects").body["projects"] == []
+    # ...but the workspace and everything in it is untouched
+    assert ws.is_dir()
+    assert src.read_text() == "print('keep me')\n"
+    assert (sub / "notes.md").read_text() == "important"
+
+
+def test_delete_project_removes_only_its_index_db(app__test_projects,
+                                                   tmp_path):
+    """The DELETE endpoint deletes <home>/index/<id>.db and nothing else:
+    sibling projects' DBs and the default DB survive, the DB dir stays."""
+    idx_dir = app__test_projects.home / "index"
+    idx_dir.mkdir(parents=True, exist_ok=True)
+
+    def mk(pid):
+        f = idx_dir / f"{pid}.db"
+        f.write_text("sqlite-ish")
+        return f
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    doomed = app__test_projects.handle(
+        "POST", "/api/projects",
+        body={"name": "doomed", "workspace_dir": str(ws)}
+    ).body["project"]["id"]
+    other = app__test_projects.handle(
+        "POST", "/api/projects",
+        body={"name": "survivor", "workspace_dir": str(ws)}
+    ).body["project"]["id"]
+    d, o, default = mk(doomed), mk(other), mk("default")
+
+    r = app__test_projects.handle("DELETE", f"/api/projects/{doomed}")
+    assert r.status == 200 and r.body["ok"] and r.body["index_removed"]
+    assert not d.exists()
+    assert o.is_file() and default.is_file() and idx_dir.is_dir()
+
+
+def test_create_and_update_enroll_project_index_when_enabled(
+        app__test_projects, tmp_path, monkeypatch):
+    """With indexing.enabled, create/update kick a build of THAT project's
+    own index DB (paths stay per-project; nothing global is appended)."""
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    calls = []
+    monkeypatch.setattr(app__test_projects, "h_index_build",
+                        lambda q, b: calls.append(dict(b)))
+
+    # default config: indexing off => no build is ever kicked
+    pid = app__test_projects.handle("POST", "/api/projects",
+                     body={"name": "off", "workspace_dir": str(ws)}
+                     ).body["project"]["id"]
+    assert calls == []
+
+    app__test_projects.cfg.indexing = {"enabled": True}
+    pid2 = app__test_projects.handle("POST", "/api/projects",
+                      body={"name": "on", "workspace_dir": str(ws)}
+                      ).body["project"]["id"]
+    assert calls == [{"project": pid2}]
+
+    calls.clear()
+    assert app__test_projects.handle(
+        "PUT", f"/api/projects/{pid}",
+        body={"name": "renamed"}).status == 200
+    assert calls == [{"project": pid}]
+
+    # a failed build kickoff must never fail the create itself
+    calls.clear()
+
+    def boom(q, b):
+        raise RuntimeError("embed server down")
+
+    monkeypatch.setattr(app__test_projects, "h_index_build", boom)
+    r = app__test_projects.handle("POST", "/api/projects",
+                   body={"name": "survivor", "workspace_dir": str(ws)})
+    assert r.status == 201
+
+
+# -------------------------------------------------- project prompt context
+
+def test_with_project_context_prompt_sections():
+    from sable.core.agent_runner import _with_project_context
+
+    base = "base prompt"
+    # no project / empty record / name-only record => prompt untouched
+    assert _with_project_context(None, base, "coder") is base
+    assert _with_project_context({}, base, "coder") is base
+    assert _with_project_context({"name": "x"}, base, "coder") is base
+
+    proj = {"name": "Atlas", "description": "map the terrain",
+            "agents": ["orchestrator", "coder"],
+            "agent_roles": {"coder": "writes python"}}
+    out = _with_project_context(proj, base, "coder")
+    assert out.startswith(base)
+    assert "## Project: Atlas" in out
+    assert "map the terrain" in out
+    # own role marked, teammates visible with their jobs, unroled agent
+    # listed without a colon
+    assert "- coder (that's you): writes python" in out
+    assert "- orchestrator\n" in out or out.endswith("- orchestrator")
+
+    # unknown running profile => no "you" marker at all
+    assert "that's you" not in _with_project_context(proj, base, "nobody")
+    # description alone (no agents) still injects; agents alone too
+    d = _with_project_context({"name": "N", "description": "only desc"},
+                              base, None)
+    assert "only desc" in d and "Agents working" not in d
+    a = _with_project_context({"name": "N", "agents": ["solo"]}, base, "solo")
+    assert "- solo (that's you)" in a
+
+
+def test_create_runner_injects_project_context(tmp_path, monkeypatch):
+    import sable.core.agent_runner as ar
+
+    monkeypatch.setenv("SABLE_HOME", str(tmp_path / "home"))
+    cfg = SableConfig()
+    proj = {"name": "Atlas", "description": "desc here",
+            "agents": ["coder", "tester"],
+            "agent_roles": {"coder": "ship it", "tester": "break it"}}
+    runner = ar.create_runner(cfg, "http://127.0.0.1:1", "m",
+                              project_context=proj, profile_name="coder")
+    assert "## Project: Atlas" in runner.system_prompt
+    assert "desc here" in runner.system_prompt
+    assert "- coder (that's you): ship it" in runner.system_prompt
+    assert "- tester: break it" in runner.system_prompt
+
+    # no project => byte-identical default prompt (no section at all)
+    off = ar.create_runner(cfg, "http://127.0.0.1:1", "m")
+    assert "## Project" not in off.system_prompt
+
+
 # ------------------------------------------------------- threads <-> project
 
 def test_thread_with_project_lists_under_it(app__test_projects):

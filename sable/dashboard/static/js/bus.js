@@ -12,7 +12,7 @@ const KINDS = ["job.state", "job.log", "serve.state", "serve.watchdog",
   "trace.feedbacked", "iterate.step",
   "runtime.setup", "index.build", "app.state", "delegation.update",
   "bench.run", "calibrate.run", "doctor.run", "engines.changed",
-  "engine.install"];
+  "engine.install", "plan.updated", "plan.loop"];
 
 class EventBusClient {
   constructor() {

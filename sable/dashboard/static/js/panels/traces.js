@@ -239,7 +239,11 @@ function listView(mount) {
         render: (r) => el("span", { class: "mono" }, fmtTime(r.timestamp, false)) },
       { label: "status", render: (r) => badge(r.status) },
       { label: "score", render: (r) => scoreBadge(r.outcome_score) },
-      { label: "task", render: (r) => el("span", {}, r.task_summary || "–") },
+      // WP12: plan-task chip next to the summary for runs started from a task.
+      { label: "task", render: (r) => el("span", {}, r.task_summary || "–",
+          r.plan_task ? el("span", { class: "hint mono",
+            title: "started from plan task " + r.plan_task,
+            text: " [" + r.plan_task + "]" }) : null) },
       { label: "profile", key: "agent_profile" },
       { label: "model", key: "model_alias" },
       { label: "tools", key: "num_tool_calls" },
@@ -472,6 +476,8 @@ function metaSidebar(trace) {
     ["tool calls", String(trace.num_tool_calls ?? 0)],
     ["session", trace.session_id],
     ["project", trace.project],
+    // WP12: plan task this run was started from (task<->trace linkage).
+    ["plan task", trace.plan_task],
   ];
   const kv = el("table", { class: "kv" }, el("tbody", {},
     ...rows.map(([k, v, node]) => el("tr", {},

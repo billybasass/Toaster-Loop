@@ -338,8 +338,13 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         rec_profile = (_prof_name
                        if _easy.enabled and _prof_name
                        and _prof_name in _easy.all_profiles else None)
+        # WP12 plans: an optional plan task id on the run body stamps every
+        # trace this run records (additive plan_task field), so traces link
+        # task<->trace both ways. Absent => None => identical to before.
+        _plan_task = str(b.get("plan_task") or "").strip() or None
         recorder = make_recorder(self.cfg, on_record=_on_record,
-                                 project=project_id, profile=rec_profile)
+                                 project=project_id, profile=rec_profile,
+                                 plan_task=_plan_task)
 
         def gen() -> Iterator[str]:
             # First iteration = the stream was admitted: register now so a
@@ -530,6 +535,11 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                                      # Phase 5: route search_codebase to the
                                      # active project's index DB.
                                      project_id=project_id,
+                                     # Projects: the record (description +
+                                     # agent roster/roles) injected into the
+                                     # system prompt so the agent knows the
+                                     # project and every agent's job.
+                                     project_context=proj,
                                      # Backlog #9: per-profile workspace
                                      # override (widens/narrows the global
                                      # agent.workspace_root for this chat).
@@ -870,6 +880,16 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                             if isinstance(b.get("delegations"), list)
                             else existing.get("delegations") or []),
         }
+        # WP12 plans: optional plan-task linkage on a thread ("task": "<id>").
+        # Written ONLY when set (by the plan "start" op) so ordinary threads
+        # stay byte-identical to pre-WP12 records; readers use .get(). An
+        # existing task key is preserved across later saves (the chat writer
+        # round-trips the whole record). Explicit null clears it.
+        if "task" in b:
+            if b["task"]:
+                thread["task"] = str(b["task"])
+        elif existing.get("task"):
+            thread["task"] = existing["task"]
         if thread["project"] and self._load_project(thread["project"]) is None:
             raise HttpError(400, f"no project {thread['project']}",
                             code="unknown_project")

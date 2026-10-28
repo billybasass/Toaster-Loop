@@ -429,6 +429,23 @@ def test_curate_enqueue_queues_via_api(home):
     assert ("POST", "/api/curate", {"name": "mcpset"}) in app.calls
 
 
+def test_curate_enqueue_project_passthrough(home):
+    """WP12: curate_enqueue accepts the optional project id filter (mirrors
+    `sable curate --project`) and forwards it to POST /api/curate."""
+    srv, app = make_server(home)
+    init(srv)
+    out = call_tool(srv, 78, "curate_enqueue",
+                    {"name": "projset", "project": "alpha123"})
+    assert out["status"] == "plan"
+    token = out["confirm_token"]
+    out2 = call_tool(srv, 79, "curate_enqueue",
+                     {"name": "projset", "project": "alpha123",
+                      "confirm_token": token})
+    assert out2["_isError"] is False
+    assert ("POST", "/api/curate",
+            {"name": "projset", "project": "alpha123"}) in app.calls
+
+
 # ---------------------------------------------------------- no-shell rules
 
 def test_no_shell_execution_anywhere_in_mcp():
@@ -678,7 +695,8 @@ def test_delegate_without_context_degrades(home__test_delegation, _clean_registr
 def test_delegate_timeout_returns_diagnostics_payload(home__test_delegation, monkeypatch, _clean_registry):
     cfg = _cfg(PROFILES, home=home__test_delegation)
 
-    def slow_child(cfg_, prof, task, ctx, delegation_id, out):
+    def slow_child(cfg_, prof, task, ctx, delegation_id, out,
+                   plan_task=None):
         time.sleep(5)  # far longer than the 0.3s cap below
 
     monkeypatch.setattr(delegation, "_run_child", slow_child)
@@ -1514,9 +1532,12 @@ def test_unknown_tools_treated_as_mutating(_reset_handler_counters):
 
 
 def test_tool_sets_match_spec(_reset_handler_counters):
+    # WP12: plan reads join the idempotent set, plan writes the mutating set.
     assert IDEMPOTENT_TOOL_NAMES == {
-        "read_file", "list_dir", "search_files", "todo_read", "search_traces"}
-    assert MUTATING_TOOL_NAMES == {"write_file", "patch", "todo_write"}
+        "read_file", "list_dir", "search_files", "todo_read", "search_traces",
+        "plan_next", "plan_view"}
+    assert MUTATING_TOOL_NAMES == {"write_file", "patch", "todo_write",
+                                   "plan_progress", "plan_add"}
 
 
 # ------------------------------------------------------------------- off

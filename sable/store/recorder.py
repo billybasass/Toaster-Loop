@@ -101,12 +101,17 @@ class TraceRecorder:
                  on_record: Optional[Any] = None,
                  project: Optional[str] = None,
                  metadata: Optional[Dict[str, Any]] = None,
-                 profile: Optional[str] = None):
+                 profile: Optional[str] = None,
+                 plan_task: Optional[str] = None):
         self.home = Path(home) if home is not None else resolve_sable_home(cfg)
         # Projects: id stamped onto every trace this recorder writes (None =
         # unfiled). The dashboard builds one recorder per chat run with the
         # active project id from the run context.
         self.project = project or None
+        # WP12 plans: task id a run was started from ("Start task" / plan
+        # loop / delegate_task plan_task=). Nullable; old traces lack it and
+        # readers use tolerant .get() — same additive pattern as `project`.
+        self.plan_task = str(plan_task or "").strip() or None
         # Easy training: when set, this name is written into
         # traces.agent_profile INSTEAD of the runner backend name, so
         # curation / readiness checks scope to one agent profile's sessions
@@ -281,6 +286,8 @@ class TraceRecorder:
             "failure_reason": failure_reason,
             # v3 (projects): nullable project id; same tolerant-read rule.
             "project": self.project,
+            # WP12 plans: nullable plan task id the run was started from.
+            "plan_task": self.plan_task,
             # Phase 2 (delegation): nullable linkage block; absent/None on
             # ordinary runs. Readers use .get() — never a schema migration.
             "delegation": self.metadata,
@@ -328,6 +335,7 @@ class TraceRecorder:
             schema_version=SCHEMA_VERSION,
             failure_reason=failure_reason,
             project=self.project,
+            plan_task=self.plan_task,
             conf_mean=conf_mean,
             conf_p90_negentropy=conf_p90_negentropy,
         )
@@ -362,9 +370,11 @@ class NullRecorder:
 def make_recorder(cfg: Any, on_record: Optional[Any] = None,
                   project: Optional[str] = None,
                   metadata: Optional[Dict[str, Any]] = None,
-                  profile: Optional[str] = None) -> Any:
+                  profile: Optional[str] = None,
+                  plan_task: Optional[str] = None) -> Any:
     """Recorder honoring config `recording.enabled` (default True)."""
     if not getattr(cfg, "recording_enabled", True):
         return NullRecorder()
     return TraceRecorder(cfg, on_record=on_record, project=project,
-                         metadata=metadata, profile=profile)
+                         metadata=metadata, profile=profile,
+                         plan_task=plan_task)
