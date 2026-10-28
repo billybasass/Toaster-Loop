@@ -475,9 +475,10 @@ janitor:
 #   module_levels:         # per-logger overrides
 #     sable.serving: DEBUG
 
-# Dashboard (Phase 5) — `sable dashboard` web UI. The bind host is always
-# 127.0.0.1 (loopback); it cannot be widened from config or env. No external
-# assets are fetched by the UI, so it works fully offline.
+# Dashboard (Phase 5) — `sable dashboard` web UI. Binds 127.0.0.1
+# (loopback) by default; expose_lan widens the bind to 0.0.0.0 for access
+# from other machines on the local network. No external assets are fetched
+# by the UI, so it works fully offline.
 dashboard:
   port: 0                # 0 = dynamic free loopback port; env: SABLE_DASHBOARD_PORT
   # /api/* auth token — ON by default: with no token configured anywhere,
@@ -486,6 +487,11 @@ dashboard:
   # authenticated. Set an explicit secret here (or SABLE_DASHBOARD_TOKEN),
   # or disable auth entirely with the empty string:
   # token: ""            # single-user trust; loopback + Origin checks remain
+  # Bind 0.0.0.0 so other devices on the LAN can open the dashboard
+  # (restart required). Token auth is MANDATORY in this mode — the server
+  # refuses to boot with expose_lan on and no token. The LAN URL prints at
+  # startup. Toggle also lives in Settings -> Dashboard.
+  # expose_lan: false
 
 # Agent profiles (Phase 5e) — named runner configurations managed by the
 # dashboard Profiles panel (or by hand here). Chat's agent mode applies the

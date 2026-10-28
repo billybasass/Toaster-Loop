@@ -355,8 +355,8 @@ class SableConfig:
     # registry instead of gguf_path.
     auto_model: bool = False
     # Phase 5: raw `dashboard:` YAML section (see dashboard/server.py for the
-    # recognized keys; empty => defaults). The bind host is always forced to
-    # loopback regardless of what is configured here.
+    # recognized keys; empty => defaults). Binds loopback unless
+    # ``expose_lan: true`` widens it to 0.0.0.0 (token auth then mandatory).
     dashboard: dict[str, Any] = field(default_factory=dict)
     # Raw `agent:` YAML section. Recognized keys:
     #   context_token_budget: int  — compress REPL/chat history when the

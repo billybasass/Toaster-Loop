@@ -151,10 +151,20 @@ export default {
     // represented by the built-in engine row.
     let runtimeBusy = false;
     let lastRuntime = null;
-    let runtimeLines = null; // <pre> owned by the current render (log tail)
-    let lastSetupLog = [];      // cached setup log tail — survives card re-renders
     let lastRuntimeJson = null; // last rendered payload — skips no-op re-renders
     let setupTimer = null;      // shared pollSetup timer (prevents stacked chains)
+    // Install/setup logs go to the devtools console instead of the page. The
+    // cursor map tracks how many lines of each run were already echoed; a
+    // shorter log than the cursor means the server-side buffer reset (a new
+    // run), so counting restarts.
+    const logCursors = new Map();
+    function echoLog(key, lines) {
+      const all = lines || [];
+      let n = logCursors.get(key) || 0;
+      if (all.length < n) n = 0;
+      for (let i = n; i < all.length; i++) console.log(`[${key}] ${all[i]}`);
+      logCursors.set(key, Math.max(n, all.length));
+    }
     // Which backend the update-check should follow (kept in sync with the
     // dropdown so the badge matches what Install/Update would act on).
     let runtimeCheckBackend = null;
@@ -197,17 +207,11 @@ export default {
       if (!document.body.contains(runtimeCard)) return;
       try {
         const s = await api("/api/runtime/setup");
-        lastSetupLog = s.log || [];
-        if (runtimeLines?.isConnected)
-          runtimeLines.textContent = lastSetupLog.slice(-15).join("\n");
+        echoLog("llama.cpp", s.log);
         if (s.state === "running") { runtimeBusy = true; scheduleSetupPoll(); return; }
         runtimeBusy = false;
         runtimePending = null; // build finished — server state is authoritative again
-        if (s.state === "error") {
-          lastSetupLog = [...lastSetupLog, "error: " + s.error];
-          if (runtimeLines?.isConnected)
-            runtimeLines.textContent += "\nerror: " + s.error;
-        }
+        if (s.state === "error") console.error(`[llama.cpp] error: ${s.error}`);
         // A finished build re-registers its engine row; make sure every
         // managed slot has an entry (idempotent, covers older installs too).
         try { await api("/api/runtime/sync", { method: "POST", body: {} }); }
@@ -218,17 +222,20 @@ export default {
     }
 
     // Kick a llama.cpp build for one backend (new install or update). Shared
-    // by the runtime-card button and the per-engine update buttons.
+    // by the runtime-card button and the per-engine update buttons. A null/
+    // undefined backend targets the primary slot (the built-in engine's
+    // checkout).
     function startLlamaBuild(backend, update) {
       const what = update ? "Update" : "Install";
-      if (!confirm(`${what} llama.cpp (${backend}) on the server? Each backend ` +
+      const label = backend || "primary";
+      if (!confirm(`${what} llama.cpp (${label}) on the server? Each backend ` +
         "gets its own install; existing builds are left untouched. This can " +
         "take many minutes.")) return;
       api("/api/runtime/setup", { method: "POST", body: {
-        backend, update,
+        backend: backend || undefined, update,
       } }).then(() => {
         runtimeBusy = true;
-        runtimeCheckBackend = backend;
+        if (backend) runtimeCheckBackend = backend;
         if (lastRuntime) renderRuntime(lastRuntime);
         pollSetup();
       }).catch((e) => toast(e.message, "error"));
@@ -286,16 +293,10 @@ export default {
         } catch (e) { alert(e.message); }
       });
 
-      runtimeLines = el("pre", { class: "mono hint",
-        style: "max-height:10em;overflow:auto" });
-      // Paint the cached log synchronously so a card re-render never blanks
-      // it, then refresh from the server (this also resumes polling for a
-      // build started in another tab or before this page load).
-      runtimeLines.textContent = lastSetupLog.slice(-15).join("\n");
+      // Resume polling for a build started in another tab or before this page
+      // load; its log lines go to the devtools console, not the page.
       api("/api/runtime/setup").then((s) => {
-        lastSetupLog = s.log || [];
-        if (runtimeLines?.isConnected)
-          runtimeLines.textContent = lastSetupLog.slice(-15).join("\n");
+        echoLog("llama.cpp", s.log);
         if (s.state === "running") { runtimeBusy = true; scheduleSetupPoll(); }
       }).catch(() => {});
 
@@ -303,16 +304,9 @@ export default {
         ? badge("not installed", "error")
         : upd.update_available ? badge("update available", "warn")
         : badge("up to date", "done");
-      // One line per managed install (primary + dedicated per-backend slots),
-      // each with its own update action.
-      const installRows = installs.map((i) => el("div", { class: "field" },
-        el("span", { class: "hint mono" },
-          `${i.backend || "?"}${i.primary ? " (primary)" : ""} · ` +
-          `${i.repo || "?"} @ ${i.ref || "?"} commit ${i.commit || "?"} · ` +
-          `built ${i.built_at || "?"} · ${i.binary || "binary missing"}`),
-        el("button", { class: "btn small", text: runtimeBusy ? "running…" : "update",
-          disabled: runtimeBusy || undefined, title: "git pull + rebuild this backend",
-          onclick: () => startLlamaBuild(i.backend, true) })));
+      // NOTE: per-install rows used to live here too; they duplicated the
+      // Inference-engines table (every managed slot registers an engine row
+      // with its own update/delete), so provenance now shows only there.
       // NOTE: replaceChildren() stringifies non-Node args (a `null` renders as
       // visible "null" text), so filter the conditional lines out first.
       runtimeCard.replaceChildren(...[
@@ -324,12 +318,10 @@ export default {
           ? el("p", { class: "hint" },
             `${installs.length} managed install(s); each backend builds into ` +
             "its own checkout and registers as a separate engine below.") : null,
-        ...installRows,
         !inst && d.update?.reason ? el("p", { class: "hint" }, d.update.reason) : null,
         inst && upd.remote_commit ? el("p", { class: "hint mono" },
           `remote ${upd.remote_commit}${upd.update_available ? " — UPDATE AVAILABLE" : " (up to date)"}`) : null,
         el("div", { class: "field" }, sel, repoIn, refIn, btn),
-        runtimeLines,
       ].filter(Boolean));
     }
 
@@ -360,7 +352,20 @@ export default {
         const llamaBe = !e.builtin && String(e.id).startsWith("llama-cpp-")
           ? String(e.id).slice("llama-cpp-".length) : null;
         const catRow = catalogById.get(e.id);
-        if (llamaBe) {
+        if (e.builtin) {
+          // The built-in engine is backed by the primary managed llama.cpp
+          // checkout — offer the same git pull + rebuild the runtime card's
+          // form performs (null backend => primary slot). Delete stays off:
+          // the built-in row is immutable and always present.
+          actions.push(el("button", {
+            class: "btn small" + (runtimeBusy ? "" : " primary"),
+            text: runtimeBusy ? "building…" : "update",
+            title: "git pull + rebuild the primary llama.cpp checkout " +
+              "(auto-setup install)",
+            disabled: runtimeBusy || undefined,
+            onclick: () => startLlamaBuild(null, true),
+          }));
+        } else if (llamaBe) {
           actions.push(el("button", {
             class: "btn small" + (runtimeBusy ? "" : " primary"),
             text: runtimeBusy ? "building…" : "update",
@@ -498,14 +503,15 @@ export default {
       if (!document.body.contains(installCard)) return;
       try {
         const s = await api("/api/engine-catalog/" + encodeURIComponent(rid) + "/install");
+        // Install logs go to the devtools console, not the page.
+        echoLog(rid, s.log || []);
         if (s.state === "running") {
           installBusy.add(rid);
-          renderCatalog(null, rid, s.log || []);
           setTimeout(() => pollInstall(rid), 2500);
           return;
         }
         const wasBusy = installBusy.delete(rid);
-        if (s.state === "error") renderCatalog(null, rid, [...(s.log || []), "error: " + s.error]);
+        if (s.state === "error") console.error(`[${rid}] error: ${s.error}`);
         else if (wasBusy) {
           toast(`${rid} installed — see Inference engines below`, "ok");
           pollEngines();
@@ -525,14 +531,15 @@ export default {
         msg += `\n\nWarnings:\n• ${compat.warnings.join("\n• ")}`;
       if (!confirm(msg)) return;
       installBusy.add(rid);
-      renderCatalog(null, rid, [`${what.toLowerCase()}ing ${rid} …`]);
+      console.log(`[${rid}] ${what.toLowerCase()} started…`);
+      renderCatalog();
       api("/api/engine-catalog/" + encodeURIComponent(rid) + "/install", {
         method: "POST", body: { update, force: blocked || undefined } })
         .then(() => pollInstall(rid))
         .catch((e) => { installBusy.delete(rid); toast(e.message, "error"); pollCatalog(); });
     }
 
-    function renderCatalog(d, logRid, logLines) {
+    function renderCatalog(d) {
       if (d) { catalogRows = d.catalog || []; hostInfo = d.host || hostInfo; }
       const rows = catalogRows.map((r) => {
         const busy = installBusy.has(r.id);
@@ -589,19 +596,14 @@ export default {
           el("tbody", {}, ...rows))
           : empty("catalog unavailable"),
       ];
-      if (logRid && logLines) {
-        body.push(el("h4", {}, "Install log · ", el("span", { class: "mono" }, logRid)));
-        const pre = el("pre", { class: "mono hint", style: "max-height:12em;overflow:auto" });
-        pre.textContent = (logLines || []).slice(-40).join("\n");
-        body.push(pre);
-      }
       // filter(Boolean): a null conditional line would render as visible
-      // "null" text via replaceChildren()'s string coercion.
+      // "null" text via replaceChildren()'s string coercion. Install logs are
+      // echoed to the devtools console (echoLog), not rendered here.
       installCard.replaceChildren(...body.filter(Boolean));
     }
 
     // A finished/failed install anywhere (this tab or another) refreshes both
-    // cards; per-recipe polling covers the live log tail.
+    // cards; per-recipe polling covers the live log tail (console only).
     const offInstall = bus.on("engine.install", (p) => {
       if (p?.recipe && p.state !== "running") pollInstall(p.recipe);
     });

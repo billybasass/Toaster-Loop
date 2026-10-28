@@ -1,4 +1,7 @@
-"""Dashboard HTTP server — stdlib only, bound to 127.0.0.1 (loopback) always.
+"""Dashboard HTTP server — stdlib only, bound to 127.0.0.1 (loopback) by
+default; ``dashboard.expose_lan: true`` widens the bind to 0.0.0.0 so other
+machines on the local network can reach the UI (token auth becomes
+mandatory — refuse to boot without one).
 
 Serves the static UI from ``dashboard/static/`` and delegates /api/* to
 DashboardApp. No external assets: the browser fetches nothing beyond this
@@ -7,6 +10,7 @@ server, so the dashboard works fully offline.
 Config (`dashboard:` YAML section, all optional):
     port: 0            # 0 => dynamic free port on loopback
     token: ""          # optional shared secret (also SABLE_DASHBOARD_TOKEN)
+    expose_lan: false  # true => bind 0.0.0.0 (LAN); requires a token
 
 Phase 5a: PUT/DELETE verbs, SSE streaming responses (chunked, no
 Content-Length), optional constant-time token auth on /api/* (header
@@ -42,8 +46,32 @@ _CONTENT_TYPES = {
     ".json": "application/json",
 }
 
-# Loopback-only constraint: this is the single bind address. Not configurable.
+#: Default bind address (loopback). ``dashboard.expose_lan`` switches to 0.0.0.0.
 BIND_HOST = "127.0.0.1"
+LAN_BIND_HOST = "0.0.0.0"
+
+
+def expose_lan(cfg: SableConfig) -> bool:
+    """True when ``dashboard.expose_lan`` is set (bind 0.0.0.0 for LAN access)."""
+    sec = getattr(cfg, "dashboard", None) or {}
+    return bool(sec.get("expose_lan")) if isinstance(sec, dict) else False
+
+
+def bind_host(cfg: SableConfig) -> str:
+    """Bind address for this config: loopback unless expose_lan is on."""
+    return LAN_BIND_HOST if expose_lan(cfg) else BIND_HOST
+
+
+def _lan_ip() -> str:
+    """Best-effort primary outbound LAN IPv4 (UDP-connect trick; sends nothing)."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return str(s.getsockname()[0])
+    except OSError:
+        return ""
+    finally:
+        s.close()
 
 #: Admission control for SSE streams (chat runs + event bus). ThreadingHTTPServer
 #: spawns one thread per connection with no cap; a reconnecting-EventSource
@@ -67,22 +95,25 @@ def _max_sse_connections(cfg: SableConfig) -> int:
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "[::1]"})
 
 
+def _url_host(value: str) -> str:
+    """Bare hostname from a Host (host[:port]) or Origin/Referer (URL) value."""
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if "://" in v:                 # Origin/Referer values are URLs
+        v = v.split("://", 1)[1]
+    v = v.split("/", 1)[0]
+    if v.startswith("["):          # IPv6 [::1]:port
+        return v.split("]", 1)[0].lstrip("[")
+    return v.split(":", 1)[0]
+
+
 def _host_is_loopback(value: str) -> bool:
     """True when a Host/Origin URL value names a loopback host (port ignored)."""
     v = (value or "").strip()
     if not v:
         return False
-    # Origin/Referer values are URLs; Host values are host[:port].
-    if "://" in v:
-        rest = v.split("://", 1)[1]
-        v = rest.split("/", 1)[0]
-    else:
-        v = v.split("/", 1)[0]
-    if v.startswith("["):          # IPv6 [::1]:port
-        host = v.split("]", 1)[0].lstrip("[")
-    else:
-        host = v.split(":", 1)[0]
-    return host in _LOOPBACK_HOSTS
+    return _url_host(v) in _LOOPBACK_HOSTS
 
 
 def _free_port(host: str = BIND_HOST) -> int:
@@ -106,17 +137,31 @@ def make_server(
     cfg: SableConfig, port: Optional[int] = None, home: Optional[Path] = None,
     token: Optional[str] = None,
 ) -> ThreadingHTTPServer:
-    """Build (but do not serve) the loopback HTTP server.
+    """Build (but do not serve) the HTTP server.
 
     ``token`` is the CLI override: a non-empty secret requires it, the empty
     string explicitly DISABLES auth (``--no-token``), and None falls through
     to config/env/the generated-and-persisted default token.
+
+    Binding: loopback by default. With ``dashboard.expose_lan: true`` the
+    server binds 0.0.0.0 so other machines on the local network can reach it;
+    that mode REFUSES to boot without a token (auth is mandatory off-box),
+    and the DNS-rebinding gate relaxes to a same-origin check (a LAN client
+    addresses us by machine IP/hostname, not 127.0.0.1).
     """
     app = DashboardApp(cfg, home=home)
     if token is not None:  # CLI override wins over config/env ("" disables)
         app.cfg.dashboard = dict(app.cfg.dashboard or {})
         app.cfg.dashboard["token"] = token
-    p = dashboard_port(cfg, override=port) or _free_port()
+    lan = expose_lan(app.cfg)
+    if lan and not app.token:
+        raise SystemExit(
+            "dashboard.expose_lan is on but no auth token is configured — "
+            "exposing the dashboard to the network without a token is "
+            "refused. Set dashboard.token (or SABLE_DASHBOARD_TOKEN), or "
+            "turn expose_lan off.")
+    host = bind_host(app.cfg)
+    p = dashboard_port(cfg, override=port) or _free_port(host)
     # Shared across all handler threads (closure over make_server scope).
     sse_slots = threading.Semaphore(_max_sse_connections(app.cfg))
 
@@ -244,18 +289,30 @@ def make_server(
 
             A same-origin browser request always sends either Origin (fetch,
             XHR, EventSource) or Referer (same-origin default policy); curl and
-            our own tests send neither, so they stay allowed. When either IS
-            present it must name a loopback origin — anything else is a page on
-            another site driving this local API. The Host header is checked too:
-            a rebinding attack reaches 127.0.0.1 under an attacker hostname.
+            our own tests send neither, so they stay allowed. Loopback mode:
+            every name must be loopback — anything else is a page on another
+            site driving this local API, or a rebinding attack reaching
+            127.0.0.1 under an attacker hostname. LAN mode (expose_lan):
+            clients legitimately address us by machine IP/hostname, so the
+            gate becomes same-origin — Origin/Referer must name the SAME host
+            as the Host header (rebinding still fails: the page's real domain
+            differs from the resolved-IP Host it sends).
             """
             host = self.headers.get("Host") or ""
-            if not _host_is_loopback(host):
+            if not lan:
+                if not _host_is_loopback(host):
+                    return True
+                for value in (self.headers.get("Origin"),
+                              self.headers.get("Referer")):
+                    if value and not _host_is_loopback(value):
+                        return True
+                return False
+            expected = _url_host(host).lower()
+            if not expected:
                 return True
-            origin = self.headers.get("Origin")
-            referer = self.headers.get("Referer")
-            for value in (origin, referer):
-                if value and not _host_is_loopback(value):
+            for value in (self.headers.get("Origin"),
+                          self.headers.get("Referer")):
+                if value and _url_host(value).lower() != expected:
                     return True
             return False
 
@@ -346,7 +403,7 @@ def make_server(
         def log_message(self, format: str, *args: Any) -> None:
             logger.debug("%s %s", self.address_string(), format % args)
 
-    httpd = ThreadingHTTPServer((BIND_HOST, p), Handler)
+    httpd = ThreadingHTTPServer((host, p), Handler)
     httpd.daemon_threads = True
     httpd.sable_app = app  # type: ignore[attr-defined]
     return httpd
@@ -358,7 +415,9 @@ def serve_dashboard(
 ) -> ThreadingHTTPServer:
     """Start the dashboard. Returns the running server (blocks when block=True)."""
     httpd = make_server(cfg, port=port, home=home, token=token)
-    url = f"http://{BIND_HOST}:{httpd.server_address[1]}/"
+    p = httpd.server_address[1]
+    url = f"http://{BIND_HOST}:{p}/"
+    lan_on = expose_lan(httpd.sable_app.cfg)  # type: ignore[attr-defined]
     tok = httpd.sable_app.token  # type: ignore[attr-defined]
     # Queue dispatcher: reap stale workers NOW (a phantom `running` row from a
     # crash must not hold submits at 409), then drain queued/gate-blocked jobs
@@ -424,7 +483,18 @@ def serve_dashboard(
             print(f"sable dashboard authed: {url}?token={tok}")
             print(f"token auth ON — open {url}?token={tok} or set the "
                   "X-Sable-Token header on /api/* calls")
-        print("Loopback-only. Press Ctrl-C to stop.")
+        if lan_on:
+            lan = _lan_ip()
+            if lan:
+                lan_url = f"http://{lan}:{p}/"
+                print(f"sable dashboard (LAN): {lan_url}")
+                if tok:
+                    print(f"sable dashboard LAN authed: {lan_url}?token={tok}")
+            print("Exposed to the local network (dashboard.expose_lan) — "
+                  "everyone on this network can reach the UI; token auth is "
+                  "required.")
+        else:
+            print("Loopback-only. Press Ctrl-C to stop.")
         stop = threading.Event()
 
         def _sig(signum, frame):  # graceful shutdown

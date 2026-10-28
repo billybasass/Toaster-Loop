@@ -54,7 +54,10 @@ class ConfigRoutes(ApiContext):
             "training": set(_TC.__dataclass_fields__),
             "curation": set(CurationConfig.__dataclass_fields__),
             "validation": set(_VC.__dataclass_fields__),
-            "dashboard": {"port", "token"},
+            # dashboard: port/token are long-standing; max_sse caps concurrent
+            # SSE streams (server.py); expose_lan binds 0.0.0.0 for LAN access
+            # (token auth becomes mandatory — boot refuses without one).
+            "dashboard": {"port", "token", "max_sse", "expose_lan"},
             # Golden mining (curate/mine_goldens.py).
             "goldens_mine": {"enabled", "max_per_run", "max_candidates",
                              "min_feedback_score", "use_judge"},

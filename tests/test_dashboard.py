@@ -2205,6 +2205,73 @@ def test_dns_rebinding_host_blocked(home):
         httpd.server_close()
 
 
+# ------------------------------------------------------ LAN exposure (expose_lan)
+
+def test_expose_lan_refused_without_token(home):
+    """dashboard.expose_lan with auth disabled must refuse to boot."""
+    from sable.core.config import SableConfig
+    from sable.dashboard.server import make_server
+
+    import pytest as _pytest
+    cfg = SableConfig(dashboard={"expose_lan": True, "token": ""})
+    with _pytest.raises(SystemExit):
+        make_server(cfg, port=0, home=home)
+
+
+def test_expose_lan_binds_wildcard_and_allows_same_origin(home):
+    """expose_lan binds 0.0.0.0; the CSRF gate becomes same-origin: a Host
+    naming a LAN IP is allowed when Origin matches it, refused when not."""
+    import httpx
+
+    from sable.core.config import SableConfig
+    from sable.dashboard.server import LAN_BIND_HOST, make_server
+
+    cfg = SableConfig(dashboard={"expose_lan": True})
+    httpd = make_server(cfg, port=0, home=home, token="lan-tok")
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    port = httpd.server_address[1]
+    assert httpd.server_address[0] == LAN_BIND_HOST
+    try:
+        lan_host = f"192.0.2.10:{port}"  # TEST-NET-1, never routable
+        hdrs = {"Host": lan_host, "X-Sable-Token": "lan-tok"}
+        # same-origin LAN request: allowed
+        r = httpx.get(f"http://127.0.0.1:{port}/api/status", timeout=5,
+                      headers={**hdrs, "Origin": f"http://{lan_host}"})
+        assert r.status_code == 200
+        # cross-origin (rebinding shape: Host is the resolved IP, Origin the
+        # attacker domain): refused
+        r = httpx.get(f"http://127.0.0.1:{port}/api/status", timeout=5,
+                      headers={**hdrs, "Origin": "https://evil.example"})
+        assert r.status_code == 403
+        assert r.json()["error"]["code"] == "cross_site_blocked"
+        # no token -> 401 even from the same origin
+        r = httpx.get(f"http://127.0.0.1:{port}/api/status", timeout=5,
+                      headers={"Host": lan_host})
+        assert r.status_code == 401
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_config_put_accepts_expose_lan(home):
+    """The dashboard validator accepts dashboard.expose_lan in a section patch."""
+    import httpx
+
+    httpd, base = _start_server_with_token(home, token="cfg-tok")
+    try:
+        r = httpx.put(base + "/api/config", timeout=5,
+                      headers={"X-Sable-Token": "cfg-tok"},
+                      json={"section": "dashboard",
+                            "patch": {"expose_lan": True}})
+        assert r.status_code == 200, r.text
+        saved = (home / "sable.yaml").read_text()
+        assert "expose_lan: true" in saved
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 # ------------------------------------------- playbooks + mined-goldens APIs
 
 
