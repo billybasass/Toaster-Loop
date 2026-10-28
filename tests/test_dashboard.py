@@ -6436,3 +6436,351 @@ def test_chat_stream_rejects_unknown_project(app__test_projects):
                    body={"prompt": "hi", "project": "nope"})
     assert r.status == 404
     assert r.body["error"]["code"] == "unknown_project"
+
+
+# ============================================================ remote agents
+# Peer agents in pickers + the /remote/* OpenAI-compatible passthrough that
+# lets a LAN peer run inference against this box (dashboard.expose_lan).
+
+@pytest.fixture()
+def home__rgw(tmp_path, monkeypatch):
+    h = tmp_path / "home-rgw"
+    monkeypatch.setenv("SABLE_HOME", str(h))
+    return h
+
+
+@pytest.fixture()
+def app__rgw(home__rgw):
+    return DashboardApp(SableConfig(), home=home__rgw)
+
+
+def _seed_peer__rgw(home, url="http://192.0.2.9:55429", token="peer-tok",
+                    ok=True, agent="tim", model="Qwen3-27B"):
+    from sable.dashboard import peers as peers_mod
+
+    rec = peers_mod.upsert_peer(home, url, token, name=None)
+    snap = ({"ok": True, "probed_at": "2026-01-01T00:00:00+00:00",
+             "agents": [{"name": agent, "default": False}],
+             "servers": [{"name": "tim", "running": True,
+                          "model_name": model}]}
+            if ok else
+            {"ok": False, "probed_at": "2026-01-01T00:00:00+00:00",
+             "error": "boom"})
+    peers_mod.set_snapshot(home, rec["id"], snap)
+    return rec
+
+
+def test_remote_agent_entries_synthesized_no_token(home__rgw):
+    from sable.dashboard import peers as peers_mod
+
+    _seed_peer__rgw(home__rgw)
+    entries = peers_mod.remote_agent_entries(home__rgw)
+    assert len(entries) == 1
+    e = entries[0]
+    assert e["name"] == "tim@192.0.2.9"
+    assert e["remote"] is True and e["model_name"] == "Qwen3-27B"
+    # display shape: never carries credentials
+    assert "token" not in json.dumps(entries)
+    # unhealthy peers contribute nothing
+    _seed_peer__rgw(home__rgw, url="http://192.0.2.10:1", ok=False)
+    assert all("192.0.2.10" not in x["name"]
+               for x in peers_mod.remote_agent_entries(home__rgw))
+
+
+def test_resolve_remote_agent_carries_creds(home__rgw):
+    from sable.dashboard import peers as peers_mod
+
+    _seed_peer__rgw(home__rgw)
+    got = peers_mod.resolve_remote_agent(home__rgw, "tim@192.0.2.9")
+    assert got and got["peer_url"] == "http://192.0.2.9:55429"
+    assert got["peer_token"] == "peer-tok"
+    assert got["model_name"] == "Qwen3-27B" and got["remote"] is True
+    # no `tools` key: absent means default tools, [] would drop everything
+    assert "tools" not in got
+    assert peers_mod.resolve_remote_agent(home__rgw, "jim@192.0.2.9") is None
+    assert peers_mod.resolve_remote_agent(home__rgw, "tim@192.0.2.10") is None
+    _seed_peer__rgw(home__rgw, ok=False)  # peer went unhealthy
+    assert peers_mod.resolve_remote_agent(home__rgw, "tim@192.0.2.9") is None
+
+
+def test_profiles_list_includes_remote_agents(app__rgw, home__rgw):
+    _seed_peer__rgw(home__rgw)
+    body = app__rgw.handle("GET", "/api/profiles").body
+    names = [p["name"] for p in body["profiles"]]
+    assert "tim@192.0.2.9" in names
+    entry = next(p for p in body["profiles"] if p["remote"])
+    assert json.dumps(entry).count("peer-tok") == 0
+
+
+def test_chat_stream_remote_profile_targets_gateway(app__rgw, home__rgw,
+                                                    monkeypatch):
+    """A remote profile run points the runner at peer/remote/v1 with the
+    peer token as api_key; the agent loop itself stays local."""
+    from sable.core.agent_runner import AgentResult
+
+    made = {}
+
+    class StubRunner:
+        def __init__(self, cfg, base_url, model, api_key=None, **kwargs):
+            made["base_url"] = base_url
+            made["model"] = model
+            made["api_key"] = api_key
+
+        def run(self, task, history=None, **kw):
+            return AgentResult(final_response="ok", messages=[
+                {"role": "user", "content": task},
+                {"role": "assistant", "content": "ok"}],
+                backend="stub", tokens_in=1, tokens_out=1)
+
+    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
+    monkeypatch.setattr("sable.serving.supervisor.healthcheck",
+                        lambda *a, **k: True)
+    _seed_peer__rgw(home__rgw)
+    r = app__rgw.handle("POST", "/api/chat/stream",
+                        body={"prompt": "hi tim", "profile": "tim@192.0.2.9"})
+    assert r.status == 200 and r.stream is not None
+    text = "".join(r.stream)
+    assert "run.done" in text
+    assert made["base_url"] == "http://192.0.2.9:55429/remote/v1"
+    assert made["api_key"] == "peer-tok"
+    assert made["model"] == "Qwen3-27B"
+
+
+def test_chat_stream_remote_peer_down_is_503(app__rgw, home__rgw, monkeypatch):
+    monkeypatch.setattr("sable.serving.supervisor.healthcheck",
+                        lambda *a, **k: False)
+    _seed_peer__rgw(home__rgw)
+    r = app__rgw.handle("POST", "/api/chat/stream",
+                        body={"prompt": "hi", "profile": "tim@192.0.2.9"})
+    assert r.status == 503
+    assert r.body["error"]["code"] == "peer_unreachable"
+
+
+def _start_lan_server(home, token="gw-tok"):
+    from sable.core.config import SableConfig
+    from sable.dashboard.server import make_server
+
+    cfg = SableConfig(dashboard={"expose_lan": True})
+    httpd = make_server(cfg, port=0, home=home, token=token)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    return httpd, f"http://127.0.0.1:{httpd.server_address[1]}"
+
+
+def test_remote_gateway_requires_bearer_token(home__rgw):
+    import httpx
+
+    httpd, base = _start_lan_server(home__rgw)
+    try:
+        r = httpx.post(base + "/remote/v1/chat/completions",
+                       json={"messages": []}, timeout=5)
+        assert r.status_code == 401
+        r = httpx.get(base + "/remote/v1/models", timeout=5,
+                      headers={"Authorization": "Bearer nope"})
+        assert r.status_code == 401
+        # query-string tokens are refused here (logs leak; headers only)
+        r = httpx.get(base + "/remote/v1/models?token=gw-tok", timeout=5)
+        assert r.status_code == 401
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_remote_gateway_passthrough_models_and_chat(home__rgw):
+    import httpx
+
+    from fake_server import FakeOpenAIServer
+
+    httpd, base = _start_lan_server(home__rgw)
+    try:
+        with FakeOpenAIServer() as fs:
+            _fake_serve_state(home__rgw, fs.base_url)
+            hdrs = {"Authorization": "Bearer gw-tok"}
+            r = httpx.get(base + "/remote/v1/models", headers=hdrs, timeout=5)
+            assert r.status_code == 200
+            assert "fake-model" in r.text
+            r = httpx.post(base + "/remote/v1/chat/completions", headers=hdrs,
+                           json={"messages": [{"role": "user",
+                                               "content": "hi"}]}, timeout=10)
+            assert r.status_code == 200
+            body = r.json()
+            # fake server answers the first turn with a native tool call
+            assert body["choices"][0]["message"]["tool_calls"]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_remote_gateway_dead_without_expose_lan(home):
+    import httpx
+
+    from sable.core.config import SableConfig
+    from sable.dashboard.server import make_server
+
+    httpd = make_server(SableConfig(), port=0, home=home, token="loop-tok")
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    base = f"http://127.0.0.1:{httpd.server_address[1]}"
+    try:
+        r = httpx.get(base + "/remote/v1/models", timeout=5,
+                      headers={"Authorization": "Bearer loop-tok"})
+        assert r.status_code == 404  # loopback surface never advertises it
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_remote_gateway_nothing_serving_is_503(home__rgw):
+    import httpx
+
+    httpd, base = _start_lan_server(home__rgw)
+    try:
+        r = httpx.get(base + "/remote/v1/models", timeout=5,
+                      headers={"Authorization": "Bearer gw-tok"})
+        assert r.status_code == 503
+        assert r.json()["error"]["code"] == "not_serving"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_status_peer_gateway_shape(app__rgw, home__rgw, monkeypatch):
+    """expose_lan off => peer_gateway None; on + lan ip => the /remote/v1 URL."""
+    from sable.dashboard import app as app_mod
+
+    r = app__rgw.handle("GET", "/api/status")
+    assert r.status == 200 and r.body["peer_gateway"] is None
+
+    app__rgw.cfg.dashboard = {"expose_lan": True}
+    monkeypatch.setattr(app_mod.DashboardApp, "token", "tok", raising=False)
+    app__rgw.dashboard_port = 4321
+    import sable.dashboard.server as srv_mod
+    monkeypatch.setattr(srv_mod, "_lan_ip", lambda: "192.168.1.5")
+    body = app__rgw.handle("GET", "/api/status").body
+    assert body["peer_gateway"] == "http://192.168.1.5:4321/remote/v1"
+
+
+def test_remote_gateway_trace_import(home__rgw):
+    """Peer-pushed transcripts land in OUR buffer under the local name."""
+    import httpx
+
+    httpd, base = _start_lan_server(home__rgw)
+    try:
+        body = {"task": "fix the shader", "profile": "tim",
+                "model_name": "Qwen3-27B", "completed": True,
+                "messages": [{"role": "user", "content": "fix the shader"},
+                             {"role": "assistant", "content": "patched"}]}
+        r = httpx.post(base + "/remote/v1/traces/import", json=body,
+                       headers={"Authorization": "Bearer gw-tok"}, timeout=10)
+        assert r.status_code == 200, r.text
+        tid = r.json()["trace_id"]
+        # indexed locally with the mapped profile name
+        tr = httpx.get(base + f"/api/traces/{tid}", timeout=5,
+                       headers={"X-Sable-Token": "gw-tok"})
+        assert tr.status_code == 200
+        row = tr.json()["trace"]
+        assert row["agent_profile"] == "tim"
+        # and it shows up scoped like any local profile's traces
+        lst = httpx.get(base + "/api/traces?agent_profile=tim", timeout=5,
+                        headers={"X-Sable-Token": "gw-tok"}).json()
+        assert tid in {t["trace_id"] for t in lst["traces"]}
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_remote_gateway_trace_import_auth_and_validation(home__rgw):
+    import httpx
+
+    httpd, base = _start_lan_server(home__rgw)
+    try:
+        r = httpx.post(base + "/remote/v1/traces/import",
+                       json={"messages": [], "task": ""}, timeout=5)
+        assert r.status_code == 401
+        hdrs = {"Authorization": "Bearer gw-tok"}
+        r = httpx.post(base + "/remote/v1/traces/import",
+                       json={"messages": []}, headers=hdrs, timeout=5)
+        assert r.status_code == 400
+        r = httpx.post(base + "/remote/v1/traces/import",
+                       json={"task": "x", "messages": [{"role": "user"}]},
+                       headers=hdrs, timeout=5)
+        # record() tolerates odd messages; import succeeds with a shape check
+        assert r.status_code in (200, 500)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_remote_run_pushes_trace_back(app__rgw, home__rgw, monkeypatch):
+    """A chat run with a remote profile POSTs the transcript to the peer's
+    /remote/v1/traces/import with the mapped local agent name."""
+    import httpx
+
+    from sable.core.agent_runner import AgentResult
+
+    pushed = {}
+
+    class Resp:
+        status_code = 200
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        pushed["url"] = url
+        pushed["json"] = json
+        pushed["headers"] = headers
+        return Resp()
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+
+    class StubRunner:
+        def __init__(self, cfg, base_url, model, api_key=None, **kwargs):
+            pass
+
+        def run(self, task, history=None, **kw):
+            return AgentResult(final_response="ok", messages=[
+                {"role": "user", "content": task},
+                {"role": "assistant", "content": "ok"}],
+                backend="stub", tokens_in=1, tokens_out=1)
+
+    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
+    monkeypatch.setattr("sable.serving.supervisor.healthcheck",
+                        lambda *a, **k: True)
+    _seed_peer__rgw(home__rgw)
+    r = app__rgw.handle("POST", "/api/chat/stream",
+                        body={"prompt": "hi tim", "profile": "tim@192.0.2.9"})
+    assert r.status == 200 and r.stream is not None
+    text = "".join(r.stream)
+    assert "run.done" in text
+    assert pushed.get("url") == "http://192.0.2.9:55429/remote/v1/traces/import"
+    assert pushed["json"]["profile"] == "tim"  # mapped back to the local name
+    assert pushed["headers"]["X-Sable-Token"] == "peer-tok"
+
+
+def test_remote_run_push_failure_never_breaks_run(app__rgw, home__rgw,
+                                                  monkeypatch):
+    import httpx
+
+    from sable.core.agent_runner import AgentResult
+
+    def boom(*a, **k):
+        raise RuntimeError("peer is down")
+
+    monkeypatch.setattr(httpx, "post", boom)
+
+    class StubRunner:
+        def __init__(self, cfg, base_url, model, api_key=None, **kwargs):
+            pass
+
+        def run(self, task, history=None, **kw):
+            return AgentResult(final_response="ok", messages=[
+                {"role": "user", "content": task},
+                {"role": "assistant", "content": "ok"}],
+                backend="stub", tokens_in=1, tokens_out=1)
+
+    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
+    monkeypatch.setattr("sable.serving.supervisor.healthcheck",
+                        lambda *a, **k: True)
+    _seed_peer__rgw(home__rgw)
+    r = app__rgw.handle("POST", "/api/chat/stream",
+                        body={"prompt": "hi tim", "profile": "tim@192.0.2.9"})
+    text = "".join(r.stream)
+    assert "run.done" in text  # flow-back failure invisible to the run

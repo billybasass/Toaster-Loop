@@ -165,6 +165,43 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         sp = (inst or {}).get("sampling")
         return dict(sp) if isinstance(sp, dict) else {}
 
+    def _push_remote_trace(self, prof: Dict[str, Any], prompt: str,
+                           res: Any, t0: float) -> None:
+        """Send one finished remote-agent run back to the model's owner.
+
+        POSTs the transcript to the peer dashboard's /remote/v1/traces/import
+        (same bearer auth as inference). The profile name is mapped back to
+        the peer's local agent name so their easy-training scoping sees it as
+        one of its own traces. Best-effort by contract: any failure is
+        logged and swallowed by the caller."""
+        import httpx
+
+        purl = str(prof.get("peer_url") or "")
+        if not purl:
+            return
+        full = str(prof.get("name") or "")
+        local_name = full.rpartition("@")[0] or None
+        body = {
+            "task": prompt[:8000],
+            "messages": [m for m in (getattr(res, "messages", None) or [])
+                         if isinstance(m, dict)],
+            "profile": local_name,
+            "model_name": str(getattr(res, "model_alias", None)
+                              or prof.get("model_name") or "model"),
+            "base_url": str(getattr(res, "base_url", None) or ""),
+            "completed": bool(getattr(res, "completed", False)),
+            "tokens_in": getattr(res, "tokens_in", None),
+            "tokens_out": getattr(res, "tokens_out", None),
+            "duration_s": round(time.monotonic() - t0, 3),
+        }
+        headers = {"X-Sable-Token": prof["peer_token"]} \
+            if prof.get("peer_token") else {}
+        r = httpx.post(purl.rstrip("/") + "/remote/v1/traces/import",
+                       json=body, headers=headers, timeout=15.0)
+        if r.status_code >= 400:
+            logger.info("remote trace push to %s failed: HTTP %s",
+                        purl, r.status_code)
+
     def h_proxy_chat(self, q: Dict[str, str], b: Dict[str, Any]) -> ApiResponse:
         import httpx
 
@@ -268,15 +305,36 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
             or None
         if _routing_hint not in (None, "auto", "low", "high"):
             _routing_hint = None
-        # Only pass the kwarg when set: callers/stubs written against the
-        # pre-routing signature keep working untouched (default path call
-        # shape is byte-identical to before).
-        base, key, model = self._resolve_chat_target(
-            (prof or {}).get("server_instance"), **({"routing_hint": _routing_hint}
-                                                    if _routing_hint else {}))
-        # Profile model alias override (falls back to the served model).
-        if prof and prof.get("model_name"):
-            model = str(prof["model_name"])
+        # Remote LAN agents (`<agent>@<host>`): inference runs on the peer's
+        # GPU through its dashboard's /remote/v1 passthrough (authed with the
+        # peer token from peers.json). The agent loop — tools, workspace,
+        # project files, traces — stays entirely local; only completions
+        # cross the network. A never-probed/offline peer is a clean 503 here.
+        if prof and prof.get("remote"):
+            from urllib.parse import urlparse as _urlparse
+
+            from ...serving.supervisor import healthcheck as _hc
+
+            purl = str(prof.get("peer_url") or "")
+            base = purl.rstrip("/") + "/remote/v1"
+            key = prof.get("peer_token") or None
+            model = str(prof.get("model_name") or "model")
+            if not purl or not _hc(base, timeout=5.0, api_key=key):
+                raise HttpError(
+                    503, f"remote sable at {_urlparse(purl).netloc or purl} is "
+                    "not serving right now (its dashboard must be up with "
+                    "expose_lan on, and a model running)",
+                    code="peer_unreachable")
+        else:
+            # Only pass the kwarg when set: callers/stubs written against the
+            # pre-routing signature keep working untouched (default path call
+            # shape is byte-identical to before).
+            base, key, model = self._resolve_chat_target(
+                (prof or {}).get("server_instance"),
+                **({"routing_hint": _routing_hint} if _routing_hint else {}))
+            # Profile model alias override (falls back to the served model).
+            if prof and prof.get("model_name"):
+                model = str(prof["model_name"])
         instance_sampling = self._instance_sampling(
             (prof or {}).get("server_instance"))
         # Per-profile sampling/thinking override (reference style): wins
@@ -466,6 +524,20 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                             logging.getLogger("sable.dashboard").debug(
                                 "chat transcript persist failed for thread %s",
                                 thread_id, exc_info=True)
+                    # Training flow-back: when the run used a REMOTE agent's
+                    # model, that model's owner trains on it — push the
+                    # transcript to the peer gateway's trace import (best
+                    # effort; a dead peer never breaks the local run). The
+                    # profile name is mapped back to the peer's local name
+                    # ("tim@host" -> "tim") so their easy-training scoping
+                    # matches, exactly like one of their own chats.
+                    if prof and prof.get("remote"):
+                        try:
+                            self._push_remote_trace(prof, prompt, res, t0)
+                        except Exception:  # noqa: BLE001 — flow-back is best-effort
+                            logging.getLogger("sable.dashboard").debug(
+                                "remote trace push failed (ignored)",
+                                exc_info=True)
                     if live["n"] == 0:
                         # Runner without streaming support (stubs/CLI shims):
                         # synthesize the event protocol from the message list.

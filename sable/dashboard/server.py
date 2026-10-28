@@ -162,6 +162,9 @@ def make_server(
             "turn expose_lan off.")
     host = bind_host(app.cfg)
     p = dashboard_port(cfg, override=port) or _free_port(host)
+    # Record the bound port on the app so /api/status can advertise the
+    # peer-gateway URL (http://<lan-ip>:<port>/remote/v1) to the Serve page.
+    app.dashboard_port = p  # type: ignore[attr-defined]
     # Shared across all handler threads (closure over make_server scope).
     sse_slots = threading.Semaphore(_max_sse_connections(app.cfg))
 
@@ -316,9 +319,158 @@ def make_server(
                     return True
             return False
 
+        # -- /remote/* peer gateway ----------------------------------------
+        def _remote_authed(self) -> bool:
+            """Peer-gateway auth: ``Authorization: Bearer <dashboard token>``
+            (what the agent runner sends toward an OpenAI endpoint) or
+            ``X-Sable-Token``. Query-string tokens are refused here — inference
+            URLs leak into logs; keep the secret in headers."""
+            provided = self.headers.get("X-Sable-Token")
+            if not provided:
+                authz = self.headers.get("Authorization") or ""
+                if authz.startswith("Bearer "):
+                    provided = authz[len("Bearer "):].strip()
+            return app.check_token(provided)
+
+        def _remote(self, method: str, parsed) -> None:
+            """OpenAI-compatible passthrough for connected LAN peers
+            (dashboard/remote_gateway.py). Dead 404s unless expose_lan is on —
+            the loopback surface never advertises it. The peer's dashboard
+            token authenticates here; the engine's own attach key is injected
+            toward upstream and never crosses back."""
+            import httpx  # lazy: keeps this module importable without it
+
+            from . import remote_gateway as rg
+
+            path = parsed.path
+            if not lan:
+                self._send_json(404, {"error": "not found"})
+                return
+            if not app.token or not self._remote_authed():
+                self._send_json(401, {"error": {
+                    "code": "unauthorized",
+                    "message": "missing or invalid bearer token"}})
+                return
+            # Route table (exact — no user-controlled upstream path pieces).
+            subpath: Optional[str] = None
+            if path.startswith("/remote/v1/"):
+                subpath = path[len("/remote/v1/"):]
+            elif path == "/remote/tokenize":
+                subpath = "tokenize"
+            if subpath not in ("chat/completions", "models", "tokenize",
+                               "traces/import") \
+                    or (subpath == "models" and method != "GET") \
+                    or (subpath != "models" and method != "POST"):
+                self._send_json(404, {"error": "not found"})
+                return
+
+            payload: Dict[str, Any] = {}
+            if method == "POST":
+                length = int(self.headers.get("Content-Length") or 0)
+                # Chat bodies can carry base64 image attachments (same cap as
+                # /api/chat/stream); everything else keeps the default cap.
+                cap = (4 * 8_000_000 * 4 // 3 + 200_000
+                       if subpath == "chat/completions"
+                       else api_max_body_bytes(path))
+                if length > cap:
+                    self._send_json(413, {"error": {
+                        "code": "payload_too_large",
+                        "message": f"body too large (cap {cap} bytes)"}})
+                    return
+                raw = self.rfile.read(length) if length else b""
+                if raw:
+                    try:
+                        payload = json.loads(raw)
+                    except json.JSONDecodeError:
+                        self._send_json(400, {"error": {
+                            "code": "bad_request",
+                            "message": "invalid JSON body"}})
+                        return
+                    if not isinstance(payload, dict):
+                        self._send_json(400, {"error": {
+                            "code": "bad_request",
+                            "message": "body must be a JSON object"}})
+                        return
+
+            # Trace flow-back: a peer run against THIS box's model produced
+            # its transcript THERE; re-record it here so easy-training on the
+            # model owner sees it. No upstream involved — handled locally.
+            if subpath == "traces/import":
+                try:
+                    out = rg.import_trace(app, payload)
+                    self._send_json(200, out)
+                except ValueError as e:
+                    self._send_json(400, {"error": {"code": "bad_request",
+                                                    "message": str(e)}})
+                except Exception as e:  # noqa: BLE001 — honest 500
+                    self._send_json(500, {"error": {
+                        "code": "internal_error",
+                        "message": f"{type(e).__name__}: {e}"}})
+                return
+
+            try:
+                url, key = rg.resolve_upstream(
+                    app, subpath,
+                    model=str(payload.get("model") or "") or None)
+            except LookupError as e:
+                self._send_json(503, {"error": {"code": "not_serving",
+                                                "message": str(e)}})
+                return
+            headers = {"Authorization": f"Bearer {key}"} if key else {}
+
+            # Streaming chat: SSE passthrough through the shared sse_slots
+            # admission control (peer streams count like local ones).
+            if subpath == "chat/completions" and payload.get("stream"):
+                try:
+                    client = httpx.Client(
+                        timeout=httpx.Timeout(600.0, connect=10.0))
+                    upstream = client.send(
+                        client.build_request("POST", url, json=payload,
+                                             headers=headers), stream=True)
+                except httpx.HTTPError as e:
+                    self._send_json(502, {"error": {
+                        "code": "upstream_error",
+                        "message": f"upstream request failed: {e}"}})
+                    return
+                if upstream.status_code != 200:
+                    detail = upstream.read()
+                    upstream.close()
+                    client.close()
+                    self._send(upstream.status_code, detail[:4000],
+                               "application/json")
+                    return
+
+                def gen():
+                    try:
+                        for chunk in upstream.iter_raw():
+                            yield chunk
+                    finally:
+                        upstream.close()
+                        client.close()
+
+                self._stream_sse(gen())
+                return
+
+            try:
+                r = httpx.request(
+                    method, url,
+                    json=payload if method == "POST" else None,
+                    headers=headers, timeout=300.0)
+            except httpx.HTTPError as e:
+                self._send_json(502, {"error": {
+                    "code": "upstream_error",
+                    "message": f"upstream request failed: {e}"}})
+                return
+            self._send(r.status_code, r.content,
+                       r.headers.get("content-type", "application/json"))
+
         def _handle(self, method: str) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
+            # Peer gateway (LAN agents): before /api/*, its own auth scheme.
+            if path.startswith("/remote/"):
+                self._remote(method, parsed)
+                return
             # WP9c: Prometheus scrape endpoint — GET /metrics is an alias of
             # GET /api/metrics on this SAME loopback server (no new listener,
             # no new port). Standard scrape configs default to /metrics and

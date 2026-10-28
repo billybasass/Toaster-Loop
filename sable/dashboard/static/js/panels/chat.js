@@ -143,11 +143,15 @@ export default {
       try {
         const d = await api("/api/profiles");
         defaultProfile = d.default_profile || null;
+        // Remote LAN agents (name "<agent>@<host>", p.remote) run their
+        // inference on the peer machine; the agent loop stays local. The
+        // label carries a suffix so it is obvious which box answers.
         profileSel.replaceChildren(
           el("option", { value: "", text: defaultProfile
             ? `default (${defaultProfile})` : "default (built-in prompt)" }),
           ...(d.profiles || []).map((p) =>
-            el("option", { value: p.name, text: p.name })));
+            el("option", { value: p.name,
+              text: p.remote ? `${p.name} · remote` : p.name })));
         applyProfileSelection();
       } catch { /* profiles are optional; keep the default option */ }
     }
@@ -213,6 +217,9 @@ export default {
       let profList = [];
       try { profList = (await api("/api/profiles")).profiles || []; }
       catch { /* no profiles yet — roster below shows the hint instead */ }
+      // Remote LAN agents ("<agent>@<host>", .remote) attach like any other
+      // roster member: their inference runs on the peer, their tools and
+      // files here run against this project's workspace.
       // An attached agent whose profile was since deleted must stay visible
       // (checked) so the user can edit or drop it deliberately.
       for (const a of chosen)

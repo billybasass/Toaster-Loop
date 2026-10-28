@@ -78,9 +78,27 @@ class OverviewRoutes(ApiContext):
         finally:
             reg.close()
 
+        # Peer-gateway address for the Serve page: when expose_lan is on,
+        # this dashboard serves the OpenAI-compatible /remote/v1 passthrough,
+        # so other machines' sable can attach our models over the LAN. The
+        # token is deliberately NOT included (the UI never needs it; peers
+        # store it at connect time).
+        gateway = None
+        try:
+            from ..server import _lan_ip, expose_lan
+
+            if expose_lan(self.cfg) and self.token:
+                lan_ip = _lan_ip()
+                dport = getattr(self, "dashboard_port", None)
+                if lan_ip and dport:
+                    gateway = f"http://{lan_ip}:{dport}/remote/v1"
+        except Exception:  # noqa: BLE001 — status never breaks on this
+            gateway = None
+
         return {
             "version": __version__,
             "home": str(self.home),
+            "peer_gateway": gateway,
             "server": {
                 "running": server_live,
                 "state": _redact(serve_state) if serve_state else None,

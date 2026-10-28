@@ -240,6 +240,21 @@ export default {
             el("th", { text: "" }))),
           el("tbody", {}, ...profiles.map((p) => {
             const tools = (p.tools || []);
+            // Remote LAN agents live in the peer's config, not ours: no
+            // editor, no delete — they appear here read-only (managed on
+            // the Serve page's remote-peers card).
+            if (p.remote) {
+              return el("tr", {},
+                el("td", {}, el("span", { class: "mono", text: p.name }),
+                  " ", badge("remote", "partial")),
+                el("td", { class: "hint" },
+                  "profile on the peer machine — edit it there"),
+                el("td", { class: "hint mono" }, "peer's tools"),
+                el("td", { class: "hint mono" }, p.model_name || "–"),
+                el("td", { class: "hint mono" }, "remote"),
+                el("td", { class: "hint" }, "remote inference"),
+                el("td", {}, ""));
+            }
             const actions = [];
             if (p.name !== defaultProfile) {
               actions.push(el("button", { class: "small", text: "set default",

@@ -253,6 +253,80 @@ def probe(base_url: str, token: Optional[str]) -> Dict[str, Any]:
     }
 
 
+def remote_agent_entries(home: Path) -> List[Dict[str, Any]]:
+    """Profile-shaped entries for agents on remembered, currently-healthy
+    peers, named ``<agent>@<host>`` so two machines with same-named agents
+    never collide. DISPLAY shape: never carries the peer token — chat
+    resolution re-reads the record server-side via resolve_remote_agent."""
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for p in load_peers(home):
+        snap = p.get("snapshot") or {}
+        if not snap.get("ok"):
+            continue
+        url = str(p.get("url") or "")
+        host = urlparse(url).hostname or url
+        # The model/instance a remote run lands on: first running server.
+        model, instance = None, None
+        for s in snap.get("servers") or []:
+            if isinstance(s, dict) and s.get("running"):
+                model = s.get("model_name")
+                instance = s.get("name")
+                break
+        for a in snap.get("agents") or []:
+            an = str((a or {}).get("name") or "").strip()
+            full = f"{an}@{host}"
+            if not an or full in seen:
+                continue
+            seen.add(full)
+            out.append({"name": full, "system_prompt": "", "tools": [],
+                        "model_name": model, "remote": True,
+                        "peer_host": host})
+    return out
+
+
+def resolve_remote_agent(home: Path,
+                         full_name: str) -> Optional[Dict[str, Any]]:
+    """Server-side lookup of a ``<agent>@<host>`` name in peers.json.
+
+    Returns a profile-shaped dict WITH the peer credentials (peer_url /
+    peer_token / remote_instance) for h_chat_stream to point the runner at
+    the peer dashboard's /remote/v1 passthrough, or None when the name is
+    not a remote agent or its peer is unhealthy. Never returned to the UI:
+    h_profiles_list uses remote_agent_entries (token-free) instead."""
+    full = str(full_name or "").strip()
+    agent, sep, host = full.rpartition("@")
+    if not sep or not agent or not host:
+        return None
+    for p in load_peers(home):
+        url = str(p.get("url") or "")
+        u = urlparse(url)
+        if (u.hostname or "") != host and (u.netloc or "") != host:
+            continue
+        snap = p.get("snapshot") or {}
+        if not snap.get("ok"):
+            continue
+        match = next((a for a in (snap.get("agents") or [])
+                      if str((a or {}).get("name") or "") == agent), None)
+        if match is None:
+            continue
+        model, instance = None, None
+        for s in snap.get("servers") or []:
+            if isinstance(s, dict) and s.get("running"):
+                model = s.get("model_name")
+                instance = s.get("name")
+                break
+        # No `tools` key on purpose: an absent list means "all default tools"
+        # downstream (agent_runner treats [] as drop-everything). The peer's
+        # own tool grants stay on the peer — its inference answers whatever
+        # this machine's agent loop asks, under this machine's guardrails.
+        return {"name": full, "system_prompt": "",
+                "model_name": model, "remote": True,
+                "peer_url": url, "peer_token": p.get("token") or None,
+                "remote_instance": instance}
+    return None
+
+
 def peer_view(rec: Dict[str, Any]) -> Dict[str, Any]:
     """Public shape for one peer record — token never leaves the backend."""
     snap = rec.get("snapshot") or None

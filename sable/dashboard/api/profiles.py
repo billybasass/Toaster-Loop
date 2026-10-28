@@ -131,6 +131,17 @@ read/merge/atomic-write so the UI never patches raw YAML.
 
     def h_profiles_list(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         profiles, default = self._profiles()
+        # Remote LAN agents (connected peers' profiles, `<agent>@<host>`),
+        # synthesized from the peers.json snapshots — display shape only,
+        # tokens never leave the backend (peers.remote_agent_entries).
+        from .. import peers as peers_mod
+
+        try:
+            remote = peers_mod.remote_agent_entries(self.home)
+        except Exception:  # noqa: BLE001 — a broken peer file never breaks the page
+            remote = []
+        have = {str(p.get("name")) for p in profiles}
+        profiles = list(profiles) + [r for r in remote if r["name"] not in have]
         # Global capability defaults (config `agent.capabilities:`) so the UI
         # can show each toggle's effective state when a profile is silent.
         agent_cfg = self.cfg.agent if isinstance(self.cfg.agent, dict) else {}
@@ -178,7 +189,9 @@ read/merge/atomic-write so the UI never patches raw YAML.
 
     def _resolve_profile(self, name: Optional[str]) -> Optional[Dict[str, Any]]:
         """Look up a profile for /api/chat/stream. Empty/'default' => config
-        default; unknown name => 404."""
+        default; remote LAN agents (`<agent>@<host>`) resolve through the
+        peers registry (WITH peer credentials — server-side only); unknown
+        name => 404."""
         profiles, default = self._profiles()
         if not name or name in ("default", "none"):
             name = default
@@ -187,4 +200,9 @@ read/merge/atomic-write so the UI never patches raw YAML.
         for p in profiles:
             if p.get("name") == name:
                 return p
+        from .. import peers as peers_mod
+
+        remote = peers_mod.resolve_remote_agent(self.home, name)
+        if remote is not None:
+            return remote
         raise HttpError(404, f"no profile {name}", code="unknown_profile")

@@ -21,6 +21,15 @@ export default {
     let catalog = { gguf: [], exists: false, models_dir: "" };
     let engines = [];   // registered inference engines (GET /api/engines)
     let unsubs = [];
+    // This machine's peer-gateway address (non-null when expose_lan is on):
+    // an OpenAI-compatible URL other sable machines can attach our running
+    // models through (GET /api/status -> peer_gateway).
+    let peerGateway = null;
+
+    async function loadGateway() {
+      try { peerGateway = (await api("/api/status")).peer_gateway || null; }
+      catch { peerGateway = null; }
+    }
 
     function showErr(e) {
       errBox.classList.remove("hidden");
@@ -205,7 +214,14 @@ export default {
           el("td", {}, stateBadge, crashBadge ? " " : null, crashBadge,
             circuitBadge ? " " : null, circuitBadge),
           el("td", { class: "hint mono path" },
-            s.base_url || s.attach_url || (s.gguf ? "spawn " + s.gguf : "–")),
+            s.base_url || s.attach_url || (s.gguf ? "spawn " + s.gguf : "–"),
+            // LAN share address: when expose_lan is on, this machine's
+            // dashboard proxies its running models to other sable boxes at
+            // <gateway> (attach it there as a named instance; token authed).
+            s.running && peerGateway
+              ? el("div", { class: "hint" },
+                  "lan: ", peerGateway, copyButton(peerGateway))
+              : null),
           el("td", { class: "hint" }, s.model_name || "–"),
           el("td", {}, el("div", { class: "btnrow" }, ...actions)));
       });
@@ -654,7 +670,9 @@ export default {
     refresh();
     loadModels();
     loadCatalog();
-    loadInstances();
+    // Gateway first: the instances table renders the LAN share address from
+    // it (renderInstances reads peerGateway).
+    loadGateway().finally(() => loadInstances());
     loadEngines();
 
     unsubs.push(bus.on("serve.state", (p) => {
