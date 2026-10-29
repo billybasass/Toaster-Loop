@@ -26,10 +26,12 @@ sends) or ``X-Sable-Token``. Query-string tokens are NOT accepted here —
 inference bodies and URLs end up in logs; keep the secret in headers.
 
 Target selection: the requested body's ``model`` names a running server
-instance (matched against each instance state's model_name); no match (or
-no model field) falls back to the default serve state. The engine's own
-attach key (if any) is injected toward upstream; the caller's dashboard
-token never leaves this box.
+instance (matched against each instance state's model_name); no match falls
+back to the default serve state. A request with NO model (healthchecks,
+/v1/models listings) prefers the default state but also falls back to the
+first live named instance — a peer may serve only named instances, and the
+probe must see that as "serving". The engine's own attach key (if any) is
+injected toward upstream; the caller's dashboard token never leaves this box.
 """
 
 from __future__ import annotations
@@ -102,10 +104,30 @@ def resolve_upstream(app: Any, subpath: str,
             logger.debug("remote gateway: instance scan failed", exc_info=True)
 
     # Default serve endpoint (legacy single-server state, else default row).
+    # For requests WITHOUT a model (healthchecks, /v1/models listings) the
+    # default endpoint is preferred, but a live *named* instance is a valid
+    # serving target too — the peer may run its model only there. A request
+    # WITH a model must still hit the default endpoint: a random named
+    # instance may serve a different model than the one named.
     st = read_serve_state(home) or srv_inst.read_state(home, srv_inst.DEFAULT_ID)
     hit = _from_state(st)
     if hit:
         return hit
+    if not want:
+        try:
+            for inst in srv_inst.load_instances(home, cfg=app.cfg):
+                iid = str(inst.get("id"))
+                st_i = (srv_inst.read_state(home, iid)
+                        if iid != srv_inst.DEFAULT_ID
+                        else st)
+                hit = _from_state(st_i)
+                if hit:
+                    logger.info("remote gateway: no default endpoint serving, "
+                                "falling back to named instance %s", iid)
+                    return hit
+        except Exception:  # noqa: BLE001 — honest 503 below, debug the why
+            logger.debug("remote gateway: named-fallback scan failed",
+                         exc_info=True)
     raise LookupError("no model is serving on this sable — start a server "
                       "instance first")
 

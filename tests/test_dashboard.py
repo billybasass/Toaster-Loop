@@ -6644,6 +6644,79 @@ def test_remote_gateway_nothing_serving_is_503(home__rgw):
         httpd.server_close()
 
 
+def test_remote_gateway_named_instance_only_serves(home__rgw):
+    """Default endpoint down but a *named* instance alive: the no-model
+    healthcheck (GET /remote/v1/models) must still report serving — this is
+    exactly the peer setup (model only on a named instance) that used to 503
+    here while chat-to-a-remote-agent 503'd on the pushing side. A request
+    WITH a model that isn't the named one's model must NOT silently route to
+    the named instance (it may serve something else)."""
+    import httpx
+
+    from fake_server import FakeOpenAIServer
+    from sable.serving import instances as srv_inst
+
+    home = home__rgw
+    with FakeOpenAIServer() as fs:
+        srv_inst.save_instance(home, {
+            "id": "tim", "role": "custom", "default": False, "autostart": False,
+            "created": None, "updated": None})
+        srv_inst.write_state(home, "tim", {
+            "mode": "attach", "base_url": fs.base_url,
+            "model_name": "fake-model",
+            "attach_url": fs.base_url.rsplit("/v1", 1)[0]})
+        httpd, base = _start_lan_server(home)
+        try:
+            hdrs = {"Authorization": "Bearer gw-tok"}
+            # No-model probe (what chat.py's pre-flight does) passes now.
+            r = httpx.get(base + "/remote/v1/models", headers=hdrs, timeout=5)
+            assert r.status_code == 200
+            assert "fake-model" in r.text
+            # No-model chat also lands on the named instance.
+            r = httpx.post(base + "/remote/v1/chat/completions", headers=hdrs,
+                           json={"messages": [{"role": "user",
+                                               "content": "hi"}]}, timeout=10)
+            assert r.status_code == 200
+            # A model that isn't the named instance's must NOT route to it —
+            # honest 503 rather than the wrong upstream.
+            r = httpx.post(base + "/remote/v1/chat/completions", headers=hdrs,
+                           json={"model": "other-model",
+                                 "messages": [{"role": "user",
+                                               "content": "hi"}]}, timeout=10)
+            assert r.status_code == 503
+            assert r.json()["error"]["code"] == "not_serving"
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+
+
+def test_remote_gateway_dead_named_instance_is_503(home__rgw):
+    """Named instance state pointing at a dead endpoint: the fallback scan
+    must skip it (state_alive False) and the probe stays a 503 — no fake
+    liveness from a stale state file."""
+    import httpx
+
+    from sable.serving import instances as srv_inst
+
+    home = home__rgw
+    srv_inst.save_instance(home, {
+        "id": "tim", "role": "custom", "default": False, "autostart": False,
+        "created": None, "updated": None})
+    srv_inst.write_state(home, "tim", {
+        "mode": "attach", "base_url": "http://127.0.0.1:1/v1",
+        "model_name": "stale-model",
+        "attach_url": "http://127.0.0.1:1"})
+    httpd, base = _start_lan_server(home)
+    try:
+        r = httpx.get(base + "/remote/v1/models", timeout=5,
+                      headers={"Authorization": "Bearer gw-tok"})
+        assert r.status_code == 503
+        assert r.json()["error"]["code"] == "not_serving"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
 def test_status_peer_gateway_shape(app__rgw, home__rgw, monkeypatch):
     """expose_lan off => peer_gateway None; on + lan ip => the /remote/v1 URL."""
     from sable.dashboard import app as app_mod
