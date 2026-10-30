@@ -17,7 +17,9 @@ Design notes
   ``serve.state``, ``model.promoted``, ``model.rolled_back``,
   ``trace.recorded``, ``iterate.step``, ``delegation.update`` (Phase 2:
   payload {delegation_id, agent, status, project, thread, child_trace_id,
-  parent_run_id}).
+  parent_run_id}), ``delegation.wake`` (D-17 Phase 2: an inbox wake run was
+  started — payload {thread, run_id, delegation_ids}; the chat panel refreshes
+  the thread to render the synthetic turn).
 """
 
 from __future__ import annotations

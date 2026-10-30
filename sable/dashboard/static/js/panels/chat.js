@@ -193,6 +193,9 @@ export default {
       try { threads = (await api("/api/chat/threads")).threads || []; }
       catch (e) { threads = []; }
       renderThreadList();
+      // Owner chips read delegation lineage off thread summaries (audit §5),
+      // so a thread refresh repaints the Tasks tab too.
+      renderTasksView();
     }
 
     // ---------------------------------------------------- project dialogs
@@ -367,7 +370,7 @@ export default {
         caret,
         el("span", { class: "thread-title", text: p.name }),
         el("span", { class: "thread-meta", text: `${itsThreads.length}` }),
-        planChip(p.id), planToggleBtn(p.id),
+        planChip(p.id),
         el("button", { class: "thread-x proj-x small", text: "✎",
           title: "edit project (name, workspace, description, agents)",
           onclick: (ev) => {
@@ -395,12 +398,13 @@ export default {
       return [head, ...kids];
     }
 
-    // ------------------------------------------------- WP12 plan chips/drawer
+    // --------------------------------------------------- WP12 plan chips/tree
     // One persistent task graph per project (backend: /api/plans/<project>).
-    // Project nodes get a done/total chip; the ▤ button opens a drawer with
-    // task rows (start / in-progress / done / blocked / inline edit), an add
-    // form, an import box (paste brief -> preview parsed tasks -> confirm)
-    // and the guarded loop controls. When config plans.enabled is off the
+    // Project nodes keep a done/total chip in the thread list; the full task
+    // UI (task rows with start / in-progress / done / blocked / inline edit,
+    // an add form, an import box and the guarded loop controls) lives in the
+    // right-side explorer's Tasks tab (audit §5 — it used to be a ▤ drawer
+    // crammed under the project rows). When config plans.enabled is off the
     // API answers 404 plans_disabled and ALL of this hides itself — the same
     // "off means invisible" contract the agent tool family honors.
     // Colors come from .plan-dot-* classes (style.css, design tokens only —
@@ -409,7 +413,6 @@ export default {
     const planCtlCache = new Map(); // key -> persistent form controls (value
                                     // survives SSE re-renders; nodes are moved)
     let plansDisabled = false;
-    let openPlanKey = sget(skey("ui", "", "plan-open")) || null;
 
     function planKey(pid) { return pid || "default"; }
 
@@ -419,13 +422,13 @@ export default {
         const d = await api("/api/plans/" + encodeURIComponent(key));
         planState.set(key, d);
         renderThreadList();
+        if (key === planKey(activeProject)) renderTasksView();
         return d;
       } catch (e) {
         if (e.code === "plans_disabled") {
           plansDisabled = true;
-          openPlanKey = null;
-          sdel(skey("ui", "", "plan-open"));
           renderThreadList();
+          renderTasksView();
         } else if (!silent) toast(e.message, "error");
         return planState.get(key) || null;
       }
@@ -447,26 +450,6 @@ export default {
         title: `plan: ${c.done}/${c.total} done` +
           (looping ? " · loop running" : ""),
         text: `${c.done}/${c.total}` + (looping ? " ↻" : "") });
-    }
-
-    function planToggleBtn(pid) {
-      const key = planKey(pid);
-      const isOpen = openPlanKey === key;
-      return el("button", { class: "thread-x proj-x small", text: "▤",
-        title: isOpen ? "hide project plan" : "show project plan (WP12)",
-        onclick: async (ev) => {
-          ev.stopPropagation();
-          if (isOpen) {
-            openPlanKey = null;
-            sdel(skey("ui", "", "plan-open"));
-            renderThreadList();
-            return;
-          }
-          openPlanKey = key;
-          sset(skey("ui", "", "plan-open"), key);
-          await loadPlan(key, false);
-          renderThreadList();
-        } });
     }
 
     // Deterministic mirror of the server's brief line format for PREVIEW
@@ -592,7 +575,28 @@ export default {
       return c;
     }
 
-    function planTaskRow(key, t, byId) {
+    // Owner chip (audit §5): delegation lineage lives on the thread JSON;
+    // plan tasks link to threads through their runs list. The newest
+    // delegation entry on the task's most recent linked thread wins —
+    // rendered with the chat card's .chip.deleg-status vocabulary.
+    function taskOwnerChip(t) {
+      const runThreads = (t.runs || []).map((r) => r && r.thread)
+        .filter(Boolean);
+      for (const tid of [...runThreads].reverse()) {
+        const th = threads.find((x) => x.id === tid);
+        const dels = th && Array.isArray(th.delegations) ? th.delegations : [];
+        if (!dels.length) continue;
+        const d = dels[dels.length - 1];
+        return el("span", { class: "chip deleg-status " + (d.status || ""),
+          title: "delegated to " + (d.agent || "?") +
+            (d.delegation_id ? " · " + d.delegation_id : "") +
+            (tid ? " · thread " + tid : ""),
+          text: (d.agent || "?") + " · " + (d.status || "unknown") });
+      }
+      return null;
+    }
+
+    function planTaskRow(key, t, byId, depth = 0, cyclic = false) {
       const blockers = (t.deps || []).filter((d) => {
         const dt = byId[d];
         return dt && !["done", "cancelled"].includes(dt.status);
@@ -635,15 +639,41 @@ export default {
         } catch (e) { toast(e.message, "error"); }
       };
       const done = ["done", "cancelled"].includes(t.status);
-      return el("div", { class: "plan-task" },
+      const dangling = (t.deps || []).filter((d) => !byId[d]);
+      // Inline detail expansion (audit §5): the old drawer had no row-click,
+      // so rows expand to show description/details/test-strategy in place.
+      const details = el("div", { class: "plan-task-details hidden" },
+        t.description ? el("p", { text: t.description }) : el("span"),
+        t.details ? el("pre", { class: "mono", text: t.details }) : el("span"),
+        t.test_strategy
+          ? el("p", { class: "hint", text: "test: " + t.test_strategy })
+          : el("span"),
+        (t.status === "pending" && !blockers.length && !dangling.length)
+          ? el("p", { class: "hint", text: "status: pending — unblocked, " +
+              "ready to start" }) : el("span"));
+      const row = el("div", { class: "plan-task" + (depth ? " nested" : ""),
+        tabindex: 0, role: "button",
+        style: depth ? `margin-left:${Math.min(depth, 6) * 12}px` : "",
+        title: "click to expand task details" },
+        el("span", { class: "plan-caret", text: "▸" }),
         el("span", { class: "plan-dot plan-dot-" + t.status,
           title: t.status, text: "●" }),
         el("span", { class: "mono hint", text: t.id }),
         el("span", { class: "plan-title" + (done ? " closed" : ""),
           text: t.title + (t.parent ? ` ↳${t.parent}` : "") }),
+        cyclic
+          ? el("span", { class: "plan-warn",
+            title: "dependency cycle — rendered flat", text: "⚠ cycle" })
+          : el("span"),
+        dangling.length
+          ? el("span", { class: "plan-warn",
+            title: "depends on unknown task(s): " + dangling.join(", "),
+            text: "⚠?" })
+          : el("span"),
         t.priority !== "medium"
           ? el("span", { class: "plan-prio", text: t.priority })
           : el("span"),
+        taskOwnerChip(t) || el("span"),
         blockers.length
           ? el("span", { class: "plan-blockers",
             title: "waiting on unfinished dependencies",
@@ -653,29 +683,78 @@ export default {
             text: (t.labels || []).join(" ") }) : el("span"),
         !done ? el("button", { class: "small", title: "start task " +
           "(new thread seeded with the full task context)", text: "▶",
-          onclick: startTask }) : el("span"),
+          onclick: (ev) => { ev.stopPropagation(); startTask(); } })
+          : el("span"),
         !done && t.status !== "in_progress"
           ? el("button", { class: "small", title: "mark in progress",
-            text: "◐", onclick: () => setStatus("in_progress") })
+            text: "◐",
+            onclick: (ev) => { ev.stopPropagation(); setStatus("in_progress"); } })
           : el("span"),
         !done ? el("button", { class: "small", title: "mark done",
-          text: "✔", onclick: () => setStatus("done") }) : el("span"),
+          text: "✔",
+          onclick: (ev) => { ev.stopPropagation(); setStatus("done"); } })
+          : el("span"),
         !done && t.status !== "blocked"
           ? el("button", { class: "small", title: "mark blocked",
-            text: "⛔", onclick: () => setStatus("blocked") }) : el("span"),
+            text: "⛔",
+            onclick: (ev) => { ev.stopPropagation(); setStatus("blocked"); } })
+          : el("span"),
         el("button", { class: "small", title: "edit task", text: "✎",
-          onclick: editTask }));
+          onclick: (ev) => { ev.stopPropagation(); editTask(); } }));
+      const toggleDetails = () => {
+        const open = !details.classList.contains("hidden");
+        details.classList.toggle("hidden", open);
+        row.querySelector(".plan-caret").textContent = open ? "▸" : "▾";
+      };
+      row.addEventListener("click", toggleDetails);
+      row.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") toggleDetails();
+      });
+      return el("div", { class: "plan-node" }, row, details);
     }
 
-    function planDrawer(key) {
+    // Dependency indentation (audit §5): a task nests under each of its
+    // plan-internal dependencies; dependents render after and indented.
+    // DFS from dependency-free roots with a visited set, so cycles can never
+    // loop forever — cycle members stay unvisited and are appended flat at
+    // the bottom with a ⚠ marker (deps pointing at unknown ids are simply
+    // ignored for nesting; the row gets a subtle ⚠? marker instead).
+    function planTreeRows(key, tasks) {
+      const byId = {};
+      for (const t of tasks) byId[t.id] = t;
+      const kidsOf = new Map();  // dep id -> dependent tasks (render order)
+      const hasPlanDep = new Set();
+      for (const t of tasks) {
+        for (const d of t.deps || []) {
+          if (!byId[d] || d === t.id) continue;
+          if (!kidsOf.has(d)) kidsOf.set(d, []);
+          kidsOf.get(d).push(t);
+          hasPlanDep.add(t.id);
+        }
+      }
+      const rows = [];
+      const visited = new Set();
+      const walk = (t, depth) => {
+        visited.add(t.id);
+        rows.push(planTaskRow(key, t, byId, depth));
+        for (const c of kidsOf.get(t.id) || [])
+          if (!visited.has(c.id)) walk(c, depth + 1);
+      };
+      for (const t of tasks)
+        if (!hasPlanDep.has(t.id) && !visited.has(t.id)) walk(t, 0);
+      // Leftovers = cycle members: degrade to flat rows with a warning.
+      for (const t of tasks)
+        if (!visited.has(t.id)) rows.push(planTaskRow(key, t, byId, 0, true));
+      return rows;
+    }
+
+    function planPanel(key) {
       const d = planState.get(key);
       if (!d) return null;
       const c = planCtl(key);
-      const byId = {};
-      for (const t of d.tasks) byId[t.id] = t;
       const rows = d.tasks.length
-        ? d.tasks.map((t) => planTaskRow(key, t, byId))
-        : [el("p", { class: "hint", text: "plan is empty — add a task or " +
+        ? planTreeRows(key, d.tasks)
+        : [el("p", { class: "hint", text: "no plans yet — add a task or " +
             "import a brief" })];
       if (d.validate && !d.validate.ok)
         rows.unshift(el("p", { class: "plan-invalid",
@@ -691,7 +770,7 @@ export default {
           ? `last loop: ${prog.status}` +
             (prog.stop_reason ? ` (${prog.stop_reason})` : "")
           : "";
-      return el("div", { class: "plan-drawer" },
+      return el("div", { class: "plan-panel" },
         el("div", { class: "btnrow" }, c.btnLoop, c.btnCancel),
         loopLine ? el("div", { class: "hint mono", text: loopLine }) : el("span"),
         ...rows,
@@ -706,6 +785,32 @@ export default {
           el("span", { class: "hint", text: "max tasks per loop run" })));
     }
 
+    // Tasks tab of the explorer (audit §5): renders the active project's
+    // plan panel into the right-side slot. Empty states: no project ->
+    // "Select a project"; plans off -> disabled notice; empty graph -> hint.
+    function renderTasksView() {
+      if (explorerTab !== "tasks") return;
+      if (!activeProject) {
+        tasksHost.replaceChildren(el("div", { class: "hint",
+          text: "Select a project" }));
+        return;
+      }
+      if (plansDisabled) {
+        tasksHost.replaceChildren(el("div", { class: "hint",
+          text: "plans are disabled (config plans.enabled)" }));
+        return;
+      }
+      const key = planKey(activeProject);
+      const panel = planPanel(key);
+      if (!panel) {
+        tasksHost.replaceChildren(el("div", { class: "hint",
+          text: "loading…" }));
+        loadPlan(key);
+        return;
+      }
+      tasksHost.replaceChildren(panel);
+    }
+
     function renderThreadList() {
       const nodes = [
         el("button", { class: "new-project", text: "＋ New project",
@@ -718,10 +823,6 @@ export default {
           String(a.name).localeCompare(String(b.name)))) {
         nodes.push(...projectNode(p, threads.filter(
           (t) => t.project === p.id)));
-        if (openPlanKey === planKey(p.id)) {
-          const drawer = planDrawer(planKey(p.id));
-          if (drawer) nodes.push(drawer);
-        }
       }
       // Unfiled: threads with null/absent project — including legacy chat
       // files written before projects existed — and threads pointing at a
@@ -738,7 +839,7 @@ export default {
           ? "▸" : "▾" }),
         el("span", { class: "thread-title", text: "Unfiled" }),
         el("span", { class: "thread-meta", text: `${unfiled.length}` }),
-        planChip(null), planToggleBtn(null));
+        planChip(null));
       uHead.querySelector(".proj-caret").addEventListener("click", (ev) => {
         ev.stopPropagation();
         if (collapsed.has("__unfiled")) collapsed.delete("__unfiled");
@@ -752,20 +853,19 @@ export default {
       nodes.push(uHead);
       if (!collapsed.has("__unfiled"))
         nodes.push(...unfiled.map(threadRow));
-      if (openPlanKey === "default") {
-        const drawer = planDrawer("default");
-        if (drawer) nodes.push(drawer);
-      }
       threadList.replaceChildren(...nodes);
     }
 
-    // ------------------------------------------- workspace file explorer drawer
-    // Right-side drawer on the chat page listing the ACTIVE project's workspace
-    // via GET /api/fs/tree (one lazy level per expand, cached per panel
-    // session). Strictly read-only: clicking a file inserts its relative path
-    // into the composer at the caret. Hidden entirely with no active project;
-    // width persisted under the scoped ui key (pass 3 #25).
+    // --------------------------------------- workspace explorer (right aside)
+    // Right-side aside on the chat page with a Files | Tasks segmented toggle
+    // (audit §5). FILES: lists the ACTIVE project's workspace via
+    // GET /api/fs/tree (one lazy level per expand, cached per panel session).
+    // Strictly read-only: clicking a file inserts its relative path into the
+    // composer at the caret. TASKS: renders the WP12 plan tree (renderTasksView).
+    // Width AND the selected tab persist under scoped ui keys (pass 3 #25);
+    // hidden entirely with no active project on the Files tab.
     const EXP_WIDTH_KEY = skey("ui", "", "explorer-width");
+    const EXP_TAB_KEY = skey("ui", "", "explorer-tab");
     const explorerToggle = el("button", { class: "seg", text: "Files",
       title: "toggle workspace file explorer" });
     const explorerRefresh = el("button", {
@@ -775,21 +875,58 @@ export default {
     const explorerTitle = el("span", { class: "explorer-title hint",
       text: "workspace" });
     const explorerTree = el("div", { class: "explorer-tree mono" });
+    // Tasks tab host (audit §5): the WP12 plan tree moved out of the left
+    // thread-list drawer into this slot.
+    const tasksHost = el("div", { class: "explorer-tree plan-host hidden" });
+    // Segmented Files | Tasks control at the top of the aside.
+    const tabFiles = el("button", { class: "seg", text: "Files",
+      title: "browse the project workspace files" });
+    const tabTasks = el("button", { class: "seg", text: "Tasks",
+      title: "project plan task tree (WP12)" });
+    const explorerTabs = el("div", { class: "explorer-tabs", role: "tablist",
+      "aria-label": "explorer view" }, tabFiles, tabTasks);
+    let explorerTab = sget(EXP_TAB_KEY) === "tasks" ? "tasks" : "files";
     // Read-only file preview (GET /api/fs/read): opened from the eye button
     // on file rows; insert-at-caret stays the row click.
     const explorerPreview = el("div", { class: "explorer-preview hidden mono" });
     const explorerResize = el("div", { class: "explorer-resize",
       title: "drag to resize" });
     const explorerHost = el("aside", { class: "explorer hidden",
-      "aria-label": "workspace files" },
+      "aria-label": "workspace explorer" },
       explorerResize,
       el("div", { class: "explorer-head" },
-        explorerRefresh, explorerHiddenBtn, explorerTitle),
-      explorerTree, explorerPreview);
+        explorerTabs, explorerRefresh, explorerHiddenBtn, explorerTitle),
+      explorerTree, tasksHost, explorerPreview);
     let explorerOpen = false;
     let explorerProjectId = null;     // project the cached tree belongs to
     let fsShowHidden = sget(skey("ui", "", "explorer-hidden"), "") === "1";
     const fsCache = new Map();  // `${pid}:${hidden}:${relPath}` -> {entries, truncated}
+
+    function setExplorerTab(tab) {
+      explorerTab = tab;
+      sset(EXP_TAB_KEY, tab);
+      tabFiles.classList.toggle("active", tab === "files");
+      tabTasks.classList.toggle("active", tab === "tasks");
+      explorerTree.classList.toggle("hidden", tab !== "files");
+      tasksHost.classList.toggle("hidden", tab !== "tasks");
+      // File-only affordances retire on the Tasks tab.
+      explorerHiddenBtn.classList.toggle("hidden", tab !== "files");
+      explorerTitle.textContent = tab === "tasks" ? "plan" : "workspace";
+      explorerRefresh.title = tab === "tasks"
+        ? "reload the plan" : "reload the tree";
+      syncExplorerAvailability();
+      if (tab === "tasks") {
+        renderTasksView();
+        // Kick a fresh fetch when switching to Tasks (mirrors how opening
+        // the Files tab reloads the root when the project changed).
+        if (activeProject) loadPlan(planKey(activeProject));
+      } else if (explorerOpen && activeProject &&
+          explorerProjectId !== activeProject) {
+        loadExplorerRoot();
+      }
+    }
+    tabFiles.addEventListener("click", () => setExplorerTab("files"));
+    tabTasks.addEventListener("click", () => setExplorerTab("tasks"));
 
     function explorerWidth() {
       const w = parseInt(localStorage.getItem(EXP_WIDTH_KEY) || "", 10);
@@ -799,14 +936,17 @@ export default {
       explorerHost.style.width = explorerWidth() + "px";
     }
 
-    // No active project => drawer hidden, toggle disabled (clicking is a no-op).
+    // No active project => Files tab is inert (toggle disabled, aside
+    // hidden). The Tasks tab still opens: it shows the "Select a project"
+    // empty state rather than being unreachable.
     function syncExplorerAvailability() {
       const has = !!activeProject;
-      explorerToggle.disabled = !has;
+      const filesTab = explorerTab === "files";
+      explorerToggle.disabled = !has && filesTab;
       explorerToggle.title = has
         ? "toggle workspace file explorer"
         : "select a project to browse its workspace";
-      if (!has) {
+      if (!has && filesTab) {
         explorerOpen = false;
         explorerHost.classList.add("hidden");
       }
@@ -820,7 +960,11 @@ export default {
       explorerPreview.replaceChildren();
       delete explorerPreview.dataset.path;
       syncExplorerAvailability();
-      if (explorerOpen && activeProject) loadExplorerRoot();
+      if (explorerOpen && activeProject) {
+        if (explorerTab === "tasks") loadPlan(planKey(activeProject));
+        else loadExplorerRoot();
+      }
+      renderTasksView();
     }
 
     // Race-safe: the project is captured at call time and travels with the
@@ -955,15 +1099,28 @@ export default {
     }
 
     explorerToggle.addEventListener("click", () => {
+      // Tasks tab stays openable without a project (empty state explains).
+      if (explorerTab === "tasks") {
+        explorerOpen = !explorerOpen;
+        explorerHost.classList.toggle("hidden", !explorerOpen);
+        renderTasksView();
+        return;
+      }
       if (!activeProject) return; // disabled state: no-op
       explorerOpen = !explorerOpen;
       explorerHost.classList.toggle("hidden", !explorerOpen);
       if (explorerOpen && explorerProjectId !== activeProject)
         loadExplorerRoot();
     });
-    // Full refresh: drop every cached level for this project (previously only
-    // the root key was dropped, so expanded children stayed stale forever).
+    // Full refresh. Files: drop every cached level for this project
+    // (previously only the root key was dropped, so expanded children stayed
+    // stale forever). Tasks: refetch the plan from the API.
     explorerRefresh.addEventListener("click", () => {
+      if (explorerTab === "tasks") {
+        if (activeProject) loadPlan(planKey(activeProject), false);
+        renderTasksView();
+        return;
+      }
       const prefix = activeProject + ":";
       for (const k of [...fsCache.keys()])
         if (k.startsWith(prefix)) fsCache.delete(k);
@@ -1876,17 +2033,24 @@ export default {
     setMode(mode);
     renderMsgs();
     applyExplorerWidth();
+    setExplorerTab(explorerTab);   // paints the segmented control + active pane
     syncExplorerAvailability();
     loadProjects().then(() => { renderThreadList(); syncExplorerAvailability(); loadAllPlans(); });
     loadProfiles();
     // WP12: live plan updates from any surface (agent runs, CLI, the loop).
     unsubs.push(bus.on("plan.updated", (p) => {
-      // Refresh just the changed project's drawer/chip (cheap single GET).
+      // Refresh just the changed project's chip/tree (cheap single GET;
+      // loadPlan re-renders the Tasks view when that project is shown).
       loadPlan((p && p.project) || "default");
     }));
     unsubs.push(bus.on("plan.loop", () => {
       for (const key of planState.keys()) loadPlan(key);
       renderThreadList();
+    }));
+    // Owner chips read delegation status off the thread summaries; refresh
+    // them live as delegations settle (audit §5).
+    unsubs.push(bus.on("delegation.update", () => {
+      if (explorerTab === "tasks") loadThreads();
     }));
     // Reopen the thread that was open before navigating away (bug fix: the
     // panel used to start blank, hiding both the transcript and any run

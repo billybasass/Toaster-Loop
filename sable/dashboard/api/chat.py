@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 
 from ...serving import instances as srv_inst
@@ -169,38 +169,12 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                            res: Any, t0: float) -> None:
         """Send one finished remote-agent run back to the model's owner.
 
-        POSTs the transcript to the peer dashboard's /remote/v1/traces/import
-        (same bearer auth as inference). The profile name is mapped back to
-        the peer's local agent name so their easy-training scoping sees it as
-        one of its own traces. Best-effort by contract: any failure is
-        logged and swallowed by the caller."""
-        import httpx
+        Thin wrapper over ``peers.push_remote_trace`` (shared with delegated
+        children — see core/delegation.py). Best-effort by contract: any
+        failure is logged and swallowed by the caller."""
+        from .. import peers as peers_mod
 
-        purl = str(prof.get("peer_url") or "")
-        if not purl:
-            return
-        full = str(prof.get("name") or "")
-        local_name = full.rpartition("@")[0] or None
-        body = {
-            "task": prompt[:8000],
-            "messages": [m for m in (getattr(res, "messages", None) or [])
-                         if isinstance(m, dict)],
-            "profile": local_name,
-            "model_name": str(getattr(res, "model_alias", None)
-                              or prof.get("model_name") or "model"),
-            "base_url": str(getattr(res, "base_url", None) or ""),
-            "completed": bool(getattr(res, "completed", False)),
-            "tokens_in": getattr(res, "tokens_in", None),
-            "tokens_out": getattr(res, "tokens_out", None),
-            "duration_s": round(time.monotonic() - t0, 3),
-        }
-        headers = {"X-Sable-Token": prof["peer_token"]} \
-            if prof.get("peer_token") else {}
-        r = httpx.post(purl.rstrip("/") + "/remote/v1/traces/import",
-                       json=body, headers=headers, timeout=15.0)
-        if r.status_code >= 400:
-            logger.info("remote trace push to %s failed: HTTP %s",
-                        purl, r.status_code)
+        peers_mod.push_remote_trace(prof, prompt, res, t0)
 
     def h_proxy_chat(self, q: Dict[str, str], b: Dict[str, Any]) -> ApiResponse:
         import httpx
@@ -310,6 +284,13 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         # peer token from peers.json). The agent loop — tools, workspace,
         # project files, traces — stays entirely local; only completions
         # cross the network. A never-probed/offline peer is a clean 503 here.
+        # Extra headers merged into every runner request. For remote agents
+        # this carries X-Sable-Instance so a multi-instance peer routes the
+        # completion to the SAME instance the snapshot named (the selector
+        # rides a header because the runner builds URLs as
+        # f"{base_url}/chat/completions" — a ?instance= query would land
+        # mid-path). None keeps every existing call byte-identical.
+        extra_headers: Optional[Dict[str, str]] = None
         if prof and prof.get("remote"):
             from urllib.parse import urlparse as _urlparse
 
@@ -319,6 +300,9 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
             base = purl.rstrip("/") + "/remote/v1"
             key = prof.get("peer_token") or None
             model = str(prof.get("model_name") or "model")
+            remote_inst = str(prof.get("remote_instance") or "").strip()
+            if remote_inst:
+                extra_headers = {"X-Sable-Instance": remote_inst}
             if not purl or not _hc(base, timeout=5.0, api_key=key):
                 raise HttpError(
                     503, f"remote sable at {_urlparse(purl).netloc or purl} is "
@@ -354,6 +338,61 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         if thread_id and not self._THREAD_ID_RE.match(thread_id):
             thread_id = None
 
+        # WP12 plans: an optional plan task id on the run body stamps every
+        # trace this run records (additive plan_task field), so traces link
+        # task<->trace both ways. Absent => None => identical to before.
+        _plan_task = str(b.get("plan_task") or "").strip() or None
+
+        # D-17 Phase 2: the run-spawn body below (single-flight check through
+        # SSE stream admission) is extracted VERBATIM into _spawn_chat_run so
+        # the inbox wake path can reuse it — pure refactor, no behavior
+        # change. drain_inbox=True implements the "user wins" rule (§4.3):
+        # a real user message consumes pending delegation-inbox entries into
+        # its own prompt block instead of waiting on a wake run.
+        return self._spawn_chat_run(
+            prompt=prompt, prof=prof, base=base, key=key, model=model,
+            thread_id=thread_id, history=history,
+            previous_summary=previous_summary, prof_tools=prof_tools,
+            project_id=project_id, proj=proj,
+            sampling_override=sampling_override, ctx_window=ctx_window,
+            extra_headers=extra_headers, plan_task=_plan_task,
+            drain_inbox=True)
+
+    def _spawn_chat_run(self, *, prompt: str,
+                        prof: Optional[Dict[str, Any]],
+                        base: str, key: Optional[str], model: str,
+                        thread_id: Optional[str],
+                        history: Any = None,
+                        previous_summary: Optional[str] = None,
+                        prof_tools: Optional[List[str]] = None,
+                        project_id: Optional[str] = None,
+                        proj: Optional[Dict[str, Any]] = None,
+                        sampling_override: Optional[Dict[str, Any]] = None,
+                        ctx_window: int = 0,
+                        extra_headers: Optional[Dict[str, str]] = None,
+                        plan_task: Optional[str] = None,
+                        run_id: Optional[str] = None,
+                        inbox_wake: bool = False,
+                        drain_inbox: bool = False) -> ApiResponse:
+        """Spawn one chat run and return the streaming SSE response.
+
+        Extracted verbatim from ``h_chat_stream`` (D-17 Phase 2, spec §4.1:
+        "factored by EXTRACTING the existing run-spawn body ... used by both
+        handlers"). Both the normal user-message path and the inbox wake path
+        (``start_inbox_wake_run``) call this; every preserved invariant lives
+        here: the per-thread single-flight 409 check, SSE frame buffering with
+        deferred registration, the cancel Event registered as
+        ``delegation_context["cancel_event"]``, end-of-run transcript
+        persistence, and one ``runner.run()`` = one trace.
+
+        Wake-only knobs (defaults keep the user path byte-identical):
+        ``run_id`` pre-selects the id (so delivered_run_id can be stamped
+        before the worker starts), ``inbox_wake`` marks
+        ``delegation_context["inbox_wake"] = True`` (trace metadata only), and
+        ``drain_inbox`` folds any pending inbox entries into the prompt.
+        Raises HttpError(409) when the thread already has an in-flight run —
+        wake callers catch it and leave their entries pending.
+        """
         # Single-flight per thread: a second POST for a thread with an
         # in-flight run gets a clean 409 carrying the active run_id, instead
         # of silently spawning a duplicate agent (the orphan-duplicate cascade
@@ -367,8 +406,37 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                                         "thread — stop it first",
                                         code="run_in_flight",
                                         extra={"run_id": rid})
-        run_id = uuid.uuid4().hex[:12]
+        if run_id is None:
+            run_id = uuid.uuid4().hex[:12]
         cancel = threading.Event()
+        # D-17 §4.3 row 1 ("user wins"): a real user message on a thread with
+        # pending inbox entries drains them into THIS turn's prompt (the user
+        # never waits on a wake). Runs only after the single-flight check, so
+        # entries are consumed by exactly one consumer.
+        if drain_inbox and thread_id:
+            prompt = self._drain_inbox_into_prompt(thread_id, prompt, run_id)
+        # Ping-pong guard (spec §10 risk #2): any real user-initiated run on
+        # the thread clears its consecutive-wake streak.
+        if thread_id and not inbox_wake:
+            try:
+                from ...core import delegation as _delegation
+
+                _delegation.reset_wake_streak(thread_id)
+            except Exception:  # noqa: BLE001 — bookkeeping never breaks a run
+                pass
+        # Wake hook registration (spec §4.1): the dashboard owns run startup,
+        # so it registers itself lazily per active thread as the wake
+        # deliverer. Hook-less threads (CLI, no dashboard yet) simply keep
+        # their entries pending until a user message drains them.
+        if thread_id:
+            try:
+                from ...core import delegation as _delegation
+
+                _delegation.register_wake_hook(
+                    thread_id,
+                    lambda _t=thread_id: self.start_inbox_wake_run(_t))
+            except Exception:  # noqa: BLE001 — wake wiring never breaks a run
+                pass
         # Registry entry is created INSIDE gen() (below), not here: an SSE
         # admission rejection (server.py sse_slots cap) never starts the
         # generator, and an eagerly-created entry would then never be marked
@@ -396,13 +464,9 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         rec_profile = (_prof_name
                        if _easy.enabled and _prof_name
                        and _prof_name in _easy.all_profiles else None)
-        # WP12 plans: an optional plan task id on the run body stamps every
-        # trace this run records (additive plan_task field), so traces link
-        # task<->trace both ways. Absent => None => identical to before.
-        _plan_task = str(b.get("plan_task") or "").strip() or None
         recorder = make_recorder(self.cfg, on_record=_on_record,
                                  project=project_id, profile=rec_profile,
-                                 plan_task=_plan_task)
+                                 plan_task=plan_task)
 
         def gen() -> Iterator[str]:
             # First iteration = the stream was admitted: register now so a
@@ -595,6 +659,16 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                         "message": f"{type(e).__name__}: {e}"}))
                 finally:
                     _finish()
+                    # D-17 §4.3: a run ending frees the thread's single-flight
+                    # slot — nudge the wake watcher so queued inbox entries
+                    # are delivered now instead of at the next retry tick.
+                    if thread_id:
+                        try:
+                            from ...core import delegation as _delegation
+
+                            _delegation.nudge_delivery()
+                        except Exception:  # noqa: BLE001 — never eat the run
+                            pass
 
             def _make_runner():
                 from ...core.agent_runner import create_runner
@@ -622,18 +696,30 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                                      # precedence below profile, above config.
                                      project_workspace_dir=(proj or {}).get(
                                          "workspace_dir"),
-                                     # Phase 2 (delegation): run metadata for
-                                     # list_agents/delegate_task/check_delegation.
-                                     delegation_context={
-                                         "cfg": self.cfg,
-                                         "base_url": base, "model": model,
-                                         "profile": prof.get("name") if prof else None,
-                                         "project": project_id,
-                                         "thread": thread_id,
-                                         "run_id": run_id,
-                                         "depth": 0,
-                                         "on_update": _on_delegation_update,
-                                     },
+                                    # Phase 2 (delegation): run metadata for
+                                    # list_agents/delegate_task/check_delegation.
+                                    delegation_context={
+                                        "cfg": self.cfg,
+                                        "base_url": base, "model": model,
+                                        "profile": prof.get("name") if prof else None,
+                                        "project": project_id,
+                                        "thread": thread_id,
+                                        "run_id": run_id,
+                                        "depth": 0,
+                                        "on_update": _on_delegation_update,
+                                        # Audit §2 bug B: parent-run cancel
+                                        # propagation — h_chat_cancel /
+                                        # shutdown_chat_runs set this event;
+                                        # execute_delegation watches it and
+                                        # flips the child's cooperative
+                                        # cancel so a Stop on the parent also
+                                        # stops in-flight delegations.
+                                        "cancel_event": cancel,
+                                        # D-17 Phase 2: trace metadata only —
+                                        # True when this run was started by
+                                        # the inbox wake watcher.
+                                        "inbox_wake": bool(inbox_wake),
+                                    },
                                      # Phase 6 + per-profile thinking knobs:
                                      # profile `sampling:` wins over the bound
                                      # instance's, which wins over global.
@@ -652,7 +738,11 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                                       # event; the runner polls it at loop
                                       # boundaries and stops cleanly with
                                       # failure_reason="cancelled".
-                                      cancel_event=cancel)
+                                      cancel_event=cancel,
+                                      # Remote agents: X-Sable-Instance so a
+                                      # multi-instance peer routes to the
+                                      # snapshot's instance. None otherwise.
+                                      extra_headers=extra_headers)
             # The worker owns the run's whole lifecycle (create -> stream ->
             # persist -> finish). This generator is ONLY a reader: dropping it
             # (client navigated away, broken pipe) never affects the run.
@@ -660,6 +750,130 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
             yield from _follow_chat_run(run)
 
         return ApiResponse(200, stream=gen())
+
+    # --------------------------------------------------- D-17 Phase 2: inbox
+
+    def _drain_inbox_into_prompt(self, thread_id: str, prompt: str,
+                                 run_id: Optional[str] = None) -> str:
+        """Consume any pending delegation-inbox entries for the thread into a
+        context block prepended to the user's prompt (the "user wins" rule,
+        D-17 §4.3 / spec §4.4 — same header as a wake turn). Marks them
+        delivered against this run id. Best-effort: store failures leave the
+        prompt untouched (a broken inbox must never break a user message)."""
+        try:
+            from ...core import delegation as _delegation
+
+            rows = _delegation.delegation_store.take_pending_inbox(
+                thread_id, cfg=self.cfg)
+        except Exception:  # noqa: BLE001
+            return prompt
+        if not rows:
+            return prompt
+        try:
+            _delegation.delegation_store.mark_delivered_run(
+                [str(r.get("delegation_id")) for r in rows],
+                run_id or "user-turn", cfg=self.cfg)
+        except Exception:  # noqa: BLE001 — provenance is best-effort
+            pass
+        return _delegation.format_inbox_message(rows) + "\n\n" + prompt
+
+    def start_inbox_wake_run(self, thread_id: str) -> Dict[str, Any]:
+        """D-17 wake path: start a FRESH chat run on the thread whose user
+        message is the synthetic "delegation results arrived" block built from
+        ``take_pending_inbox``. The wake run is an ordinary run in every
+        respect (own run_id + cancel Event, transcript persistence, one
+        trace) carrying ``delegation_context["inbox_wake"] = True``.
+
+        Single-flight is obeyed exactly like a user message: if the thread
+        already has an in-flight run NOTHING is consumed and this returns
+        ``{started: False, busy: True}`` — entries stay pending for the next
+        watcher tick (default ``delegation.wake_retry_seconds``) or are
+        drained by a real user message. A wake never 409s outward (nobody
+        POSTed); it just doesn't start yet.
+
+        On success publishes the additive bus event ``delegation.wake``
+        ``{"thread", "run_id", "delegation_ids"}`` and stamps
+        ``delivered_run_id`` on each consumed entry. Returns a plain dict;
+        never raises (the watcher thread must survive anything)."""
+        from ...core import delegation as _delegation
+
+        with self._chat_runs_lock:
+            for rid, r in self._chat_runs.items():
+                if not r.get("done") and r.get("thread") == thread_id:
+                    return {"started": False, "busy": True, "run_id": rid}
+        try:
+            rows = _delegation.delegation_store.take_pending_inbox(
+                thread_id, cfg=self.cfg)
+        except Exception as e:  # noqa: BLE001
+            return {"started": False, "error": f"store unavailable: {e}"}
+        if not rows:
+            return {"started": False, "empty": True}
+
+        def _requeue() -> None:
+            for r in rows:
+                try:
+                    _delegation.delegation_store.update_delegation(
+                        str(r.get("delegation_id")), cfg=self.cfg,
+                        inbox_state="pending")
+                except Exception:  # noqa: BLE001 — best-effort rollback
+                    pass
+
+        prompt = _delegation.format_inbox_message(rows)
+        run_id = uuid.uuid4().hex[:12]
+        try:
+            prof = self._resolve_profile(None)
+            base, key, model = self._resolve_chat_target(
+                (prof or {}).get("server_instance"))
+            if prof and prof.get("model_name"):
+                model = str(prof["model_name"])
+            _inst_sampling = self._instance_sampling(
+                (prof or {}).get("server_instance"))
+            _prof_sampling = (prof or {}).get("sampling")
+            if not isinstance(_prof_sampling, dict):
+                _prof_sampling = {}
+            resp = self._spawn_chat_run(
+                prompt=prompt, prof=prof, base=base, key=key, model=model,
+                thread_id=thread_id, run_id=run_id, inbox_wake=True,
+                sampling_override={**_inst_sampling, **_prof_sampling},
+                ctx_window=self._instance_context_length(
+                    (prof or {}).get("server_instance")))
+        except HttpError as e:
+            # Lost the single-flight race to a real user message (or nothing
+            # is serving): nothing started, so nothing was consumed.
+            _requeue()
+            return {"started": False, "busy": e.code == "run_in_flight",
+                    "error": e.message}
+        except Exception as e:  # noqa: BLE001 — watcher must never die
+            _requeue()
+            return {"started": False, "error": f"{type(e).__name__}: {e}"}
+        # Admit the stream (first frame): this registers the run in the
+        # registry and starts its worker thread. Nobody reads this synthetic
+        # stream live; frames buffer for any attached panel exactly like a
+        # user run (re-attach via /api/chat/runs/<id>/stream still works).
+        stream = resp.stream
+        if stream is not None:
+            try:
+                next(iter(stream))
+            except (StopIteration, ValueError):  # pragma: no cover - defensive
+                pass
+        ids = [str(r.get("delegation_id")) for r in rows]
+        try:
+            _delegation.delegation_store.mark_delivered_run(ids, run_id,
+                                                            cfg=self.cfg)
+        except Exception:  # noqa: BLE001 — provenance is best-effort
+            pass
+        self.bus.publish("delegation.wake", {
+            "thread": thread_id, "run_id": run_id, "delegation_ids": ids})
+        return {"started": True, "run_id": run_id, "delegation_ids": ids}
+
+    def h_chat_wake(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
+        """POST /api/chat/wake {"thread": id}: force a delivery attempt now
+        (spec §4.5) — a deterministic trigger for tests and the UI instead of
+        sleeping on the watcher interval. Returns {started, run_id?}."""
+        thread_id = str(b.get("thread") or "").strip()
+        if not thread_id or not self._THREAD_ID_RE.match(thread_id):
+            raise HttpError(400, "thread (valid id) required")
+        return self.start_inbox_wake_run(thread_id)
 
     def h_chat_run_stream(self, q: Dict[str, str], b: Dict[str, Any],
                           run_id: str = "") -> ApiResponse:

@@ -231,6 +231,8 @@ dependency wiring only. Route handlers resolve by name via getattr.
         ("POST", "/api/proxy/chat", "h_proxy_chat"),
         ("POST", "/api/chat/stream", "h_chat_stream"),
         ("POST", "/api/chat/cancel", "h_chat_cancel"),
+        # D-17 Phase 2: force an inbox delivery attempt now (spec §4.5)
+        ("POST", "/api/chat/wake", "h_chat_wake"),
         ("GET", "/api/chat/runs", "h_chat_runs"),
         ("GET", "/api/chat/runs/<run_id>/stream", "h_chat_run_stream"),
         ("GET", "/api/chat/threads", "h_threads_list"),

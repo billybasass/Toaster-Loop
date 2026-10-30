@@ -63,12 +63,20 @@ def _state_base(st: Optional[Dict[str, Any]]) -> Optional[Tuple[str, Optional[st
 
 
 def resolve_upstream(app: Any, subpath: str,
-                     model: Optional[str] = None) -> Tuple[str, Optional[str]]:
+                     model: Optional[str] = None,
+                     instance: Optional[str] = None) -> Tuple[str, Optional[str]]:
     """Upstream URL + engine api_key for a /remote request.
 
     ``subpath`` is the part after the /v1 marker ("chat/completions",
     "models") or "tokenize" for the root form. Raises LookupError with a
     user-facing message when nothing serving matches.
+
+    ``instance`` (X-Sable-Instance header): when set, resolve FIRST by
+    matching the server-instance id or name across the instances registry —
+    a multi-instance peer must be able to pin a request to the instance its
+    snapshot named instead of landing everything on the first match. A named
+    instance that exists but is not serving raises LookupError (honest 503);
+    an unknown name falls through to today's model/default flow unchanged.
     """
     from pathlib import Path
 
@@ -86,6 +94,33 @@ def resolve_upstream(app: Any, subpath: str,
         if subpath == "tokenize":
             return _root(base) + "/tokenize", key
         return base.rstrip("/") + "/" + subpath.lstrip("/"), key
+
+    # Explicit instance selector wins over model-name matching.
+    want_inst = str(instance or "").strip()
+    if want_inst:
+        try:
+            insts = srv_inst.load_instances(home, cfg=app.cfg)
+        except Exception:  # noqa: BLE001 — fall through to the default flow
+            logger.debug("remote gateway: instance scan failed", exc_info=True)
+            insts = []
+        for inst in insts:
+            if want_inst not in (str(inst.get("id")), str(inst.get("name"))):
+                continue
+            iid = str(inst.get("id"))
+            st = srv_inst.read_state(home, iid)
+            if iid == srv_inst.DEFAULT_ID and not st:
+                st = read_serve_state(home)
+            if not st or not srv_inst.state_alive(st):
+                raise LookupError(
+                    f"server instance {instance} is not running on this sable")
+            hit = _from_state(st)
+            if hit:
+                return hit
+            raise LookupError(
+                f"server instance {instance} is not running on this sable")
+        # Unknown instance name: honest error beats silently answering from a
+        # different instance than the caller pinned.
+        raise LookupError(f"server instance {instance} is not running on this sable")
 
     # Named-instance match by served model name (the runner sends the peer's
     # snapshot model_name as the request model).

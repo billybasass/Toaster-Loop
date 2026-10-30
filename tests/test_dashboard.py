@@ -6455,14 +6455,20 @@ def app__rgw(home__rgw):
 
 
 def _seed_peer__rgw(home, url="http://192.0.2.9:55429", token="peer-tok",
-                    ok=True, agent="tim", model="Qwen3-27B"):
+                    ok=True, agent="tim", model="Qwen3-27B",
+                    persona="You are Tim on the render node."):
     from sable.dashboard import peers as peers_mod
 
     rec = peers_mod.upsert_peer(home, url, token, name=None)
     snap = ({"ok": True, "probed_at": "2026-01-01T00:00:00+00:00",
-             "agents": [{"name": agent, "default": False}],
+             "agents": [{"name": agent, "default": False,
+                         "system_prompt": persona}],
+             # second running instance: multi-instance peers must route via
+             # X-Sable-Instance instead of landing on the first match.
              "servers": [{"name": "tim", "running": True,
-                          "model_name": model}]}
+                          "model_name": model},
+                         {"name": "tim-2", "running": True,
+                          "model_name": "Other-32B"}]}
             if ok else
             {"ok": False, "probed_at": "2026-01-01T00:00:00+00:00",
              "error": "boom"})
@@ -6501,6 +6507,101 @@ def test_resolve_remote_agent_carries_creds(home__rgw):
     assert peers_mod.resolve_remote_agent(home__rgw, "tim@192.0.2.10") is None
     _seed_peer__rgw(home__rgw, ok=False)  # peer went unhealthy
     assert peers_mod.resolve_remote_agent(home__rgw, "tim@192.0.2.9") is None
+
+
+def test_resolve_remote_agent_carries_persona(home__rgw):
+    """§1b: the snapshot persona travels instead of the old empty string."""
+    from sable.dashboard import peers as peers_mod
+
+    _seed_peer__rgw(home__rgw)
+    got = peers_mod.resolve_remote_agent(home__rgw, "tim@192.0.2.9")
+    assert got is not None
+    assert got["system_prompt"] == "You are Tim on the render node."
+    # first running instance recorded for X-Sable-Instance routing
+    assert got["remote_instance"] == "tim"
+
+
+def test_probe_snapshot_caps_persona():
+    """§1a: probe snapshots carry system_prompt capped at 8000 chars."""
+    import httpx
+
+    from sable.dashboard import peers as peers_mod
+
+    class Resp:
+        status_code = 200
+
+        def __init__(self, payload):
+            self._p = payload
+
+        def json(self):
+            return self._p
+
+    routes = {"/api/status": {"version": "x", "server": {}},
+              "/api/servers": {"servers": []},
+              "/api/profiles": {"profiles": [
+                  {"name": "tim", "default": False,
+                   "system_prompt": "P" * 9000}]},
+              "/api/jobs": {"jobs": []},
+              "/api/traces": {"traces": []}}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        path = url.split("http://p")[-1].split("?")[0]
+        return Resp(routes[path])
+
+    orig = httpx.Client
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, url, **kw):
+            return fake_get(url, **kw)
+
+    httpx.Client = FakeClient
+    try:
+        snap = peers_mod.probe("http://p", None)
+    finally:
+        httpx.Client = orig
+    assert snap["ok"] is True
+    assert len(snap["agents"][0]["system_prompt"]) == 8000
+
+
+def test_chat_stream_remote_sends_instance_header(app__rgw, home__rgw,
+                                                  monkeypatch):
+    """§3b: a remote profile with a named instance rides X-Sable-Instance as
+    an extra_headers on the runner (never a ?instance= query string)."""
+    from sable.core.agent_runner import AgentResult
+
+    made = {}
+
+    class StubRunner:
+        def __init__(self, cfg, base_url, model, api_key=None, **kwargs):
+            made["base_url"] = base_url
+            made["extra_headers"] = kwargs.get("extra_headers")
+
+        def run(self, task, history=None, **kw):
+            return AgentResult(final_response="ok", messages=[
+                {"role": "user", "content": task},
+                {"role": "assistant", "content": "ok"}],
+                backend="stub", tokens_in=1, tokens_out=1)
+
+    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
+    monkeypatch.setattr("sable.serving.supervisor.healthcheck",
+                        lambda *a, **k: True)
+    _seed_peer__rgw(home__rgw)
+    r = app__rgw.handle("POST", "/api/chat/stream",
+                        body={"prompt": "hi tim", "profile": "tim@192.0.2.9"})
+    assert r.status == 200 and r.stream is not None
+    text = "".join(r.stream)
+    assert "run.done" in text
+    assert "?" not in made["base_url"]  # header-only selector
+    assert made["extra_headers"] == {"X-Sable-Instance": "tim"}
 
 
 def test_profiles_list_includes_remote_agents(app__rgw, home__rgw):
@@ -6715,6 +6816,92 @@ def test_remote_gateway_dead_named_instance_is_503(home__rgw):
     finally:
         httpd.shutdown()
         httpd.server_close()
+
+
+# ------------------------------------------------- X-Sable-Instance selection
+
+
+class _FakeApp:
+    """Minimal app surface for remote_gateway.resolve_upstream."""
+
+    def __init__(self, home):
+        from sable.core.config import SableConfig
+        self.home = home
+        self.cfg = SableConfig()
+
+
+def test_resolve_upstream_instance_hit(home__rgw):
+    """Named alive instance wins over model-name matching (§3c)."""
+    from fake_server import FakeOpenAIServer
+    from sable.dashboard import remote_gateway as rg
+    from sable.serving import instances as srv_inst
+
+    home = home__rgw
+    with FakeOpenAIServer() as fs:
+        srv_inst.save_instance(home, {
+            "id": "tim", "role": "custom", "default": False,
+            "autostart": False, "created": None, "updated": None})
+        srv_inst.write_state(home, "tim", {
+            "mode": "attach", "base_url": fs.base_url,
+            "model_name": "fake-model",
+            "attach_url": fs.base_url.rsplit("/v1", 1)[0]})
+        app = _FakeApp(home)
+        # instance hit ignores the model entirely (routes to THAT instance)
+        url, _key = rg.resolve_upstream(app, "chat/completions",
+                                        model="other-model",
+                                        instance="tim")
+        assert url == fs.base_url.rstrip("/") + "/chat/completions"
+
+
+def test_resolve_upstream_instance_dead_raises(home__rgw):
+    """Named-but-not-serving instance -> honest LookupError (503 at route)."""
+    from sable.dashboard import remote_gateway as rg
+    from sable.serving import instances as srv_inst
+
+    home = home__rgw
+    srv_inst.save_instance(home, {
+        "id": "tim", "role": "custom", "default": False,
+        "autostart": False, "created": None, "updated": None})
+    srv_inst.write_state(home, "tim", {
+        "mode": "attach", "base_url": "http://127.0.0.1:1/v1",
+        "model_name": "stale-model", "attach_url": "http://127.0.0.1:1"})
+    with pytest.raises(LookupError, match="not running on this sable"):
+        rg.resolve_upstream(_FakeApp(home), "chat/completions",
+                            instance="tim")
+    # unknown name: honest error beats silently answering from another box
+    with pytest.raises(LookupError, match="not running on this sable"):
+        rg.resolve_upstream(_FakeApp(home), "chat/completions",
+                            instance="ghost")
+
+
+def test_resolve_upstream_unset_instance_old_flow(home__rgw):
+    """instance=None keeps today's flow byte-identical (model-name match)."""
+    from fake_server import FakeOpenAIServer
+    from sable.dashboard import remote_gateway as rg
+    from sable.serving import instances as srv_inst
+
+    home = home__rgw
+    with FakeOpenAIServer() as fs:
+        _fake_serve_state(home, fs.base_url)
+        app = _FakeApp(home)
+        url, _key = rg.resolve_upstream(app, "models")
+        assert url == fs.base_url.rstrip("/") + "/models"
+        url, _key = rg.resolve_upstream(app, "chat/completions",
+                                        model="fake-model")
+        assert url.endswith("/chat/completions")
+
+
+def test_agent_client_sends_extra_headers():
+    """§3a: SableAgentClient merges extra_headers into its httpx client."""
+    from sable.core.agent_runner import SableAgentClient
+
+    c = SableAgentClient("http://127.0.0.1:9/v1", "m", api_key="k",
+                         extra_headers={"X-Sable-Instance": "tim"})
+    assert c._client.headers["X-Sable-Instance"] == "tim"
+    assert c._client.headers["Authorization"] == "Bearer k"
+    # None keeps byte-identical headers (no stray keys)
+    c2 = SableAgentClient("http://127.0.0.1:9/v1", "m")
+    assert "X-Sable-Instance" not in c2._client.headers
 
 
 def test_status_peer_gateway_shape(app__rgw, home__rgw, monkeypatch):

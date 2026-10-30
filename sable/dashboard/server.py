@@ -408,10 +408,16 @@ def make_server(
                         "message": f"{type(e).__name__}: {e}"}})
                 return
 
+            # Instance selector: X-Sable-Instance pins the request to a named
+            # server instance (multi-instance peers). Informational routing
+            # only — auth is unchanged and the loopback invariant untouched.
+            inst_hdr = (self.headers.get("X-Sable-Instance") or "").strip() \
+                or None
             try:
                 url, key = rg.resolve_upstream(
                     app, subpath,
-                    model=str(payload.get("model") or "") or None)
+                    model=str(payload.get("model") or "") or None,
+                    instance=inst_hdr)
             except LookupError as e:
                 self._send_json(503, {"error": {"code": "not_serving",
                                                 "message": str(e)}})
@@ -585,6 +591,23 @@ def serve_dashboard(
         raise SystemExit(f"sable dashboard refused to start: {e}")
     except Exception:
         logger.exception("queue dispatcher failed to start")
+    # D-17 (audit §4): delegation dispatcher — bounded worker pool + liveness
+    # watchdog for delegate_task children, and crash reconcile: any row left
+    # non-terminal by a previous process becomes 'interrupted' (never
+    # requeued; side effects may have happened mid-child).
+    try:
+        from ..core import delegation as _deleg
+
+        if getattr(httpd.sable_app.cfg, "delegation_enabled", True):  # type: ignore[attr-defined]
+            _deleg.init_dispatcher(httpd.sable_app.cfg)  # type: ignore[attr-defined]
+            n = _deleg.delegation_store.reconcile_on_startup(
+                httpd.sable_app.cfg)  # type: ignore[attr-defined]
+            if n:
+                logger.warning(
+                    "delegation reconcile: %d in-flight delegation(s) from a "
+                    "previous process marked interrupted", n)
+    except Exception:
+        logger.exception("delegation dispatcher failed to start")
     # Phase 5: while indexing is enabled, refresh indexes in the background
     # (non-blocking; embedding server spawn happens lazily on first embed).
     try:
@@ -674,6 +697,15 @@ def serve_dashboard(
             # otherwise die mid-turn with no trace at all.
             try:
                 httpd.sable_app.shutdown_chat_runs()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            # D-17: stop delegation children (cooperative cancel, then mark
+            # stragglers interrupted) right after the chat runs and before the
+            # serving backends they talk to go away.
+            try:
+                from ..core import delegation as _deleg
+
+                _deleg.shutdown_dispatcher(grace_s=5.0)
             except Exception:
                 pass
             # WP4: stop the watchdog before its watched children go away.

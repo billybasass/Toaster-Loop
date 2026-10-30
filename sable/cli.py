@@ -1887,6 +1887,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     _apply_overrides(cfg, args)
 
+    # D-17: threadless delegation dispatcher for `sable run` — async
+    # delegate_task dispatches work here; results are reachable via
+    # check_delegation for the process lifetime (and persisted for post-hoc
+    # inspection). No inbox wake (no dashboard). Crash reconcile marks rows
+    # orphaned by a previous process 'interrupted'. At-exit grace cancel keeps
+    # a wedged child from holding interpreter shutdown open.
+    if getattr(cfg, "delegation_enabled", True):
+        try:
+            import atexit
+
+            from .core import delegation as _deleg
+
+            _deleg.init_dispatcher(cfg)
+            _deleg.delegation_store.reconcile_on_startup(cfg)
+            atexit.register(_deleg.shutdown_dispatcher, 2.0)
+        except Exception:  # noqa: BLE001 — CLI runs fine without delegation
+            pass
+
     # Project parity with dashboard chat runs: resolve --project to its
     # record so the runner gets the same containment root (workspace_dir)
     # and per-project codebase index routing. Unknown ids fail fast.

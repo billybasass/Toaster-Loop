@@ -235,7 +235,7 @@ def test_delegate_task_builds_prompt_from_task(home, tmp_path, monkeypatch):
     seen = {}
 
     def fake_run_child(cfg_, prof, task, ctx, delegation_id, out,
-                       plan_task=None):
+                       plan_task=None, cancel_event=None):
         seen["task"] = task
         seen["plan_task"] = plan_task
         out.update({"completed": True, "result": "ok",
@@ -243,7 +243,7 @@ def test_delegate_task_builds_prompt_from_task(home, tmp_path, monkeypatch):
 
     monkeypatch.setattr(delegation, "_run_child", fake_run_child)
     payload = delegation.execute_delegation(
-        "coder", "please proceed", plan_task="t2",
+        "coder", "please proceed", plan_task="t2", wait=True,
         _ctx={"cfg": cfg, "base_url": "http://127.0.0.1:9/v1",
               "model": "m", "project": "p1", "depth": 0})
     data = json.loads(payload)
@@ -267,7 +267,7 @@ def test_delegate_unknown_plan_task_degrades(home, tmp_path, monkeypatch):
     seen = {}
 
     def fake_run_child(cfg_, prof, task, ctx, delegation_id, out,
-                       plan_task=None):
+                       plan_task=None, cancel_event=None):
         seen["task"] = task
         out.update({"completed": True, "result": "ok",
                     "child_trace_id": None, "failure_reason": None})
@@ -277,7 +277,7 @@ def test_delegate_unknown_plan_task_degrades(home, tmp_path, monkeypatch):
     cfg.profiles = [{"name": "coder", "system_prompt": "code",
                      "tools": ["read_file"]}]
     payload = delegation.execute_delegation(
-        "coder", "just do it", plan_task="t99",
+        "coder", "just do it", plan_task="t99", wait=True,
         _ctx={"cfg": cfg, "base_url": "http://127.0.0.1:9/v1",
               "model": "m", "project": "p1", "depth": 0})
     data = json.loads(payload)

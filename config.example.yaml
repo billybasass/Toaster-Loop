@@ -218,17 +218,29 @@ tools:
     #   .py: "pyright-langserver --stdio"
     #   .go: "gopls"
 
-# Agent delegation (feature-wave Phase 2): list_agents / delegate_task /
-# check_delegation let one agent profile hand a subtask to another profile on
-# the SAME project. The child runs with its own profile's prompt/tools/
-# guardrails, records its own trace (linked via header `delegation` metadata),
-# and appends lineage to the chat thread's `delegations` list when run from
-# the dashboard. delegate_task waits synchronously up to timeout_seconds for
-# the child; on timeout it returns a diagnostics payload instead of hanging.
-# Env: SABLE_DELEGATION (0/false disables), SABLE_DELEGATION_TIMEOUT_S.
+# Agent delegation (feature-wave Phase 2; D-17 async inbox): list_agents /
+# delegate_task / check_delegation let one agent profile hand a subtask to
+# another profile on the SAME project. The child runs with its own profile's
+# prompt/tools/guardrails, records its own trace (linked via header
+# `delegation` metadata), and appends lineage to the chat thread's
+# `delegations` list when run from the dashboard. By default delegate_task
+# DISPATCHES asynchronously (returns {status: dispatched} immediately; the
+# result arrives as an inbox turn / check_delegation). wait=true keeps the
+# legacy synchronous behavior, bounded by timeout_seconds. Children share a
+# bounded dispatcher pool — async removes D-11's accidental one-at-a-time
+# serialization, so cap concurrency against your GPU (set max_concurrent: 1
+# on a single-GPU box). Env: SABLE_DELEGATION (0/false disables),
+# SABLE_DELEGATION_TIMEOUT_S, SABLE_DELEGATION_MAX,
+# SABLE_DELEGATION_LIVENESS_S.
 delegation:
   enabled: true
-  timeout_seconds: 300           # default wait cap (tool arg can override)
+  timeout_seconds: 300           # wait-cap for wait=true calls only
+  max_concurrent: 2              # dispatcher pool size (GPU contention cap)
+  queue_max: 16                  # queued-but-unstarted cap; beyond -> retry
+  liveness_timeout_seconds: 600  # child must start + heartbeat within this
+  liveness_check_interval_seconds: 5   # watchdog scan period
+  wake_retry_seconds: 2          # (Phase 2) wake redelivery interval
+  async_default: true            # false restores D-11 sync behavior globally
 
 # Multi-instance serving (feature-wave Phase 6). N named llama-server
 # instances run concurrently; their DEFINITIONS are NOT stored in this file —

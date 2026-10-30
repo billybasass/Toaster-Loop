@@ -330,6 +330,7 @@ class SableAgentClient:
         verification_nudge: bool = True,
         deny_write_paths: Optional[List[Path]] = None,
         cancel_event: Optional[threading.Event] = None,
+        extra_headers: Optional[Dict[str, str]] = None,
         token_counter: Optional[TokenCounter] = None,
         skills_enabled: bool = False,
         plan_ctx: Optional[Dict[str, Any]] = None,
@@ -522,7 +523,14 @@ class SableAgentClient:
         # old estimate_tokens math whenever the endpoint can't answer.
         self._token_counter = token_counter
         self._tc_injected = token_counter is not None
+        # Extra request headers (remote peer agents): merged into every
+        # request's header set — e.g. X-Sable-Instance routes a multi-
+        # instance peer gateway to the snapshot's named instance. None/empty
+        # keeps every existing call byte-identical. Kept on self so
+        # switch_model rebuilds the client with them too.
+        self._extra_headers = dict(extra_headers or {})
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        headers.update(self._extra_headers)
         self._client = httpx.Client(timeout=timeout, headers=headers)
         self._recorder = recorder
         # Image support (vision input): "auto" probes the endpoint for a
@@ -579,6 +587,15 @@ class SableAgentClient:
         # emits tool.call / tool.result / context.usage around each iteration.
         # The dashboard's chat run wires this into its SSE queue.
         self.on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None
+        # D-17 §3.1 (delegation liveness heartbeat): an OPTIONAL zero-arg
+        # hook set by the delegation worker after create_runner
+        # (`runner._heartbeat = lambda: delegation.touch(id)`). When set, the
+        # agent loop ticks it at every iteration boundary and after each tool
+        # call so a long-but-healthy child never looks wedged to the
+        # watchdog. Default None -> zero behavior change for every other
+        # caller; exceptions from the hook are swallowed (liveness is
+        # observability, never fatal).
+        self._heartbeat: Optional[Callable[[], None]] = None
         # Set once a streamed chat completion has been consumed (the dashboard
         # uses it to decide whether deltas already went out live).
         self.streamed = False
@@ -1177,6 +1194,13 @@ class SableAgentClient:
         loop = (range(self.max_iterations) if self.max_iterations is not None
                 else iter(range(sys.maxsize)))  # no cap (max_iterations=None)
         for _ in loop:
+            # D-17 §3.1: delegation liveness tick (loop boundary). No-op when
+            # no hook is set (every non-delegation caller).
+            if self._heartbeat is not None:
+                try:
+                    self._heartbeat()
+                except Exception:  # liveness never breaks the loop
+                    pass
             # Cancel boundary 1: before the next model call — a stop pressed
             # during the previous tool batch is honored here, after all its
             # results are already in `messages` (the trace stays consistent).
@@ -1566,6 +1590,13 @@ class SableAgentClient:
                     "ok": not content.startswith("error:"),
                     "preview": content[:8000],
                     "truncated": len(content) > 8000})
+                # D-17 §3.1: liveness tick after each tool in the batch — a
+                # slow-but-healthy tool call keeps the child looking alive.
+                if self._heartbeat is not None:
+                    try:
+                        self._heartbeat()
+                    except Exception:  # liveness never breaks the loop
+                        pass
 
             # Backlog #10 level 3: per-turn aggregate budget over this turn's
             # tool results (dicts are shared with `messages`, so spilling here
@@ -1608,6 +1639,7 @@ class SableAgentClient:
         # probe results so the new endpoint gets re-detected.
         reset_vision_cache()
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        headers.update(self._extra_headers)
         self._client = httpx.Client(timeout=self._client.timeout, headers=headers)
         return True
 
@@ -1895,6 +1927,7 @@ def create_runner(cfg: SableConfig, base_url: str, model: str,
                   profile_name: Optional[str] = None,
                   cancel_event: Optional[Any] = None,
                   plan_store: Optional[Dict[str, Any]] = None,
+                  extra_headers: Optional[Dict[str, str]] = None,
                   ) -> SableAgentClient:
     """Build the built-in agent runtime.
 
@@ -1941,6 +1974,11 @@ def create_runner(cfg: SableConfig, base_url: str, model: str,
     get appended to the effective system prompt (profile rows + global rows);
     with the knob off (default) this argument changes nothing and the prompt
     is byte-identical to pre-#38 behavior — no playbook store access at all.
+
+    `extra_headers` (remote peer agents): additional HTTP headers merged into
+    every request the runner makes (e.g. ``X-Sable-Instance`` so a multi-
+    instance peer gateway routes completions to the snapshot's named
+    instance). None/empty keeps every existing call byte-identical.
 
     Context compression is on by default at 75% of the configured context
     window (`agent.context_token_budget` overrides; 0 disables) — long REPL
@@ -2003,6 +2041,7 @@ def create_runner(cfg: SableConfig, base_url: str, model: str,
         "_touched": [],
     }
     return SableAgentClient(base_url=base_url, model=model, api_key=api_key,
+                              extra_headers=extra_headers,
                               recorder=recorder, system_prompt=system_prompt,
                               enabled_tool_names=enabled_tool_names,
                               skills_enabled=skills_enabled,

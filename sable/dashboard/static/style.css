@@ -294,6 +294,10 @@ pre.log.json { max-height: 260px; overflow: auto; }
 }
 .explorer-head { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; }
 .explorer-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+/* Files | Tasks segmented control at the top of the explorer (audit §5) */
+.explorer-tabs { display: inline-flex; gap: 4px; padding: 2px;
+  background: var(--inset-bg); border: 1px solid var(--line); border-radius: 8px; }
+.explorer-tabs button.seg:not(.active) { border: none; background: transparent; }
 .explorer-resize {
   position: absolute; left: -4px; top: 0; bottom: 0; width: 8px;
   cursor: col-resize; border-radius: 4px;
@@ -614,11 +618,22 @@ input[type="search"], input[type="date"] {
 .hub-progress-fill { height: 100%; background: var(--accent);
   transition: width .4s ease; }
 
-/* WP12 plan drawer (Chat page): task rows, status dots, chip colors. */
-.plan-drawer { padding: 4px 8px 8px; margin-left: 10px;
-  border-left: 2px solid var(--line); }
+/* WP12 plan tree (explorer Tasks tab, audit §5): task rows, status dots,
+   chip colors. Rows nest by dependency via an inline margin-left step. */
+.plan-host { padding-top: 2px; }
+.plan-panel { display: flex; flex-direction: column; gap: 4px; }
 .plan-task { display: flex; gap: 6px; align-items: baseline; padding: 2px 0;
+  border-bottom: 1px solid var(--line); cursor: pointer; flex-wrap: wrap; }
+.plan-caret { color: var(--dim); width: 10px; flex: 0 0 10px;
+  user-select: none; font-size: 11px; }
+/* inline expansion of description/details/test-strategy under a task row */
+.plan-task-details { padding: 2px 4px 6px 16px; font-size: 12px;
   border-bottom: 1px solid var(--line); }
+.plan-task-details pre { margin: 4px 0; white-space: pre-wrap;
+  overflow-wrap: anywhere; background: var(--panel2); border-radius: 6px;
+  padding: 6px; }
+/* subtle marker for cycle / dangling-dep rows (graph degrades flat) */
+.plan-warn { color: var(--warn); font-size: 11px; }
 .plan-dot { font-size: 11px; }
 .plan-dot-pending { color: var(--muted-fg); }
 .plan-dot-in_progress { color: var(--warn); }

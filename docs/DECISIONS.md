@@ -95,6 +95,11 @@ full reset.
 own experience buffer).
 
 ## D-11 — Delegation executes synchronously with a bounded timeout (not async enqueue)
+**Status: AMENDED by D-17.** The synchronous wait is no longer the default:
+`delegate_task` now dispatches asynchronously and delivers results as inbox turns.
+The sync-with-timeout execution survives only behind `wait=true`. See D-17 for the
+reversal and its rationale; the original text below is kept unedited for history.
+
 **Decision.** `delegate_task` runs the child agent on a worker thread and waits for
 it in-line, capped by `delegation.timeout_seconds` (default 300; per-call override).
 On timeout it returns a structured payload (`status: timed_out`, partial output slot,
@@ -198,3 +203,145 @@ existing binary and skips rather than building). Evidence:
 `tests/test_training.py` (~5 s) and
 `experiments/wp10_golden_gate/run_gate.py` (prints the full evidence JSON;
 repeats verified identical).
+
+## D-16 — Delegation to remote/peer agents: local loop, remote inference
+**Decision.** `delegate_task` targeting a peer agent (`tim@192.168.1.78`) runs
+the child agent loop **on this machine** — local workspace, local tools, local
+guardrails, local trace — with inference pointed at the peer's served model
+through its dashboard's `/remote/v1` passthrough, exactly like chat does today
+(Option A). Option B (executing the subtask on the peer) is rejected.
+Resolution falls back to `peers.resolve_remote_agent` when the name misses the
+local profile list; before spawning the child, a healthcheck gate against
+`{peer_url}/remote/v1` fails fast with a `peer_unreachable` error payload —
+never an exception into the tool loop. The peer's persona travels: probe
+snapshots now carry each agent's `system_prompt`, so both chat and delegated
+children run the peer's actual persona instead of today's empty string. After
+a remote-inference child settles, its transcript is pushed to the peer via
+`/remote/v1/traces/import` — delegation gets parity with chat's
+`_push_remote_trace`. A companion fix (also closing the pre-existing chat gap)
+carries `resolve_remote_agent`'s `remote_instance` as an `X-Sable-Instance`
+header so multi-instance peers stop landing everything on the first instance.
+**Rationale.** Chat already established the semantics: "a remote agent is a
+local agent whose completions cross the wire" (plans/remote-agents.md);
+delegation diverging from chat would make `tim@host` mean one thing in the
+dropdown and another in the roster. Option B means executing this machine's
+tool calls (`run_command`, file writes) on *another* machine — remote code
+execution as a feature — against a gateway surface that is deliberately
+inference + trace-import only, and against the local-first capability gating
+(D-12). It would also need machinery that exists nowhere: an authenticated
+peer-side run API with lifecycle/status, reverse trace flow-back, and a
+network cancel protocol. Meanwhile Option A keeps both just-landed fixes
+intact for free: §3 trace stamping works because the child trace is recorded
+locally (stamped `tim@host`, flowing back to the peer like any remote chat),
+and §2 cooperative cancel works because the child loop is a local thread —
+the `threading.Event` still stops it at the next loop boundary; only one
+in-flight completion is ever in flight over the network, bounded by the
+runner's httpx timeout. Effort collapses to wiring + resolution, reusing the
+chat path's own pieces.
+**Consequences.**
+- `execute_delegation` resolves `<agent>@<host>` via a lazy `dashboard.peers`
+  import (sanctioned: peers.json lives under SABLE_HOME and is pure state;
+  guarded by `try/except ImportError` so standalone core keeps working).
+  Unknown-with-`@` names get an error naming the host and pointing at the
+  Serve page, distinct from the plain "unknown agent" message.
+- Child wiring for remote profiles ignores the parent's `base_url`: it uses
+  `peer_url + "/remote/v1"`, `api_key = peer_token`, `model =` the peer's
+  served model — mirroring chat.py's remote branch, including its honest
+  not-serving message. The healthcheck runs *before* the registry record is
+  created, so an unreachable peer leaves no phantom lineage entry.
+- Persona travel changes chat behavior too (intentional): `resolve_remote_agent`
+  returns the snapshot prompt and chat picks it up via its existing
+  `(prof or {}).get("system_prompt")`. Peer *tool grants* still do not
+  travel — the child runs under this machine's tool list and guardrails, the
+  same rule peers.py already documents for chat.
+- Traces: local attribution stays `tim@host` (the §3 stamp path is unchanged;
+  easy-training scoping only picks it up if that exact name is configured).
+  Flow-back reuses the peer's existing `/remote/v1/traces/import`, mapping
+  `tim@host` → `tim` server-side like chat already does — best-effort, a dead
+  peer never breaks the local child.
+- Cancel semantics: no new mechanism. Parent Stop flips the same cooperative
+  event (§2); worst-case stop latency is one in-flight remote completion plus
+  httpx read timeout. A peer dying mid-run surfaces as the runner's existing
+  `AgentBackendError` → structured failed payload.
+- Naive `?instance=` on the base URL is explicitly rejected: the runner builds
+  `{base_url}/chat/completions`, so a query string would land mid-path. The
+  instance selector rides a header instead (`X-Sable-Instance`), honored by
+  `remote_gateway.resolve_upstream` ahead of model-name matching.
+Implementation spec: `plans/delegation-remote.md` (appendix to this decision).
+
+## D-17 — Async delegation inbox: dispatch-and-wake replaces the synchronous wait
+**Amends D-11** (audit §4). **Decision.** `delegate_task` becomes an async
+dispatch: it registers a durable delegation record and returns immediately with
+`{status: "dispatched", delegation_id}`. Children execute on a bounded,
+process-wide supervised dispatcher pool (one shared pool replaces the per-call
+`ThreadPoolExecutor`). When a child settles, its result is delivered to the
+parent's **thread inbox** — a durable per-thread queue persisted in the
+delegation DB — and a dispatcher watcher **wakes the thread with a fresh run**:
+the inbox turn is posted as a synthetic user-role message ("Delegation results
+have arrived…") through the same chat-run machinery a real user message uses.
+This is the *wake-on-arrival* model; the alternative (keep the parent loop alive
+blocking on a queue) was rejected. The synchronous D-11 behavior survives behind
+an explicit `wait: true` parameter on `delegate_task`, defaulting to the new
+async semantics (`wait: false`). Completion deadlines are replaced by
+**liveness**: a child must register and keep heartbeating (`last_activity_ts`)
+within `delegation.liveness_timeout_seconds`; a stale child is cooperatively
+cancelled and settled `wedged` (new terminal status) — a wedged-child detector,
+not a wall-clock kill of healthy-but-slow work. The in-process registry becomes
+a cache over a persisted store (`<SABLE_HOME>/delegations/delegations.db`,
+SQLite, schema v11 of the shared `store/db.py` conventions), so delegation state
+and undelivered inbox turns survive dashboard restarts; on startup, `running`
+records owned by the dead process reconcile to `interrupted` (never requeued —
+a child run cannot be resumed mid-loop).
+**Rationale.** D-11's premise — "the parent is blocked in the tool call either
+way, so async adds nothing" — stopped being true once delegation became a
+multi-child, long-running feature: a synchronous parent holds the thread's
+single-flight slot hostage for the whole child lifetime (a second user message
+409s behind a 5-minute child), one wedged inference pins the parent for its
+full `timeout_seconds`, and every D-16 remote-agent child inherits the worst
+case. Wake-on-arrival composes with every piece of existing plumbing instead
+of fighting it: each turn remains one `runner.run()` = one trace (the audit's
+own caveat about "one giant trace" dissolves), the per-thread single-flight
+rule keeps its exact meaning (a wake run and a user run still cannot overlap;
+an arrival during an in-flight parent run simply queues — no new concurrency
+state), cancel semantics are unchanged (Stop cancels the current run *and*
+cooperatively cancels its dispatched children via the existing
+`cancel_event` propagation), SSE/bus events need no new protocol (`run.started`
+/ `delegation.update` already exist; the wake run is indistinguishable from a
+user turn to the stream layer), and thread-history persistence already runs at
+end-of-run in the chat worker — the inbox drain lands in that same seam. The
+keep-alive alternative would require the parent loop to block across tool
+iterations (new runner hook, cancellation during queue-wait, trace bloat, SSE
+heartbeating through idle periods, and a redefinition of single-flight), i.e.
+it changes more contracts for strictly less durability. Bounded dispatcher
+(default 2 workers, FIFO queue) preserves the single-GPU arbiter posture of
+D-9: delegations fan out but never oversubscribe inference beyond a small
+configured window, and queue-full applies backpressure as a clean tool-error
+payload rather than dropping work.
+**Consequences.**
+- Status vocabulary gains `dispatched` (queued, not yet started), `wedged`
+  (liveness deadline missed; cooperative cancel attempted) and `interrupted`
+  (process died with the child in flight). `running/completed/failed/
+  timed_out/cancelling/cancelled` keep their D-11 meanings; `timed_out` only
+  occurs on the legacy `wait=true` path.
+- `check_delegation` becomes genuine polling against the persisted registry —
+  it now answers across processes and restarts, and its payload gains
+  `queued_ahead` (dispatcher position) so a model can decide whether to wait
+  or continue working.
+- A parent thread with pending dispatched delegations shows them in lineage
+  (existing `thread.delegations` entries) and the wake run's user message is
+  rendered as an ordinary turn; no new UI protocol is required for Phase 1.
+- Restart recovery: `interrupted` records are terminal and *not* requeued
+  (re-running a child blindly could repeat side effects); their inbox entry is
+  written with the interruption so the next wake tells the parent honestly.
+  Inbox entries survive; undelivered turns are delivered on the next wake
+  opportunity, batched with any newer arrivals.
+- `wait: true` keeps the whole D-11 code path (bounded poll loop around
+  `future.result`) for deterministic callers — `plan_loop` iterates
+  deterministically and its spec'd use stays sync; MCP/CLI direct callers get
+  async by default like the model-facing tool.
+- The dispatcher lives in the dashboard process (it owns chat-run startup).
+  CLI `sable run` without a dashboard still dispatches (threadless inbox: the
+  result is only reachable via `check_delegation`, and an explicit note says
+  so) — same degradation rule as thread lineage today.
+Implementation spec: `plans/delegation-inbox.md` (phases, state machines,
+config keys, recovery table, test plan).

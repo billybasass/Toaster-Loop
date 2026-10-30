@@ -80,11 +80,15 @@ class ConfigError(ValueError):
 # explicit sets derived from the dataclass annotations; test_config_strictness
 # asserts every name here is a real SableConfig field so this cannot drift.
 _INT_FIELDS = frozenset({"port", "context_length", "recording_retention_days",
-                         "gpu_layers"})
-_FLOAT_FIELDS = frozenset({"delegation_timeout_seconds"})
+                         "gpu_layers", "delegation_max_concurrent",
+                         "delegation_queue_max"})
+_FLOAT_FIELDS = frozenset({"delegation_timeout_seconds",
+                           "delegation_liveness_timeout_seconds",
+                           "delegation_liveness_check_interval_seconds",
+                           "delegation_wake_retry_seconds"})
 _BOOL_FIELDS = frozenset({"recording_enabled", "recording_redact_secrets",
                           "delegation_enabled", "auto_model",
-                          "llama_auto_setup"})
+                          "llama_auto_setup", "delegation_async_default"})
 _STR_FIELDS = frozenset({
     "gguf_path", "models_dir", "home", "attach_url", "attach_api_key",
     "model_name", "llama_server_binary", "host", "llama_repo", "llama_ref",
@@ -211,7 +215,12 @@ def _type_problem(path: str, v: Any,
 _NESTED_SECTIONS = {
     "recording": {"enabled": "bool", "redact_secrets": "bool",
                   "retention_days": "int"},
-    "delegation": {"enabled": "bool", "timeout_seconds": "float"},
+    "delegation": {"enabled": "bool", "timeout_seconds": "float",
+                   "max_concurrent": "int", "queue_max": "int",
+                   "liveness_timeout_seconds": "float",
+                   "liveness_check_interval_seconds": "float",
+                   "wake_retry_seconds": "float",
+                   "async_default": "bool"},
     # WP12 plans: sub-keys registered for the consolidated report; `loop` is
     # a dict of loop knobs validated leniently by core/plans.plans_config and
     # consumed by core/plan_loop.py.
@@ -341,8 +350,33 @@ class SableConfig:
     # YAML `delegation.timeout_seconds`: default hard cap on how long
     # delegate_task waits for a child run before returning a timeout payload
     # (default 300; per-call override via the tool's timeout_seconds arg).
-    # Env: SABLE_DELEGATION_TIMEOUT_S.
+    # Env: SABLE_DELEGATION_TIMEOUT_S. D-17: only used on the legacy
+    # wait=true path now (async dispatch does not wait).
     delegation_timeout_seconds: float = 300.0
+    # D-17 (audit §4) async delegation inbox — dispatcher + liveness knobs:
+    # YAML `delegation.max_concurrent`: bounded dispatcher pool size (the
+    # accidental one-parent-at-a-time serialization of D-11 is gone, so this
+    # cap keeps GPU contention in check; set 1 on a single-GPU box).
+    # Env: SABLE_DELEGATION_MAX.
+    delegation_max_concurrent: int = 2
+    # YAML `delegation.queue_max`: queued-but-unstarted cap; beyond it
+    # delegate_task returns an explicit dispatcher_saturated error payload.
+    delegation_queue_max: int = 16
+    # YAML `delegation.liveness_timeout_seconds`: a child must leave the queue
+    # AND keep heartbeating (last_activity_ts) within this window or the
+    # watchdog wedge-detects it (cooperative cancel -> cancelling -> wedged).
+    # Env: SABLE_DELEGATION_LIVENESS_S.
+    delegation_liveness_timeout_seconds: float = 600.0
+    # YAML `delegation.liveness_check_interval_seconds`: watchdog scan period.
+    delegation_liveness_check_interval_seconds: float = 5.0
+    # YAML `delegation.wake_retry_seconds`: Phase 2 watcher redelivery
+    # interval for threads busy with an in-flight run (stored, unused until
+    # the wake loop lands).
+    delegation_wake_retry_seconds: float = 2.0
+    # YAML `delegation.async_default`: value of delegate_task's `wait` when
+    # the model omits it AND the caller didn't override; false restores D-11
+    # synchronous behavior globally as an escape hatch.
+    delegation_async_default: bool = True
     # Phase 3: raw `curation:` YAML section (see curate/curater.py
     # CurationConfig for the recognized keys; empty => defaults).
     curation: dict[str, Any] = field(default_factory=dict)
@@ -748,6 +782,8 @@ _ENV_MAP = {
     "recording_enabled": "SABLE_RECORDING",
     "delegation_enabled": "SABLE_DELEGATION",
     "delegation_timeout_seconds": "SABLE_DELEGATION_TIMEOUT_S",
+    "delegation_max_concurrent": "SABLE_DELEGATION_MAX",
+    "delegation_liveness_timeout_seconds": "SABLE_DELEGATION_LIVENESS_S",
     "auto_model": "SABLE_AUTO_MODEL",
     "gpu_layers": "SABLE_GPU_LAYERS",
     "llama_auto_setup": "SABLE_LLAMA_AUTO_SETUP",
@@ -758,12 +794,14 @@ _ENV_MAP = {
 
 
 def _coerce(fieldname: str, value: Any) -> Any:
-    if fieldname in ("port", "context_length", "gpu_layers"):
+    if fieldname in ("port", "context_length", "gpu_layers",
+                     "delegation_max_concurrent"):
         return int(value)
     if fieldname in ("recording_enabled", "auto_model", "llama_auto_setup",
                      "delegation_enabled"):
         return str(value).strip().lower() in ("1", "true", "yes", "on")
-    if fieldname == "delegation_timeout_seconds":
+    if fieldname in ("delegation_timeout_seconds",
+                     "delegation_liveness_timeout_seconds"):
         return float(value)
     return str(value)
 
@@ -901,6 +939,21 @@ def load_config(config_path: Optional[str] = None, *,
         if "timeout_seconds" in d \
                 and data.get("delegation_timeout_seconds") is None:
             data["delegation_timeout_seconds"] = float(d["timeout_seconds"])
+        # D-17 async delegation inbox knobs (same pop-onto-flat-field rule;
+        # types are already validated by _NESTED_SECTIONS above).
+        for sub, kind in (("max_concurrent", int), ("queue_max", int),
+                          ("liveness_timeout_seconds", float),
+                          ("liveness_check_interval_seconds", float),
+                          ("wake_retry_seconds", float),
+                          ("async_default", bool)):
+            flat = "delegation_" + sub
+            if sub in d and data.get(flat) is None:
+                try:
+                    data[flat] = kind(d[sub])
+                except (TypeError, ValueError):
+                    logger.warning("config: delegation.%s %r is not a %s; "
+                                   "keeping default", sub, d[sub],
+                                   kind.__name__)
     # Feature-wave Phase 5: normalize `indexing:` onto the new schema while
     # absorbing legacy keys (embedding_url/embedding_model/top_k/paths).
     if isinstance(data.get("indexing"), dict):

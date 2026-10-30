@@ -29,6 +29,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -230,10 +231,14 @@ def probe(base_url: str, token: Optional[str]) -> Dict[str, Any]:
              "running": bool(s.get("running")), "mode": s.get("mode"),
              "model_name": s.get("model_name")}
             for s in servers if isinstance(s, dict)],
-        # agents: profiles (the remote's agent definitions) + what is busy
+        # agents: profiles (the remote's agent definitions) + what is busy.
+        # The persona (system_prompt) travels so chat AND delegated children
+        # run the peer's actual persona; capped at 8000 chars to keep
+        # peers.json prompt-sized. Peer *tool grants* never travel.
         "agents": [
             {"name": p.get("name") or p.get("id"),
-             "default": bool(p.get("default"))}
+             "default": bool(p.get("default")),
+             "system_prompt": str(p.get("system_prompt") or "")[:8000]}
             for p in profiles if isinstance(p, dict)],
         "default_profile": (profiles_j or {}).get("default_profile"),
         # training + activity: queue rows and the newest traces ride along so
@@ -320,11 +325,52 @@ def resolve_remote_agent(home: Path,
         # downstream (agent_runner treats [] as drop-everything). The peer's
         # own tool grants stay on the peer — its inference answers whatever
         # this machine's agent loop asks, under this machine's guardrails.
-        return {"name": full, "system_prompt": "",
+        # The persona DOES travel (snapshot system_prompt): chat and delegated
+        # children run the peer's actual persona.
+        return {"name": full,
+                "system_prompt": str(match.get("system_prompt") or ""),
                 "model_name": model, "remote": True,
                 "peer_url": url, "peer_token": p.get("token") or None,
                 "remote_instance": instance}
     return None
+
+
+def push_remote_trace(prof: Dict[str, Any], task: str, res: Any,
+                      t0: float) -> None:
+    """Send one finished remote-agent run back to the model's owner.
+
+    POSTs the transcript to the peer dashboard's /remote/v1/traces/import
+    (same bearer auth as inference). The profile name is mapped back to
+    the peer's local agent name so their easy-training scoping sees it as
+    one of its own traces. Best-effort by contract: any failure is logged
+    and swallowed by the caller (chat stream, delegated children)."""
+    import httpx
+
+    purl = str(prof.get("peer_url") or "")
+    if not purl:
+        return
+    full = str(prof.get("name") or "")
+    local_name = full.rpartition("@")[0] or None
+    body = {
+        "task": task[:8000],
+        "messages": [m for m in (getattr(res, "messages", None) or [])
+                     if isinstance(m, dict)],
+        "profile": local_name,
+        "model_name": str(getattr(res, "model_alias", None)
+                          or prof.get("model_name") or "model"),
+        "base_url": str(getattr(res, "base_url", None) or ""),
+        "completed": bool(getattr(res, "completed", False)),
+        "tokens_in": getattr(res, "tokens_in", None),
+        "tokens_out": getattr(res, "tokens_out", None),
+        "duration_s": round(time.monotonic() - t0, 3),
+    }
+    headers = {"X-Sable-Token": prof["peer_token"]} \
+        if prof.get("peer_token") else {}
+    r = httpx.post(purl.rstrip("/") + "/remote/v1/traces/import",
+                   json=body, headers=headers, timeout=15.0)
+    if r.status_code >= 400:
+        logger.info("remote trace push to %s failed: HTTP %s",
+                    purl, r.status_code)
 
 
 def peer_view(rec: Dict[str, Any]) -> Dict[str, Any]:

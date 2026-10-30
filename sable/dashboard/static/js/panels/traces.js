@@ -243,7 +243,14 @@ function listView(mount) {
       { label: "task", render: (r) => el("span", {}, r.task_summary || "–",
           r.plan_task ? el("span", { class: "hint mono",
             title: "started from plan task " + r.plan_task,
-            text: " [" + r.plan_task + "]" }) : null) },
+            text: " [" + r.plan_task + "]" }) : null,
+          // Audit §3: delegated child runs carry a header delegation block
+          // (delegation_id / delegated_from); surface it as a small chip.
+          r.delegation ? el("span", { class: "chip deleg-status",
+            title: "delegated run" +
+              (r.delegation.delegated_from ? " from " + r.delegation.delegated_from : "") +
+              (r.delegation.delegation_id ? " · " + r.delegation.delegation_id : ""),
+            text: " delegation" }) : null) },
       { label: "profile", key: "agent_profile" },
       { label: "model", key: "model_alias" },
       { label: "tools", key: "num_tool_calls" },

@@ -1570,19 +1570,23 @@ def list_agents(**kwargs: Any) -> str:
 
 def delegate_task(agent: str = "", task: str = "", context: str = "",
                   timeout_seconds: Optional[float] = None,
-                  plan_task: str = "", **kwargs: Any) -> str:
+                  plan_task: str = "", wait: Optional[bool] = None,
+                  **kwargs: Any) -> str:
     """Delegate a subtask to another agent profile on the same project.
 
     ``plan_task`` (WP12, optional): id of a task in the active project's
     persistent plan — the child prompt is then built from that task
     (title/description/details/test-strategy + completed-dependency context)
-    instead of only the free-text ``task``. Existing callers are unchanged."""
+    instead of only the free-text ``task``. Existing callers are unchanged.
+
+    ``wait`` (D-17): None -> config delegation.async_default (true: return
+    {status: dispatched} immediately); True/False force sync/async per call."""
     from .delegation import execute_delegation
 
     return execute_delegation(agent=agent, task=task, context=context,
                               timeout_seconds=timeout_seconds,
                               plan_task=str(plan_task or "") or None,
-                              _ctx=kwargs.get("_ctx"))
+                              _ctx=kwargs.get("_ctx"), wait=wait)
 
 
 def check_delegation(id: str = "", **kwargs: Any) -> str:  # noqa: A002 (schema name)
@@ -1850,12 +1854,17 @@ TOOL_SCHEMAS: list[dict] = [
     _schema(
         "delegate_task",
         "Delegate a self-contained subtask to another agent profile on the "
-        "SAME project and wait (bounded by timeout_seconds) for its result. "
-        "The child runs with its own profile's prompt/tools/guardrails and "
-        "records its own trace; returns {status, delegation_id, result} — on "
-        "timeout a diagnostics payload instead of hanging. Cannot delegate to "
-        "yourself or nest further. Pass ALL context the child needs: it does "
-        "not see this conversation.",
+        "SAME project. By default this returns immediately with "
+        "{status: dispatched, delegation_id}; the child runs in the "
+        "background and its result is delivered to you as a follow-up turn — "
+        "keep working or finish your answer, do NOT busy-poll. Pass wait=true "
+        "only when you genuinely cannot proceed without the answer (blocks up "
+        "to timeout_seconds). Check status any time with check_delegation(id). "
+        "Cannot delegate to yourself or nest further: the depth limit is 1, "
+        "so a delegated child cannot itself delegate (do not instruct the "
+        "child to delegate). Dispatcher capacity is bounded — a saturated "
+        "queue returns an error to retry. Pass ALL context the child needs: "
+        "it does not see this conversation.",
         {
             "agent": {"type": "string",
                       "description": "Target agent profile name (from list_agents)"},
@@ -1865,8 +1874,10 @@ TOOL_SCHEMAS: list[dict] = [
                         "description": "Supporting context for the child (optional)"},
             "timeout_seconds": {
                 "type": "number",
-                "description": "Max seconds to wait for the child (default from "
-                               "config delegation.timeout_seconds)"},
+                "description": "Max seconds to wait when wait=true (default "
+                               "from config delegation.timeout_seconds; values "
+                               "below the 15s floor are clamped up with a "
+                               "warning); ignored for async dispatch"},
             # WP12: optional plan-task binding (additive; existing callers
             # unchanged). When set, the child prompt is built from that task.
             "plan_task": {"type": "string",
@@ -1874,13 +1885,21 @@ TOOL_SCHEMAS: list[dict] = [
                                          "project's plan (e.g. 't3'): the "
                                          "child receives its full context "
                                          "(details + completed dependencies)"},
+            # D-17: sync escape hatch on the async-by-default contract.
+            "wait": {"type": "boolean",
+                     "description": "false (default): returns dispatched "
+                                    "immediately and the result arrives as an "
+                                    "inbox turn later; true: block until the "
+                                    "child settles or timeout_seconds elapses"},
         },
         ["agent", "task"],
     ),
     _schema(
         "check_delegation",
-        "Poll a previously created delegation: status pending|running|"
-        "completed|failed|timed_out, with the result text once done.",
+        "Poll a previously created delegation: status queued|running|"
+        "completed|failed|cancelled|wedged|interrupted|timed_out|cancelling, "
+        "with the result text once done. Queued rows report queued_ahead; "
+        "last_activity_ts shows when the child was last heard from.",
         {
             "id": {"type": "string", "description": "Delegation id"},
         },

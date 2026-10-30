@@ -16,6 +16,21 @@ from typing import Any, Dict, List, Optional, Tuple
 from .base import ApiContext, HttpError, _utcnow
 
 
+def _delegation_header(jsonl_path: str) -> Optional[Dict[str, Any]]:
+    """Read-time extraction of the trace header's ``delegation`` linkage block
+(audit §3 chip): first JSONL line only, so listing stays cheap. None for
+ordinary runs and pruned/corrupt files — readers use tolerant .get()."""
+    try:
+        with open(jsonl_path, encoding="utf-8") as f:
+            rec = json.loads(f.readline() or "{}")
+    except (OSError, ValueError):
+        return None
+    if not isinstance(rec, dict):
+        return None
+    d = rec.get("delegation")
+    return d if isinstance(d, dict) else None
+
+
 class TracesRoutes(ApiContext):
     """Trace listing/detail, feedback, failure remediation notes and
 the read-time swimlane timeline (#35).
@@ -54,7 +69,17 @@ the read-time swimlane timeline (#35).
             )
         finally:
             store.close()
-        return {"traces": [r.to_dict() for r in rows], "total": total,
+        traces = []
+        for r in rows:
+            d = r.to_dict()
+            # Audit §3: surface the header's delegation linkage so the list can
+            # render a chip without per-row detail fetches. Key omitted entirely
+            # for ordinary runs (tolerant .get() client-side).
+            dg = _delegation_header(r.jsonl_path)
+            if dg:
+                d["delegation"] = dg
+            traces.append(d)
+        return {"traces": traces, "total": total,
                 "offset": offset, "limit": min(limit, 500)}
 
     def h_traces_stats(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:

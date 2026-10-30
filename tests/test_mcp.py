@@ -603,7 +603,7 @@ def test_delegate_task_records_linked_child_trace_and_completes(home__test_deleg
     cfg = _cfg(PROFILES, home=home__test_delegation)
     with FakeOpenAIServer() as srv:  # scripted read_file -> final answer
         payload = json.loads(TOOL_IMPLS["delegate_task"](
-            agent="coder", task="summarize the fake server file",
+            agent="coder", task="summarize the fake server file", wait=True,
             _ctx=_ctx(cfg, srv.base_url, profile="researcher", project=pid)))
     assert payload["status"] == "completed", payload
     did = payload["delegation_id"]
@@ -631,6 +631,398 @@ def test_delegate_task_records_linked_child_trace_and_completes(home__test_deleg
     poll = json.loads(TOOL_IMPLS["check_delegation"](id=did))
     assert poll["status"] == "completed"
     assert "Done" in poll["result"] and poll["child_trace_id"] == child_trace
+
+
+def test_delegate_child_trace_stamped_with_profile_in_easy_loop(home__test_delegation, _clean_registry):
+    """Audit §3: when easy training covers the CHILD profile, its trace is
+    stamped agent_profile=<child name> (not the backend "sable") so scoped
+    curation/readiness count it — same rule as the dashboard chat path."""
+    pid = _make_project(home__test_delegation, ["coder"])
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    cfg.easy_training = {"enabled": True, "profiles": ["researcher", "coder"]}
+    with FakeOpenAIServer() as srv:
+        payload = json.loads(TOOL_IMPLS["delegate_task"](
+            agent="coder", task="do the easy thing", wait=True,
+            _ctx=_ctx(cfg, srv.base_url, profile="researcher", project=pid)))
+    assert payload["status"] == "completed", payload
+
+    from sable.store.db import TraceStore
+
+    store = TraceStore(Path(home__test_delegation) / "buffer" / "sable.db")
+    try:
+        row = store.get_trace(payload["child_trace_id"])
+    finally:
+        store.close()
+    assert row is not None and row.agent_profile == "coder"
+
+
+def test_delegate_child_trace_keeps_backend_when_profile_outside_easy_loop(home__test_delegation, _clean_registry):
+    """Easy training enabled but the child profile NOT in all_profiles keeps the
+    legacy backend stamp (chat-parity: profile= only when covered)."""
+    pid = _make_project(home__test_delegation, ["coder"])
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    cfg.easy_training = {"enabled": True, "profile": "someone-else"}
+    with FakeOpenAIServer() as srv:
+        payload = json.loads(TOOL_IMPLS["delegate_task"](
+            agent="coder", task="do the thing", wait=True,
+            _ctx=_ctx(cfg, srv.base_url, profile="researcher", project=pid)))
+    assert payload["status"] == "completed", payload
+
+    from sable.store.db import TraceStore
+
+    store = TraceStore(Path(home__test_delegation) / "buffer" / "sable.db")
+    try:
+        row = store.get_trace(payload["child_trace_id"])
+    finally:
+        store.close()
+    assert row is not None and row.agent_profile == "sable"
+
+
+def test_run_child_passes_recorder_profile(monkeypatch, home__test_delegation):
+    """_run_child hands make_recorder the child profile name iff easy training
+    covers it (spy on make_recorder; runner creation short-circuits after)."""
+    seen = {}
+
+    def spy_recorder(cfg, **kw):
+        seen["profile"] = kw.get("profile")
+        raise RuntimeError("stop-after-recorder")
+
+    monkeypatch.setattr("sable.store.recorder.make_recorder", spy_recorder)
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    cfg.easy_training = {"enabled": True, "profile": "coder"}
+    with pytest.raises(RuntimeError, match="stop-after-recorder"):
+        delegation._run_child(cfg, {"name": "coder"}, "task",
+                              {"base_url": "u"}, "dlg1", {})
+    assert seen["profile"] == "coder"
+
+    # easy disabled -> no profile stamp (legacy backend behavior)
+    seen.clear()
+    cfg.easy_training = {}
+    with pytest.raises(RuntimeError, match="stop-after-recorder"):
+        delegation._run_child(cfg, {"name": "coder"}, "task",
+                              {"base_url": "u"}, "dlg1", {})
+    assert seen["profile"] is None
+
+
+# ------------------------------------------------------- remote peer delegation
+# Audit §1 / D-16: `delegate_task("tim@host")` resolves through the peers
+# registry; the child loop runs HERE with inference on the peer's gateway.
+
+REMOTE_PROF = {"name": "tim@192.0.2.9",
+               "system_prompt": "You are Tim on the render node.",
+               "model_name": "Qwen3-27B", "remote": True,
+               "peer_url": "http://192.0.2.9:55429", "peer_token": "peer-tok",
+               "remote_instance": "tim"}
+
+
+def _fake_run_child(seen):
+    def fake(cfg_, prof, task, ctx, delegation_id, out, plan_task=None,
+             cancel_event=None):
+        seen["prof"] = prof
+        out.update({"completed": True, "result": "ok",
+                    "child_trace_id": None, "failure_reason": None})
+    return fake
+
+
+def test_delegate_peer_name_resolves_via_peers(home__test_delegation,
+                                               monkeypatch, _clean_registry):
+    """Local profile miss + `@` name -> peers.resolve_remote_agent (not the
+    plain unknown-agent error); healthcheck passes; child runs."""
+    seen = {}
+    calls = []
+
+    def fake_resolve(home_, full_name):
+        calls.append(full_name)
+        return dict(REMOTE_PROF)
+
+    monkeypatch.setattr("sable.dashboard.peers.resolve_remote_agent",
+                        fake_resolve)
+    monkeypatch.setattr("sable.serving.supervisor.healthcheck",
+                        lambda *a, **k: True)
+    monkeypatch.setattr(delegation, "_run_child", _fake_run_child(seen))
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    payload = json.loads(delegation.execute_delegation(
+        "tim@192.0.2.9", "render the frame", wait=True,
+        _ctx=_ctx(cfg, "http://127.0.0.1:1/v1", profile="researcher")))
+    assert payload["status"] == "completed", payload
+    assert calls == ["tim@192.0.2.9"]
+    assert seen["prof"]["remote"] is True
+    # child trace attribution stays the FULL peer name (§3 stamping)
+    assert seen["prof"]["name"] == "tim@192.0.2.9"
+
+    # no-@ unknown keeps the exact legacy message (unchanged error path)
+    out = json.loads(delegation.execute_delegation(
+        "nobody", "x", _ctx=_ctx(cfg, "http://127.0.0.1:1/v1")))
+    assert out["status"] == "failed" and "unknown agent 'nobody'" in out["error"]
+    assert "peer offline" not in out["error"]
+
+
+def test_delegate_peer_unreachable_error_leaves_no_record(
+        home__test_delegation, monkeypatch, _clean_registry):
+    """Resolved peer that fails the gateway healthcheck -> peer_unreachable
+    payload with chat's not-serving sentence, and NO phantom registry record."""
+    monkeypatch.setattr("sable.dashboard.peers.resolve_remote_agent",
+                        lambda h, n: dict(REMOTE_PROF))
+    monkeypatch.setattr("sable.serving.supervisor.healthcheck",
+                        lambda *a, **k: False)
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    payload = json.loads(delegation.execute_delegation(
+        "tim@192.0.2.9", "render", _ctx=_ctx(cfg, "http://127.0.0.1:1/v1")))
+    assert payload["status"] == "failed"
+    assert payload["code"] == "peer_unreachable"
+    assert "remote sable at 192.0.2.9:55429 is not serving right now" \
+        in payload["error"]
+    assert len(delegation._delegations) == 0  # no phantom running record
+
+    # unresolvable peer name (offline / never probed / agent gone)
+    monkeypatch.setattr("sable.dashboard.peers.resolve_remote_agent",
+                        lambda h, n: None)
+    out = json.loads(delegation.execute_delegation(
+        "tim@192.0.2.9", "render", _ctx=_ctx(cfg, "http://127.0.0.1:1/v1")))
+    assert out["code"] == "peer_unreachable"
+    assert "peer offline, never probed, or no such agent there" \
+        in out["error"]
+    assert len(delegation._delegations) == 0
+
+
+# ------------------------------------------------- audit §6: pruned-eviction ring
+
+def _settled_record(did: str, **over) -> Dict[str, Any]:
+    rec = {"delegation_id": did, "agent": "coder", "task": "t",
+           "status": "completed", "created": "2026-01-01T00:00:00+00:00",
+           "project": None, "thread": None, "parent_run_id": "r",
+           "timeout_seconds": 300.0, "started_mono": 0.0,
+           "result": "the answer", "child_trace_id": f"tr-{did}",
+           "error": None, "last_activity_ts": "2026-01-01T00:00:05+00:00",
+           "cancel_event": threading.Event(), "_settled": True}
+    rec.update(over)
+    return rec
+
+
+def test_check_delegation_pruned_eviction_returns_summary(
+        home__test_delegation, _clean_registry):
+    """Audit §6: after the FIFO cap evicts a SETTLED record, check_delegation
+    answers with its terminal summary + a (pruned) marker instead of the
+    confusing 'unknown delegation id'."""
+    old = _settled_record("old0001")
+    delegation._store_delegation(old)
+    # fill to exactly the cap so the next insert evicts `old` first
+    n_rest = delegation._DELEGATIONS_CAP - 1
+    for i in range(n_rest):
+        delegation._store_delegation(_settled_record(f"fill{i:05d}"))
+    assert len(delegation._delegations) == delegation._DELEGATIONS_CAP
+    delegation._store_delegation(_settled_record("newest1"))
+
+    assert "old0001" not in delegation._delegations
+    poll = json.loads(TOOL_IMPLS["check_delegation"](id="old0001"))
+    assert poll["status"] == "completed"
+    assert poll["agent"] == "coder"
+    assert poll["result"] == "the answer"
+    assert poll["child_trace_id"] == "tr-old0001"
+    assert poll.get("pruned") is True
+    assert "pruned from the in-memory registry" in poll["note"]
+    assert "Traces store" in poll["note"]
+
+    # an id this process never saw keeps the legacy unknown-id error
+    unk = json.loads(TOOL_IMPLS["check_delegation"](id="never-seen"))
+    assert unk["status"] == "failed" and "unknown delegation id" in unk["error"]
+
+
+def test_check_delegation_pruned_eviction_skips_unsettled_records(
+        home__test_delegation, _clean_registry):
+    """Only SETTLED evictions enter the ring — a still-running record that got
+    evicted has no trustworthy summary, so the unknown-id error stays."""
+    running = _settled_record("run00001", status="running", result=None,
+                              child_trace_id=None, error=None,
+                              _settled=False)
+    delegation._store_delegation(running)
+    for i in range(delegation._DELEGATIONS_CAP - 1):
+        delegation._store_delegation(_settled_record(f"fill{i:05d}"))
+    delegation._store_delegation(_settled_record("newest1"))
+
+    assert "run00001" not in delegation._delegations
+    unk = json.loads(TOOL_IMPLS["check_delegation"](id="run00001"))
+    assert unk["status"] == "failed" and "unknown delegation id" in unk["error"]
+
+
+# ------------------------------------------- audit §6: schema + timeout floor
+
+def test_delegate_schema_mentions_depth_limit(_clean_registry):
+    """Audit §6: the depth-1 limit must be visible to the model in the tool
+    description, not only in the runtime error."""
+    schema = next(s for s in TOOL_SCHEMAS
+                  if s["function"]["name"] == "delegate_task")
+    desc = schema["function"]["description"]
+    assert "depth limit is 1" in desc
+    assert "cannot itself delegate" in desc
+
+
+def test_resolve_timeout_clamps_floor_and_ceiling(home__test_delegation):
+    """Audit §6: MIN_TIMEOUT_S footgun — tiny timeouts clamp UP with an
+    explicit warning (cooperative cancel would otherwise kill a healthy
+    child); the ceiling clamps too."""
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    assert delegation.MIN_TIMEOUT_S == 15.0
+    val, warn = delegation._resolve_timeout(cfg, 0.1)
+    assert val == 15.0
+    assert warn == "timeout 0.1s clamped to minimum 15s"
+    big, warn_big = delegation._resolve_timeout(cfg, 99_999)
+    assert big == 3600.0
+    assert warn_big == "timeout 99999s clamped to maximum 3600s"
+    ok, warn_ok = delegation._resolve_timeout(cfg, 42)
+    assert ok == 42.0 and warn_ok is None
+    # default (None -> config) stays unclamped, no warning
+    dflt, warn_d = delegation._resolve_timeout(cfg, None)
+    assert dflt == 300.0 and warn_d is None
+
+
+def test_delegate_tiny_timeout_clamped_with_warning_in_payload(
+        home__test_delegation, monkeypatch, _clean_registry):
+    """End-to-end: the clamped timeout + warning surface in the tool result."""
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    monkeypatch.setattr(delegation, "_run_child", _fake_run_child({}))
+    payload = json.loads(TOOL_IMPLS["delegate_task"](
+        agent="coder", task="quick thing", timeout_seconds=0.1, wait=True,
+        _ctx=_cfg_ctx(cfg, "http://127.0.0.1:1/v1")))
+    assert payload["status"] == "completed", payload
+    # The success payload shape is unchanged apart from the additive warning;
+    # the record itself carries the effective (clamped) timeout.
+    assert payload["timeout_warning"] == "timeout 0.1s clamped to minimum 15s"
+    rec = delegation.get_delegation(payload["delegation_id"])
+    assert rec is not None and rec["timeout_seconds"] == pytest.approx(15.0)
+
+
+# --------------------------------------- audit §6: list_agents peer busy state
+
+def test_list_agents_shows_peer_serving_state(home__test_delegation,
+                                              _clean_registry):
+    """Peer agent lines carry a serving state built ONLY from cached probe
+    snapshots in peers.json (no network calls): serving / idle / unknown."""
+    from sable.dashboard import peers as peers_mod
+
+    home = home__test_delegation
+    pid = _make_project(home, ["coder", "tim@192.0.2.9", "ana@192.0.2.10",
+                               "zed@192.0.2.11"])
+    # healthy + serving (one running instance)
+    rec_serving = peers_mod.upsert_peer(home, "http://192.0.2.9:55429", None)
+    peers_mod.set_snapshot(home, rec_serving["id"], {
+        "ok": True, "probed_at": "2026-01-01T00:00:00+00:00",
+        "servers": [{"name": "s1", "running": True, "model_name": "m"}],
+        "agents": [{"name": "tim", "system_prompt": "You are Tim."}],
+        "server": {"running": True}})
+    # healthy but idle (no running instance)
+    rec_idle = peers_mod.upsert_peer(home, "http://192.0.2.10:8765", None)
+    peers_mod.set_snapshot(home, rec_idle["id"], {
+        "ok": True, "probed_at": "2026-01-01T00:00:00+00:00",
+        "servers": [{"name": "s1", "running": False, "model_name": None}],
+        "agents": [{"name": "ana", "system_prompt": "You are Ana."}],
+        "server": {"running": False}})
+    # remembered but never successfully probed -> unknown
+    peers_mod.upsert_peer(home, "http://192.0.2.11:8765", None)
+
+    cfg = _cfg(PROFILES, home=home)
+    out = json.loads(TOOL_IMPLS["list_agents"](
+        _ctx=_ctx(cfg, "http://127.0.0.1:1/v1", project=pid)))
+    by_name = {a["agent"]: a for a in out["agents"]}
+    assert by_name["tim@192.0.2.9"]["peer_serving"] == "serving"
+    assert by_name["ana@192.0.2.10"]["peer_serving"] == "idle"
+    assert by_name["zed@192.0.2.11"]["peer_serving"] == "unknown"
+    # local profiles carry no peer_serving key at all
+    assert "peer_serving" not in by_name["coder"]
+
+
+def test_run_child_remote_wiring(home__test_delegation, monkeypatch):
+    """_run_child overrides the parent endpoint for remote profiles: peer
+    gateway base_url / token / model + X-Sable-Instance header."""
+    from sable.core.agent_runner import AgentResult
+
+    captured = {}
+
+    class StubRunner:
+        def __init__(self, cfg, base_url, model, api_key=None, **kwargs):
+            captured["base_url"] = base_url
+            captured["model"] = model
+            captured["api_key"] = api_key
+            captured["extra_headers"] = kwargs.get("extra_headers")
+
+        def run(self, task, history=None, **kw):
+            return AgentResult(final_response="ok", messages=[
+                {"role": "user", "content": task},
+                {"role": "assistant", "content": "ok"}],
+                backend="stub", tokens_in=1, tokens_out=1)
+
+    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
+    pushed = []
+    monkeypatch.setattr(
+        "sable.dashboard.peers.push_remote_trace",
+        lambda prof, task, res, t0: pushed.append((prof["name"], task)))
+
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    out = {}
+    delegation._run_child(cfg, dict(REMOTE_PROF), "render",
+                          {"base_url": "http://127.0.0.1:9/v1",
+                           "model": "parent-model"}, "dlg-remote", out)
+    assert captured["base_url"] == "http://192.0.2.9:55429/remote/v1"
+    assert captured["api_key"] == "peer-tok"
+    assert captured["model"] == "Qwen3-27B"
+    assert captured["extra_headers"] == {"X-Sable-Instance": "tim"}
+    assert out["completed"] is True
+    # trace flow-back fired once for the remote child
+    assert pushed == [("tim@192.0.2.9", "render")]
+
+
+def test_run_child_local_wiring_unchanged(home__test_delegation, monkeypatch):
+    """Local children keep the parent-inherited endpoint and never push."""
+    from sable.core.agent_runner import AgentResult
+
+    captured = {}
+
+    class StubRunner:
+        def __init__(self, cfg, base_url, model, api_key=None, **kwargs):
+            captured["base_url"] = base_url
+            captured["extra_headers"] = kwargs.get("extra_headers")
+
+        def run(self, task, history=None, **kw):
+            return AgentResult(final_response="ok", messages=[],
+                               backend="stub", tokens_in=1, tokens_out=1)
+
+    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
+    pushed = []
+    monkeypatch.setattr(
+        "sable.dashboard.peers.push_remote_trace",
+        lambda *a, **k: pushed.append(a))
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    delegation._run_child(cfg, {"name": "coder"}, "task",
+                          {"base_url": "http://127.0.0.1:9/v1",
+                           "model": "m"}, "dlg-local", {})
+    assert captured["base_url"] == "http://127.0.0.1:9/v1"
+    assert captured["extra_headers"] is None
+    assert pushed == []  # never for local children
+
+
+def test_run_child_flowback_failure_never_breaks_child(home__test_delegation,
+                                                       monkeypatch):
+    """A raising trace push leaves the child's terminal state untouched."""
+    from sable.core.agent_runner import AgentResult
+
+    class StubRunner:
+        def __init__(self, cfg, base_url, model, api_key=None, **kwargs):
+            pass
+
+        def run(self, task, history=None, **kw):
+            return AgentResult(final_response="done", messages=[],
+                               backend="stub", tokens_in=1, tokens_out=1)
+
+    def boom(*a, **k):
+        raise RuntimeError("peer is down")
+
+    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
+    monkeypatch.setattr("sable.dashboard.peers.push_remote_trace", boom)
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    out = {}
+    delegation._run_child(cfg, dict(REMOTE_PROF), "render",
+                          {"base_url": "http://127.0.0.1:9/v1"}, "dlg-x", out)
+    assert out["completed"] is True and out["result"] == "done"
 
 
 def test_check_delegation_unknown_id(home__test_delegation, _clean_registry):
@@ -694,26 +1086,197 @@ def test_delegate_without_context_degrades(home__test_delegation, _clean_registr
 
 def test_delegate_timeout_returns_diagnostics_payload(home__test_delegation, monkeypatch, _clean_registry):
     cfg = _cfg(PROFILES, home=home__test_delegation)
+    # Audit §6 raised the real floor to 15s; this test needs a sub-second wait.
+    monkeypatch.setattr(delegation, "MIN_TIMEOUT_S", 0.1)
 
     def slow_child(cfg_, prof, task, ctx, delegation_id, out,
-                   plan_task=None):
-        time.sleep(5)  # far longer than the 0.3s cap below
+                   plan_task=None, cancel_event=None):
+        # Wait for the cooperative cancel (audit §2 bug B) instead of a
+        # blind sleep: proves the timeout path actually flips the event.
+        deadline = time.monotonic() + 5
+        while (time.monotonic() < deadline
+               and not (cancel_event is not None and cancel_event.is_set())):
+            time.sleep(0.05)
 
     monkeypatch.setattr(delegation, "_run_child", slow_child)
     t0 = time.monotonic()
     with FakeOpenAIServer() as srv:
         payload = json.loads(TOOL_IMPLS["delegate_task"](
-            agent="coder", task="take forever", timeout_seconds=0.3,
-            _ctx=_ctx(cfg, srv.base_url, profile="researcher")))
+            agent="coder", task="take forever", timeout_seconds=0.3, wait=True,
+            _ctx=_cfg_ctx(cfg, srv.base_url)))
     elapsed = time.monotonic() - t0
     assert elapsed < 3.0, "timeout payload must not wait for the child"
     assert payload["status"] == "timed_out"
     assert payload["delegation_id"] and payload["timeout_seconds"] == pytest.approx(0.3)
     assert payload["diagnostics"]["child_agent"] == "coder"
     assert "timed out" in payload["error"]
-    # registry keeps the terminal state for check_delegation
+    # Registry state for check_delegation: the record flips to timed_out and
+    # the cooperative cancel lands; the fake child notices fast, so by read
+    # time it has usually reconciled to the terminal 'cancelled' (audit §2
+    # bug A state machine). Either transitional/terminal state is valid here;
+    # the heartbeat timestamp must be present either way.
     poll = json.loads(TOOL_IMPLS["check_delegation"](id=payload["delegation_id"]))
+    assert poll["status"] in ("timed_out", "cancelled"), poll
+    assert poll.get("last_activity_ts")
+
+
+def _cfg_ctx(cfg, base_url):
+    return _ctx(cfg, base_url, profile="researcher")
+
+
+def test_delegate_timeout_reconciles_when_child_finishes_later(
+        home__test_delegation, monkeypatch, _clean_registry):
+    """Audit §2 bug A: a child that finishes AFTER the parent's timeout must
+    settle its real terminal state into the registry record — check_delegation
+    flips timed_out -> completed with the result (docstring promise)."""
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    # Audit §6 raised the real floor to 15s; this test needs a sub-second wait.
+    monkeypatch.setattr(delegation, "MIN_TIMEOUT_S", 0.1)
+
+    def slow_then_done(cfg_, prof, task, ctx, delegation_id, out,
+                       plan_task=None, cancel_event=None):
+        time.sleep(1.0)  # longer than the 0.3s parent timeout below
+        out["completed"] = True
+        out["result"] = "late but done"
+        out["child_trace_id"] = "tr-late"
+
+    monkeypatch.setattr(delegation, "_run_child", slow_then_done)
+    with FakeOpenAIServer() as srv:
+        payload = json.loads(TOOL_IMPLS["delegate_task"](
+            agent="coder", task="finish late", timeout_seconds=0.3, wait=True,
+            _ctx=_cfg_ctx(cfg, srv.base_url)))
+    did = payload["delegation_id"]
+    assert payload["status"] == "timed_out"
+
+    # Immediately after: still timed_out (child not done yet), heartbeat ts set.
+    poll = json.loads(TOOL_IMPLS["check_delegation"](id=did))
     assert poll["status"] == "timed_out"
+    assert poll.get("last_activity_ts")
+
+    # Once the child thread settles: record reconciles to completed+result.
+    deadline = time.monotonic() + 4.0
+    while time.monotonic() < deadline:
+        poll = json.loads(TOOL_IMPLS["check_delegation"](id=did))
+        if poll["status"] != "timed_out":
+            break
+        time.sleep(0.05)
+    assert poll["status"] == "completed", poll
+    assert "late but done" in poll["result"]
+    assert poll["child_trace_id"] == "tr-late"
+
+
+def test_delegate_parent_cancel_stops_child_and_settles_cancelled(
+        home__test_delegation, monkeypatch, _clean_registry):
+    """Audit §2 bug B: the parent run's cancel Event (chat Stop) flips the
+    delegation's cooperative cancel; the child observes it, stops looping and
+    the record settles to terminal state 'cancelled'."""
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+    seen = {"loops": 0}
+
+    def looping_child(cfg_, prof, task, ctx, delegation_id, out,
+                      plan_task=None, cancel_event=None):
+        # Emulates a runner polling cancel_event at loop boundaries: exits
+        # with failure_reason="cancelled" exactly like SableAgentClient does.
+        for _ in range(200):  # cap: never outlive the test
+            seen["loops"] += 1
+            if cancel_event is not None and cancel_event.is_set():
+                from sable.core.failure_types import FAILURE_CANCELLED
+                out["completed"] = False
+                out["failure_reason"] = FAILURE_CANCELLED
+                out["result"] = "(stopped: cancelled by user)"
+                return
+            time.sleep(0.02)
+        out["completed"] = False
+        out["failure_reason"] = "test-child-never-cancelled"
+
+    monkeypatch.setattr(delegation, "_run_child", looping_child)
+    parent_cancel = threading.Event()
+    ctxd = _ctx(cfg, "http://127.0.0.1:1/v1", profile="researcher")
+    ctxd["cancel_event"] = parent_cancel
+
+    result: Dict[str, Any] = {}
+
+    def run_delegate():
+        result["payload"] = json.loads(TOOL_IMPLS["delegate_task"](
+            agent="coder", task="loop forever", timeout_seconds=10, wait=True,
+            _ctx=ctxd))
+
+    t = threading.Thread(target=run_delegate, daemon=True)
+    t.start()
+    time.sleep(0.4)          # let the child start looping
+    parent_cancel.set()      # chat Stop -> parent run cancelled
+    t.join(timeout=5)
+    assert not t.is_alive(), "execute_delegation must return promptly on cancel"
+
+    payload = result["payload"]
+    assert payload["status"] == "cancelled", payload
+    did = payload["delegation_id"]
+
+    # The record settles to cancelled once the child notices the event.
+    deadline = time.monotonic() + 4.0
+    poll: Dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        poll = json.loads(TOOL_IMPLS["check_delegation"](id=did))
+        if poll["status"] == "cancelled":
+            break
+        time.sleep(0.05)
+    assert poll["status"] == "cancelled", poll
+    assert "cancel" in (poll.get("error") or "").lower()
+
+    # Child actually stopped looping promptly after the cancel was set.
+    loops_at_stop = seen["loops"]
+    time.sleep(0.3)
+    assert seen["loops"] - loops_at_stop <= 2, "child must stop on cancel"
+
+
+def test_cancel_delegation_stops_running_child(home__test_delegation,
+                                               monkeypatch, _clean_registry):
+    """Audit §2 bug B: the registry-level cancel_delegation(id) hook sets the
+    record's event; a running child cooperatively terminates 'cancelled'."""
+    cfg = _cfg(PROFILES, home=home__test_delegation)
+
+    def looping_child(cfg_, prof, task, ctx, delegation_id, out,
+                      plan_task=None, cancel_event=None):
+        for _ in range(200):
+            if cancel_event is not None and cancel_event.is_set():
+                from sable.core.failure_types import FAILURE_CANCELLED
+                out["completed"] = False
+                out["failure_reason"] = FAILURE_CANCELLED
+                return
+            time.sleep(0.02)
+        out["completed"] = False
+        out["failure_reason"] = "test-child-never-cancelled"
+
+    monkeypatch.setattr(delegation, "_run_child", looping_child)
+
+    result: Dict[str, Any] = {}
+
+    def run_delegate():
+        result["payload"] = json.loads(TOOL_IMPLS["delegate_task"](
+            agent="coder", task="loop forever", timeout_seconds=10, wait=True,
+            _ctx=_cfg_ctx(cfg, "http://127.0.0.1:1/v1")))
+
+    t = threading.Thread(target=run_delegate, daemon=True)
+    t.start()
+    # find the record once it exists
+    did = ""
+    deadline = time.monotonic() + 4.0
+    while time.monotonic() < deadline and not did:
+        with delegation._registry_lock:
+            if delegation._delegations:
+                did = next(iter(delegation._delegations))
+        time.sleep(0.02)
+    assert did, "delegation record should exist while the child runs"
+
+    assert delegation.cancel_delegation(did) is True
+    t.join(timeout=5)
+    assert not t.is_alive()
+    assert result["payload"]["status"] == "cancelled", result["payload"]
+
+    poll = json.loads(TOOL_IMPLS["check_delegation"](id=did))
+    assert poll["status"] == "cancelled", poll
+    # already-settled ids report False (no double cancel)
+    assert delegation.cancel_delegation(did) is False
 
 
 # ---------------------------------------------------------------- lineage
@@ -727,7 +1290,7 @@ def test_thread_json_gets_delegations_entry(home__test_delegation, _clean_regist
     cfg = _cfg(PROFILES, home=home__test_delegation)
     with FakeOpenAIServer() as srv:
         payload = json.loads(TOOL_IMPLS["delegate_task"](
-            agent="coder", task="read it",
+            agent="coder", task="read it", wait=True,
             _ctx=_ctx(cfg, srv.base_url, profile="researcher", project=pid,
                       thread="t-lin")))
     thread = json.loads((d / "t-lin.json").read_text())
@@ -743,7 +1306,7 @@ def test_no_thread_context_degrades_gracefully(home__test_delegation, _clean_reg
     cfg = _cfg(PROFILES, home=home__test_delegation)
     with FakeOpenAIServer() as srv:
         payload = json.loads(TOOL_IMPLS["delegate_task"](
-            agent="coder", task="read it",
+            agent="coder", task="read it", wait=True,
             _ctx=_ctx(cfg, srv.base_url, profile="researcher")))  # thread=None
     assert payload["status"] == "completed"
     assert not (Path(home__test_delegation) / "chat").exists()  # no lineage files invented
@@ -797,7 +1360,7 @@ def test_guardrails_apply_to_child_runs(home__test_delegation, monkeypatch, _cle
     cfg = _cfg(profiles, home=home__test_delegation)
     with FakeOpenAIServer(handler_cls=AlwaysFailingPatchHandler) as srv:
         payload = json.loads(TOOL_IMPLS["delegate_task"](
-            agent="patcher", task="patch everything",
+            agent="patcher", task="patch everything", wait=True,
             _ctx=_ctx(cfg, srv.base_url, profile="researcher")))
     assert payload["status"] == "failed"
     # the halt came from the child's OWN guardrail controller, not max_iters
