@@ -322,10 +322,19 @@ export default {
         ? [el("span", { class: "thread-lineage mono", title: "delegation lineage",
             text: t.delegations.map((d) => d.agent || "?").join(" → ") })]
         : [];
+      // D-17 Phase 3: undelivered delegation-inbox entries (server count from
+      // the delegation store) render as a small "⧗ N waiting" badge — after a
+      // dashboard restart this is the "N delegated results waiting" signal.
+      const inbox = (t.pending_inbox > 0)
+        ? [el("span", { class: "chip deleg-status inbox-wake thread-inbox",
+            title: `${t.pending_inbox} delegation result(s) waiting to be `
+              + "delivered (they arrive as a turn on this thread)" ,
+            text: `⧗ ${t.pending_inbox}` })]
+        : [];
       const item = el("div", { class: "thread-item" + (active ? " active" : ""),
         tabindex: 0, role: "button" },
         el("span", { class: "thread-title", text: t.title || t.id }),
-        ...lineage,
+        ...lineage, ...inbox,
         el("span", { class: "thread-meta",
           text: `${t.profile || "default"} · ${t.message_count ?? 0} msg` }),
         el("button", { class: "thread-x small", text: "✕", title: "delete",
@@ -1212,7 +1221,9 @@ export default {
       // a live streaming bubble fed by the frame replay.
       if (run.prompt && !messages.some((m) => m.role === "user"
           && m.content === run.prompt)) {
-        messages.push({ role: "user", content: run.prompt });
+        // D-17 Phase 3: synthetic inbox turns get the chip marker too.
+        messages.push({ role: "user", content: run.prompt,
+          ...(INBOX_TURN_RE.test(run.prompt) ? { inbox: true } : {}) });
         renderMsgs();
       }
       stick = true;
@@ -1376,6 +1387,14 @@ export default {
         if (m.footer && typeof m.footer === "object")
           b.appendChild(runFooter(m.footer));
       } else if (m.role === "user") {
+        // D-17 Phase 3: a synthetic inbox wake turn is bracket-tagged by the
+        // server (format_inbox_message) — mark it with a small "inbox" chip so
+        // delegated-result turns read differently from human messages.
+        if (m.inbox || INBOX_TURN_RE.test(String(m.content ?? ""))) {
+          b.appendChild(el("span", { class: "chip deleg-status inbox-wake",
+            title: "synthetic turn: delegation results arrived (wake run)",
+            text: "⧗ inbox" }));
+        }
         const bodyEl = el("div", { class: "md" });
         renderMarkdown(bodyEl, String(m.content ?? ""));
         b.appendChild(bodyEl);
@@ -1525,6 +1544,11 @@ export default {
     // results — child agent, status chip, result snippet, child-trace link.
     const DELEGATION_TOOLS = new Set(["delegate_task", "check_delegation"]);
 
+    // D-17 Phase 3: the synthetic inbox wake turn's bracket header (server:
+    // delegation.format_inbox_message). Matched on persisted/streamed user
+    // messages to render the "⧗ inbox" chip.
+    const INBOX_TURN_RE = /^\[Delegation results\b/;
+
     function parseDelegation(preview) {
       try {
         const d = JSON.parse(String(preview ?? ""));
@@ -1535,10 +1559,21 @@ export default {
     function delegationCard(d, onStatus) {
       const chip = el("span", { class: "chip deleg-status " + (d.status || ""),
         text: d.status || "unknown" });
+      // D-17 Phase 3: dispatcher position rides on dispatched/queued payloads
+      // so the card can say how deep the queue is instead of the model (or a
+      // user) guessing.
       const meta = el("div", { class: "hint mono" },
         "agent " + (d.agent || "?") +
-        (d.delegation_id ? " · " + d.delegation_id : ""));
+        (d.delegation_id ? " · " + d.delegation_id : "") +
+        (typeof d.queued_ahead === "number" && d.queued_ahead > 0
+          ? ` · ${d.queued_ahead} queued ahead` : ""));
       const parts = [el("div", { class: "deleg-head" }, chip, meta)];
+      if (d.poll_guard) {
+        // Busy-poll guardrail note from check_delegation (spec §10 risk #1):
+        // the model is polling too fast — surface it so the user sees why.
+        parts.push(el("div", { class: "hint poll-guard" },
+          String(d.poll_guard)));
+      }
       if (d.error) parts.push(el("pre", { class: "log bad" }, String(d.error)));
       const snippet = d.result || d.partial_output;
       if (snippet) parts.push(el("pre", { class: "log" }, String(snippet).slice(0, 1200)));
@@ -1758,7 +1793,10 @@ export default {
         // fast worker-persisted transcript.
         await saveThread(profileSel.value || null);  // <home>/chat/<id>.json
       }
+      // D-17 Phase 3: a drained wake turn (prompt begins with the bracketed
+      // results header) is marked so its bubble carries the "⧗ inbox" chip.
       messages.push({ role: "user", content: promptText,
+        ...(INBOX_TURN_RE.test(promptText) ? { inbox: true } : {}),
         ...(imgs.length ? { images: imgs.map((i) => i.name) } : {}) });
       renderMsgs();
       const bubble = streamingBubble();
@@ -2051,6 +2089,23 @@ export default {
     // them live as delegations settle (audit §5).
     unsubs.push(bus.on("delegation.update", () => {
       if (explorerTab === "tasks") loadThreads();
+    }));
+    // D-17 Phase 3: an inbox wake run started on a thread. If it is the thread
+    // this view is showing and nothing else runs here, adopt the wake run so
+    // its synthetic turn streams live; otherwise just repaint the thread list
+    // (the "⧗ N waiting" badge) and toast — opening would fight an in-flight
+    // stream.
+    unsubs.push(bus.on("delegation.wake", (p) => {
+      if (!p || !p.thread) return;
+      const n = (p.delegation_ids || []).length;
+      toast(`⧗ ${n || "delegation"} result${n === 1 ? "" : "s"} arrived — `
+        + "waking the thread", "info");
+      if (p.thread === threadId && !running) {
+        detachStream();
+        viewSession++;
+        openThread(p.thread);
+      }
+      loadThreads();
     }));
     // Reopen the thread that was open before navigating away (bug fix: the
     // panel used to start blank, hiding both the transcript and any run

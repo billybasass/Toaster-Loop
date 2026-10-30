@@ -251,6 +251,74 @@ def get_pruned_summary(delegation_id: str) -> Optional[Dict[str, Any]]:
         return dict(s) if s else None
 
 
+# ---------------------------------------------------------------------------
+# Busy-poll guardrail (D-17 Phase 3, spec §10 risk #1)
+# ---------------------------------------------------------------------------
+
+#: How many ``check_delegation`` calls for the SAME delegation by one parent
+#: run are tolerated inside the rolling window before a gentle hint rides
+#: along in the payload. Models trained on D-11's sync contract tend to poll
+#: like crazy after ``dispatched``; the schema text discourages it and this
+#: catches the tail (audit §4 flagged exactly this). The hint only fires for
+#: delegations with a parent thread — an inbox exists there, so polling is
+#: pure waste; CLI/threadless polling stays honest and unhinted.
+POLL_GUARD_MAX_CHECKS = 4
+POLL_GUARD_WINDOW_S = 120.0
+_POLL_KEYS_CAP = 256
+#:(run_id, delegation_id) -> recent check times (monotonic), windowed + capped
+_poll_history: "OrderedDict[Any, List[float]]" = OrderedDict()
+
+
+def _poll_guard_note(_ctx: Optional[Dict[str, Any]], delegation_id: str,
+                     has_thread: bool) -> Optional[str]:
+    """Record one check_delegation call for the (run, delegation) pair; return
+    the gentle nudge once rapid polling exceeds ``POLL_GUARD_MAX_CHECKS`` in
+    the rolling window. Bounded on both axes (key cap + per-key window);
+    thread-safe; never raises into the tool."""
+    key = ((_ctx or {}).get("run_id") or "anon", str(delegation_id))
+    now = time.monotonic()
+    try:
+        with _registry_lock:
+            hist = [t for t in _poll_history.get(key, ())
+                    if now - t <= POLL_GUARD_WINDOW_S]
+            hist.append(now)
+            _poll_history[key] = hist
+            while len(_poll_history) > _POLL_KEYS_CAP:
+                _poll_history.popitem(last=False)
+            n = len(hist)
+    except Exception:  # noqa: BLE001 — a guard must never break the tool
+        return None
+    if not has_thread or n <= POLL_GUARD_MAX_CHECKS:
+        return None
+    return (f"note: check #{n} for this delegation within "
+            f"{POLL_GUARD_WINDOW_S:g}s — results arrive automatically as a "
+            "follow-up turn when the child settles. Do NOT busy-poll: finish "
+            "other work or end your answer, and the inbox will wake you.")
+
+
+# ---------------------------------------------------------------------------
+# Store janitor entry point (D-17 Phase 3)
+# ---------------------------------------------------------------------------
+
+#: Retention for TERMINAL delegation rows (age + count bounds; mirrors the
+#: registry janitor's conservative posture — see delegation_store
+#: .prune_terminal_rows for the hard rules, incl. never deleting undelivered
+#: inbox entries). Runs once at startup next to reconcile_on_startup.
+PRUNE_RETENTION_DAYS = 30
+PRUNE_MAX_ROWS = 1000
+
+
+def janitor_pass(cfg: Any = None) -> Dict[str, int]:
+    """Prune aged/over-cap terminal delegation rows (Phase 3). Best-effort:
+    store failures return zeros — cleanup must never break startup."""
+    cfg = cfg if cfg is not None else _default_cfg()
+    try:
+        return delegation_store.prune_terminal_rows(
+            cfg, days=PRUNE_RETENTION_DAYS, max_rows=PRUNE_MAX_ROWS)
+    except Exception:  # noqa: BLE001
+        return {"deleted_aged": 0, "deleted_capped": 0, "deleted": 0}
+
+
 def reset_state() -> None:
     """Clear registries + dispatcher (tests)."""
     try:
@@ -262,6 +330,7 @@ def reset_state() -> None:
         _delegations.clear()
         _pruned_summaries.clear()
         _pending_exec.clear()
+        _poll_history.clear()
     with _wake_hooks_lock:
         _wake_hooks.clear()
         _wake_streaks.clear()
@@ -1540,10 +1609,14 @@ def _payload_from_store_row(row: Dict[str, Any], cfg: Any) -> str:
     return _payload(**fields)
 
 
-def check_delegation_status(delegation_id: str) -> str:
+def check_delegation_status(delegation_id: str,
+                            _ctx: Optional[Dict[str, Any]] = None) -> str:
     # The child worker settles the record itself (bug A fix), so reads are
     # always current; a still-running child that finishes after a timeout
     # flips timed_out -> completed/failed/cancelled without any polling here.
+    # `_ctx` (D-17 Phase 3 guardrail): the caller's run context, used ONLY to
+    # rate-limit rapid re-polling per (run, delegation) and append a gentle
+    # "results arrive automatically" hint — never for the answer itself.
     did = str(delegation_id or "").strip()
     rec = get_delegation(did)
     if rec is None:
@@ -1576,7 +1649,16 @@ def check_delegation_status(delegation_id: str) -> str:
         except Exception:  # noqa: BLE001 — store unavailable => legacy error
             row = None
         if row is not None:
-            return _payload_from_store_row(row, _default_cfg())
+            out = _payload_from_store_row(row, _default_cfg())
+            note = _poll_guard_note(_ctx, did, bool(row.get("thread")))
+            if note:
+                try:
+                    parsed = json.loads(out)
+                    parsed["poll_guard"] = note
+                    out = _payload(**parsed)
+                except Exception:  # noqa: BLE001 — hint is cosmetic
+                    pass
+            return out
         return _error_payload(
             f"unknown delegation id {delegation_id!r} "
             "(ids are tracked in-process for the current session; settled "
@@ -1604,6 +1686,9 @@ def check_delegation_status(delegation_id: str) -> str:
             "child_trace_id": rec.get("child_trace_id"),
             "error": rec.get("error"),
         })
+    note = _poll_guard_note(_ctx, did, bool(rec.get("thread")))
+    if note:
+        fields["poll_guard"] = note
     return _payload(**fields)
 
 

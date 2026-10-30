@@ -464,9 +464,12 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         rec_profile = (_prof_name
                        if _easy.enabled and _prof_name
                        and _prof_name in _easy.all_profiles else None)
-        recorder = make_recorder(self.cfg, on_record=_on_record,
-                                 project=project_id, profile=rec_profile,
-                                 plan_task=plan_task)
+        # Phase 3 (spec §8): wake runs carry an `inbox_wake` marker in the
+        # trace header's delegation block so the traces panel can badge them.
+        recorder = make_recorder(
+            self.cfg, on_record=_on_record, project=project_id,
+            profile=rec_profile, plan_task=plan_task,
+            metadata=({"inbox_wake": True} if inbox_wake else None))
 
         def gen() -> Iterator[str]:
             # First iteration = the stream was admitted: register now so a
@@ -1074,6 +1077,16 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
     def h_threads_list(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         d = self.home / CHAT_DIRNAME
         threads = []
+        # Phase 3 (D-17): per-thread undelivered inbox counts drive the chat
+        # UI's "N waiting" badge / restart banner. One indexed GROUP BY; a
+        # store failure degrades to no badges (never breaks the listing).
+        try:
+            from ...core import delegation as _delegation
+
+            pending = _delegation.delegation_store.pending_inbox_counts(
+                self.cfg)
+        except Exception:  # noqa: BLE001
+            pending = {}
         if d.is_dir():
             for f in sorted(d.glob("*.json")):
                 try:
@@ -1101,6 +1114,10 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                     # Phase 2 placeholder: delegation lineage chip data when a
                     # future writer stores it; absent tolerated everywhere.
                     "delegations": t.get("delegations") or [],
+                    # Phase 3 (D-17): undelivered delegation-inbox entries —
+                    # the chat UI renders this as a small "N waiting" badge.
+                    "pending_inbox": pending.get(
+                        t.get("id", f.stem), 0),
                 })
         return {"threads": threads}
 

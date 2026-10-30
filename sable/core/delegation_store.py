@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -287,6 +287,90 @@ def pending_inbox_threads(cfg: Any = None) -> List[str]:
         return [r[0] for r in rows]
     finally:
         conn.close()
+
+
+def pending_inbox_counts(cfg: Any = None) -> Dict[str, int]:
+    """thread -> number of undelivered entries (Phase 3: the thread-list
+    badge and the dashboard-restart "N results waiting" affordance; one
+    indexed GROUP BY over idx_deleg_thread)."""
+    conn = open_db(cfg)
+    try:
+        rows = conn.execute(
+            "SELECT thread, COUNT(*) FROM delegations "
+            "WHERE inbox_state='pending' AND thread IS NOT NULL "
+            "GROUP BY thread").fetchall()
+        return {r[0]: int(r[1]) for r in rows}
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Janitor (D-17 Phase 3): prune aged / over-cap terminal rows
+# ---------------------------------------------------------------------------
+
+def _cutoff_iso(days: int) -> str:
+    return (datetime.now(timezone.utc)
+            - timedelta(days=max(0, int(days)))).isoformat(timespec="seconds")
+
+
+def prune_terminal_rows(cfg: Any = None, *, days: int = 30,
+                        max_rows: int = 1000) -> Dict[str, int]:
+    """Delete old / surplus TERMINAL delegation rows (Phase 3 janitor).
+
+    Mirrors the registry janitor's conservative posture (age window + hard
+    cap, terminal-only): ``delegations.db`` is a runtime work queue, not the
+    history of record — traces stay in the buffer store forever.
+
+    Hard rules:
+      * only ``TERMINAL_STATUSES`` rows are ever deleted — never
+        queued/running/cancelling, and never ``timed_out`` (it can still
+        reconcile to a real terminal state when an abandoned child settles);
+      * rows with ``inbox_state='pending'`` are NEVER deleted — an
+        undelivered result outranks any retention window (the parent must
+        still learn its child finished/died);
+      * rows without a parseable ``settled_ts`` are conservatively kept from
+        the age rule (the row cap can still evict them, oldest-first).
+
+    Age rule: terminal + not-pending + settled before ``days`` ago.
+    Cap rule: keep only the newest ``max_rows`` prunable terminal rows
+    (oldest beyond the cap go). Returns {deleted_aged, deleted_capped,
+    deleted}. Never raises on a missing DB — opening creates it."""
+    q = ", ".join("?" for _ in TERMINAL_STATUSES)
+    statuses = tuple(sorted(TERMINAL_STATUSES))
+    cutoff = _cutoff_iso(days)
+    keep = max(1, int(max_rows))
+    conn = open_db(cfg)
+    aged = capped = 0
+    try:
+        with _write_lock:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                cur = conn.execute(
+                    f"DELETE FROM delegations WHERE status IN ({q}) "
+                    "AND inbox_state != 'pending' "
+                    "AND settled_ts IS NOT NULL AND settled_ts < ?",
+                    statuses + (cutoff,))
+                aged = max(0, cur.rowcount)
+                # LIMIT -1 OFFSET n == "everything after the newest n".
+                cur = conn.execute(
+                    "DELETE FROM delegations WHERE delegation_id IN ("
+                    "  SELECT delegation_id FROM delegations"
+                    f"  WHERE status IN ({q}) AND inbox_state != 'pending'"
+                    "  ORDER BY COALESCE(settled_ts, created_ts) DESC"
+                    "  LIMIT -1 OFFSET ?)",
+                    statuses + (keep,))
+                capped = max(0, cur.rowcount)
+                conn.execute("COMMIT")
+            except Exception:
+                try:
+                    conn.execute("ROLLBACK")
+                except Exception:
+                    pass
+                raise
+    finally:
+        conn.close()
+    return {"deleted_aged": aged, "deleted_capped": capped,
+            "deleted": aged + capped}
 
 
 def take_pending_inbox(thread: str, cfg: Any = None) -> List[Dict[str, Any]]:

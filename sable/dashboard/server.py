@@ -606,6 +606,12 @@ def serve_dashboard(
                 logger.warning(
                     "delegation reconcile: %d in-flight delegation(s) from a "
                     "previous process marked interrupted", n)
+            # Phase 3 janitor: prune aged/over-cap TERMINAL rows (undelivered
+            # inbox entries are never touched — see delegation_store).
+            pr = _deleg.janitor_pass(httpd.sable_app.cfg)  # type: ignore[attr-defined]
+            if pr.get("deleted"):
+                logger.info("delegation janitor: pruned %d terminal row(s)",
+                            pr["deleted"])
     except Exception:
         logger.exception("delegation dispatcher failed to start")
     # Phase 5: while indexing is enabled, refresh indexes in the background

@@ -1901,6 +1901,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
             _deleg.init_dispatcher(cfg)
             _deleg.delegation_store.reconcile_on_startup(cfg)
+            # Phase 3 janitor: aged/over-cap terminal rows (undelivered inbox
+            # entries are never touched).
+            _deleg.janitor_pass(cfg)
             atexit.register(_deleg.shutdown_dispatcher, 2.0)
         except Exception:  # noqa: BLE001 — CLI runs fine without delegation
             pass

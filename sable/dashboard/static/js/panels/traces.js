@@ -250,7 +250,13 @@ function listView(mount) {
             title: "delegated run" +
               (r.delegation.delegated_from ? " from " + r.delegation.delegated_from : "") +
               (r.delegation.delegation_id ? " · " + r.delegation.delegation_id : ""),
-            text: " delegation" }) : null) },
+            text: " delegation" }) : null,
+          // D-17 Phase 3: runs started by the inbox wake watcher carry
+          // inbox_wake in the same header block — badge them distinctly.
+          r.delegation && r.delegation.inbox_wake
+            ? el("span", { class: "chip deleg-status inbox-wake",
+                title: "inbox wake run (started when delegation results arrived)",
+                text: " ⧗ inbox wake" }) : null) },
       { label: "profile", key: "agent_profile" },
       { label: "model", key: "model_alias" },
       { label: "tools", key: "num_tool_calls" },

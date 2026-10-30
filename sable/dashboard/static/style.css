@@ -363,6 +363,11 @@ pre.log.json { max-height: 260px; overflow: auto; }
 .chip.deleg-status.running { color: var(--warn); border-color: var(--warn); }
 .chip.deleg-status.completed { color: var(--ok); border-color: var(--ok); }
 .chip.deleg-status.failed, .chip.deleg-status.timed_out { color: var(--err); border-color: var(--err); }
+/* D-17 Phase 3 (inbox polish): wake-run badge on traces, "⧗ inbox" chip on
+   synthetic wake turns, thread-list pending-inbox badge, busy-poll note. */
+.chip.deleg-status.inbox-wake { color: var(--purple); border-color: var(--purple); }
+.thread-item .chip.thread-inbox { margin-left: 4px; font-size: 10px; padding: 0 6px; }
+.hint.poll-guard { color: var(--warn); margin: 2px 0; }
 pre.log.bad { color: var(--err); }
 /* Phase 4 (post-write checks): syntax/LSP verdict block inside a write_file/patch tool card */
 .syntax-mark { font-family: var(--mono); font-size: 12px; margin: 4px 0 2px; }

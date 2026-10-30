@@ -11,6 +11,7 @@ const KINDS = ["job.state", "job.log", "serve.state", "serve.watchdog",
   "model.promoted", "model.rolled_back", "trace.recorded",
   "trace.feedbacked", "iterate.step",
   "runtime.setup", "index.build", "app.state", "delegation.update",
+  "delegation.wake",
   "bench.run", "calibrate.run", "doctor.run", "engines.changed",
   "engine.install", "plan.updated", "plan.loop"];
 

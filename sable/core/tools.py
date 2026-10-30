@@ -1590,10 +1590,14 @@ def delegate_task(agent: str = "", task: str = "", context: str = "",
 
 
 def check_delegation(id: str = "", **kwargs: Any) -> str:  # noqa: A002 (schema name)
-    """Poll a delegation's status/result."""
+    """Poll a delegation's status/result.
+
+    ``_ctx`` (D-17 Phase 3): the runner's context rides through kwargs so the
+    busy-poll guardrail can rate-limit rapid re-polling per parent run and
+    append a gentle "results arrive automatically" hint to the payload."""
     from .delegation import check_delegation_status
 
-    return check_delegation_status(id)
+    return check_delegation_status(id, _ctx=kwargs.get("_ctx"))
 
 
 # ------------------------------------------------- vision / image tools

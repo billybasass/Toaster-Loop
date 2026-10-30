@@ -1,4 +1,6 @@
-"""D-17 Phase 1 + Phase 2: durable store, dispatcher, liveness, inbox wake.
+"""D-17 Phase 1 + Phase 2 + Phase 3: durable store, dispatcher, liveness,
+inbox wake, and polish (terminal-row janitor, busy-poll guardrail,
+pending-inbox surfacing, wake-run trace metadata).
 
 Covers the plans/delegation-inbox.md §9 test plan rows for Phase 1 (store
 round-trip / FIFO claim atomicity / take_pending flips once / reconcile-on-
@@ -946,3 +948,204 @@ def test_run_end_nudges_watcher_delivery(home, _clean, monkeypatch):
                           body={"prompt": "go", "thread": "t-n"})
         _drain_stream(resp)
     assert nudged, "run completion must nudge the wake watcher"
+
+
+# ===========================================================================
+# Phase 3 — polish (spec §8): store janitor + busy-poll guardrail +
+# pending-inbox surfacing + wake-run trace badge.
+# ===========================================================================
+
+_AGE_S = 40 * 86400  # "aged" reference: 40 days ago (> default 30d window)
+
+
+def _terminal_row(did: str, status: str = "completed", **over) -> Dict[str, Any]:
+    row = _rec(did, status=status, settled_ts=_iso(-_AGE_S),
+               created_ts=_iso(-_AGE_S))
+    row.update(over)
+    return row
+
+
+# ------------------------------------------------------------- janitor rules
+
+def test_prune_age_window_terminal_only(home):
+    """Age rule: terminal + not-pending rows settled before the cutoff go;
+    fresh terminals, non-terminal rows, timed_out (still reconcilable) and
+    undelivered inbox entries are all preserved."""
+    delegation_store.insert_delegation(_terminal_row("old-done"))
+    delegation_store.insert_delegation(_terminal_row("old-fail",
+                                                     status="failed"))
+    delegation_store.insert_delegation(_terminal_row(
+        "old-pending", thread="th-1", inbox_state="pending"))
+    delegation_store.insert_delegation(_terminal_row("fresh-done",
+                                                     settled_ts=_iso(),
+                                                     created_ts=_iso()))
+    delegation_store.insert_delegation(_rec("still-running",
+                                            status="running"))
+    delegation_store.insert_delegation(_terminal_row("old-timeout",
+                                                     status="timed_out"))
+    out = delegation_store.prune_terminal_rows(days=30)
+    assert out["deleted_aged"] == 2 and out["deleted"] == 2
+    assert delegation_store.get_delegation("old-done") is None
+    assert delegation_store.get_delegation("old-fail") is None
+    # protected: undelivered inbox, fresh row, non-terminal, timed_out
+    assert delegation_store.get_delegation("old-pending")["status"] \
+        == "completed"
+    assert delegation_store.get_delegation("fresh-done") is not None
+    assert delegation_store.get_delegation("still-running") is not None
+    assert delegation_store.get_delegation("old-timeout") is not None
+
+
+def test_prune_row_cap_evicts_oldest_prunable(home):
+    """Cap rule: only the newest `max_rows` prunable terminal rows survive;
+    undelivered inbox rows neither count against nor fall to the cap."""
+    for i in range(5):
+        delegation_store.insert_delegation(_terminal_row(
+            f"c{i}", settled_ts=_iso(-_AGE_S - 100 + i * 10),
+            created_ts=_iso(-_AGE_S - 100 + i * 10),
+            inbox_state="delivered"))
+    delegation_store.insert_delegation(_terminal_row(
+        "c-pending", thread="th-9", inbox_state="pending",
+        settled_ts=_iso(-_AGE_S - 200), created_ts=_iso(-_AGE_S - 200)))
+    out = delegation_store.prune_terminal_rows(days=365, max_rows=2)
+    assert out["deleted_capped"] == 3, out
+    kept = {r["delegation_id"] for r in
+            delegation_store.list_delegations(limit=100)}
+    # newest two delivered rows survive; the pending row is never touched
+    assert kept == {"c3", "c4", "c-pending"}, kept
+
+
+def test_prune_keeps_rows_without_settled_ts_from_age(home):
+    """Unparseable/missing settled_ts is conservatively NOT old (age rule);
+    the cap can still evict it, oldest-first by created_ts."""
+    delegation_store.insert_delegation(_rec("no-settle", status="completed"))
+    out = delegation_store.prune_terminal_rows(days=0)  # cutoff = now
+    assert out["deleted_aged"] == 0
+    assert delegation_store.get_delegation("no-settle") is not None
+
+
+def test_janitor_pass_wired_and_best_effort(home, monkeypatch):
+    """delegation.janitor_pass delegates to the store and never raises."""
+    delegation_store.insert_delegation(_terminal_row("jp"))  # aged by helper
+    out = delegation.janitor_pass(_cfg())
+    assert out["deleted"] == 1
+    assert delegation_store.get_delegation("jp") is None
+
+    def boom(*a, **k):
+        raise RuntimeError("store down")
+    monkeypatch.setattr(delegation.delegation_store, "prune_terminal_rows",
+                        boom)
+    assert delegation.janitor_pass(_cfg()) == {"deleted_aged": 0,
+                                               "deleted_capped": 0,
+                                               "deleted": 0}
+
+
+# ----------------------------------------------------- busy-poll guardrail
+
+def test_busy_poll_guard_appends_hint_after_rapid_checks(home, monkeypatch,
+                                                         _clean):
+    """D-17 §10 risk #1: after POLL_GUARD_MAX_CHECKS rapid checks of the same
+    delegation by one parent run (with an inbox), the payload carries a gentle
+    'results arrive automatically' hint — earlier checks stay clean."""
+    monkeypatch.setattr(delegation, "POLL_GUARD_MAX_CHECKS", 2)
+    cfg = _cfg()
+    ctx = _ctx(cfg, thread="th-poll")
+    monkeypatch.setattr(delegation, "_run_child", _fake_child(
+        {"completed": True, "result": "r", "child_trace_id": None,
+         "failure_reason": None}))
+    payload = json.loads(delegation.execute_delegation(
+        "coder", "poll me", _ctx=ctx))
+    did = payload["delegation_id"]
+    # wait on the cache directly — polling through check_delegation here would
+    # consume the guard budget being measured.
+    assert _wait_until(lambda: bool((delegation.get_delegation(did) or {})
+                                    .get("_settled")))
+
+    notes = [json.loads(delegation.check_delegation_status(did, _ctx=ctx))
+             .get("poll_guard") for _ in range(3)]
+    assert notes[0] is None and notes[1] is None
+    assert notes[2] and "busy-poll" in notes[2]
+    assert "arrive automatically" in notes[2]
+
+    # A different parent run has its own budget (no inherited hint).
+    other = dict(_ctx(cfg, thread="th-other"), run_id="run-other")
+    assert json.loads(delegation.check_delegation_status(
+        did, _ctx=other)).get("poll_guard") is None
+
+
+def test_busy_poll_guard_silent_without_thread(home, monkeypatch, _clean):
+    """Threadless (CLI) polling has no inbox — it stays honest and unhinted."""
+    monkeypatch.setattr(delegation, "POLL_GUARD_MAX_CHECKS", 1)
+    cfg = _cfg()
+    ctx = _ctx(cfg)  # thread=None
+    monkeypatch.setattr(delegation, "_run_child", _fake_child(
+        {"completed": True, "result": "r", "child_trace_id": None,
+         "failure_reason": None}))
+    did = json.loads(delegation.execute_delegation(
+        "coder", "cli poll", _ctx=ctx))["delegation_id"]
+    assert _wait_until(lambda: delegation.get_delegation(did) and
+                       delegation.get_delegation(did).get("_settled"))
+    for _ in range(4):
+        out = json.loads(delegation.check_delegation_status(did, _ctx=ctx))
+        assert out.get("poll_guard") is None
+
+
+def test_check_delegation_tool_threads_ctx(home, monkeypatch, _clean):
+    """core/tools.py check_delegation passes the runner ctx through so the
+    guardrail actually engages on model calls."""
+    from sable.core import tools
+
+    monkeypatch.setattr(delegation, "POLL_GUARD_MAX_CHECKS", 1)
+    seen = {}
+    real = delegation.check_delegation_status
+
+    def spy(did, _ctx=None):
+        seen["ctx"] = _ctx
+        return real(did, _ctx=_ctx)
+    monkeypatch.setattr(delegation, "check_delegation_status", spy)
+    ctx = {"run_id": "r-7"}
+    out = json.loads(tools.check_delegation(id="d-x", _ctx=ctx))
+    assert seen["ctx"] == ctx
+    assert out["status"] == "failed"  # unknown id -> honest error payload
+
+
+# ------------------------------------- pending-inbox surfacing + wake badge
+
+def test_threads_list_surfaces_pending_inbox_counts(home, _clean, dash):
+    """GET /api/chat/threads carries per-thread undelivered inbox counts for
+    the UI badge (0 when nothing waits; store errors degrade to no badges)."""
+    dash.handle("PUT", "/api/chat/threads/t-badge", body={"messages": []})
+    dash.handle("PUT", "/api/chat/threads/t-quiet", body={"messages": []})
+    delegation_store.insert_delegation(
+        _pending_row("b1", thread="t-badge"))
+    delegation_store.insert_delegation(
+        _pending_row("b2", thread="t-badge", settled_ts=_iso(-2)))
+    rows = dash.handle("GET", "/api/chat/threads").body["threads"]
+    by_id = {t["id"]: t for t in rows}
+    assert by_id["t-badge"]["pending_inbox"] == 2
+    assert by_id["t-quiet"]["pending_inbox"] == 0
+
+
+def test_wake_run_trace_carries_inbox_wake_metadata(home, _clean, dash,
+                                                    monkeypatch):
+    """Phase 3: the wake run's recorder gets metadata {inbox_wake: True} so
+    the traces panel can badge it; user runs get none."""
+    from sable.store import recorder as recorder_mod
+
+    made = []
+    real = recorder_mod.make_recorder
+
+    def spy(cfg, *a, metadata=None, **kw):
+        made.append(metadata)
+        return real(cfg, *a, metadata=metadata, **kw)
+    monkeypatch.setattr(recorder_mod, "make_recorder", spy)
+
+    delegation_store.insert_delegation(_pending_row("meta1", thread="t-meta"))
+    delegation.register_wake_hook("t-meta",
+                                  lambda t: dash.start_inbox_wake_run(t))
+    assert delegation.run_wake_pass(dash.cfg) == 1
+    assert made and made[-1] == {"inbox_wake": True}
+
+    resp = dash.handle("POST", "/api/chat/stream",
+                       body={"prompt": "plain", "thread": "t-plain"})
+    _drain_stream(resp)
+    assert made[-1] is None
