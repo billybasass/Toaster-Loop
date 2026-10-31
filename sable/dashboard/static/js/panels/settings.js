@@ -355,6 +355,62 @@ export default {
         return () => collect([["heal_tool_calls", healSel, "bool"]]);
       });
 
+      // WP12 per-project plans (core/plans.py): master switch + prompt-
+      // injection knobs + guarded-loop caps. The task graph itself is edited
+      // on the Chat page (Tasks tab); toggling `enabled` here is what
+      // un-hides it — while off the plans API answers 404 plans_disabled and
+      // the whole Tasks tab + agent plan tools stay hidden ("off means
+      // invisible" contract). New chat runs pick up the change; no restart.
+      const pl = cfg.plans || {};
+      const plEnSel = boolSelect(pl.enabled);
+      const plSumSel = boolSelect(pl.inject_summary === undefined
+        ? true : pl.inject_summary);
+      const plCapIn = numInput(pl.max_inject_chars, "800");
+      const plLoopReqSel = boolSelect((pl.loop && pl.loop.require_verification
+        === undefined) ? true : (pl.loop || {}).require_verification);
+      const plLoopMaxIn = numInput(pl.loop && pl.loop.max_tasks, "10");
+      const plLoopFailIn = numInput(pl.loop && pl.loop.max_consecutive_failures, "1");
+      const plCard = sectionCard(Object.assign(
+        { text: "Project plans" }, { section: "plans" }), (body) => {
+        body.replaceChildren(
+          el("p", { class: "hint", text:
+            "Per-project task graphs with dependencies (Tasks tab on the Chat " +
+            "page; plan tools for agents; `sable plan …` CLI + MCP plan tools). " +
+            "Off = zero behavior change. The loop fields guard the unattended " +
+            "loop: `sable plan loop` / “run loop” on the Chat page." }),
+          field("enabled", plEnSel,
+            "master switch — on exposes plan tools, injects the plan summary, " +
+            "and un-hides the Chat Tasks tab"),
+          field("inject_summary", plSumSel,
+            "append the bounded “## Project plan” section to run system prompts " +
+            "(off keeps the tools but never injects)"),
+          field("max_inject_chars", plCapIn,
+            "hard cap on that section (lines omitted whole, never sliced)"),
+          field("loop.require_verification", plLoopReqSel,
+            "a run ending on the verification nudge blocks its task (never auto-done)"),
+          field("loop.max_tasks", plLoopMaxIn,
+            "tasks per unattended loop invocation"),
+          field("loop.max_consecutive_failures", plLoopFailIn,
+            "stop the loop after N non-done tasks in a row"));
+        return () => {
+          const p = collect([
+            ["enabled", plEnSel, "bool"],
+            ["inject_summary", plSumSel, "bool"],
+            ["max_inject_chars", plCapIn, "num"]]);
+          // The server replaces the whole `loop` dict on a section patch, so
+          // seed it from the CURRENT config and overlay the edited fields —
+          // unexposed loop keys (e.g. per_task_timeout_seconds) survive an
+          // apply instead of being silently dropped.
+          const loop = Object.assign({}, pl.loop || {});
+          const edits = collect([
+            ["require_verification", plLoopReqSel, "bool"],
+            ["max_tasks", plLoopMaxIn, "num"],
+            ["max_consecutive_failures", plLoopFailIn, "num"]]);
+          if (Object.keys(loop).length) p.loop = Object.assign(loop, edits);
+          return p;
+        };
+      });
+
       // Codebase indexing / semantic search (Phase 5 rework):
       //   * embedding model = dropdown from GET /api/model_catalog, filtered
       //     to embedding-capable GGUFs (client-side name heuristic — the
@@ -712,7 +768,7 @@ export default {
       });
 
       formHost.replaceChildren(serveCard, engineCard, rsCard, smCard, agCard, curCard,
-        trCard, vaCard, ixCard, skCard, pbCard, gmCard, dashCard);
+        trCard, vaCard, plCard, ixCard, skCard, pbCard, gmCard, dashCard);
     }
 
     // -------------------------------------------------------- raw YAML

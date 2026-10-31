@@ -109,6 +109,13 @@ class ConfigRoutes(ApiContext):
             # this section toggles exposure + index cap. The skill list
             # itself lives under /api/skills (Settings panel Skills card).
             "skills": {"enabled", "index_total_cap_chars"},
+            # WP12 per-project plans (core/plans.py) — master switch, prompt
+            # injection knobs, and the guarded-loop dict (validated leniently
+            # by core/plans.plans_config). Without this entry the Settings
+            # "Project plans" card could not patch plans: through the
+            # section-patch path.
+            "plans": {"enabled", "inject_summary", "max_inject_chars",
+                      "loop"},
             # Easy training (turnkey loop) — see training/easy.py.
             # `profiles` is the multi-agent list; `profile` stays the primary.
             "easy_training": {"enabled", "profile", "profiles", "auto_deploy",
