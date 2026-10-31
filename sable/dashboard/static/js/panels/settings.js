@@ -366,8 +366,9 @@ export default {
       const plSumSel = boolSelect(pl.inject_summary === undefined
         ? true : pl.inject_summary);
       const plCapIn = numInput(pl.max_inject_chars, "800");
-      const plLoopReqSel = boolSelect((pl.loop && pl.loop.require_verification
-        === undefined) ? true : (pl.loop || {}).require_verification);
+      const plLoopReqSel = boolSelect(!pl.loop
+        || pl.loop.require_verification === undefined
+        ? true : pl.loop.require_verification);
       const plLoopMaxIn = numInput(pl.loop && pl.loop.max_tasks, "10");
       const plLoopFailIn = numInput(pl.loop && pl.loop.max_consecutive_failures, "1");
       const plCard = sectionCard(Object.assign(
