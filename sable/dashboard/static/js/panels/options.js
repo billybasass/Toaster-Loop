@@ -30,7 +30,6 @@ const EFFECTIVE = {
   recording_enabled: true,
   recording_redact_secrets: true,
   delegation_enabled: true,
-  delegation_timeout_seconds: 300,
   heal_tool_calls: true,
   verify_on_stop: true,
   spill_enabled: true,
@@ -368,22 +367,16 @@ export default {
         section: "delegation",
         hint: "list_agents / delegate_task / check_delegation let one profile " +
           "hand a self-contained subtask to another profile on the same " +
-          "project. The parent waits synchronously up to the timeout (the " +
-          "tool's timeout_seconds arg can override per call); depth is capped " +
-          "at 1 — children cannot delegate further.",
+          "project. Children have no timeout — they take as long as they " +
+          "need; depth is capped at 1 — children cannot delegate further.",
         status: `effective: enabled=${ev("delegation_enabled",
-          cfg.delegation_enabled)} · ` +
-          `timeout ${ev("delegation_timeout_seconds",
-            cfg.delegation_timeout_seconds)} s`,
+          cfg.delegation_enabled)}`,
         build: (body) => {
           const en = boolSelect(cfg.delegation_enabled);
-          const to = numInput(cfg.delegation_timeout_seconds);
           body.replaceChildren(
-            row("enabled", en, "off = the tools are not exposed at all"),
-            row("timeout_seconds", to, "default cap on how long delegate_task waits"));
+            row("enabled", en, "off = the tools are not exposed at all"));
           return () => collect([
-            ["enabled", en, "bool-optional"],
-            ["timeout_seconds", to, "num"]]);
+            ["enabled", en, "bool-optional"]]);
         },
       }));
 

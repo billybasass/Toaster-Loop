@@ -591,10 +591,11 @@ def serve_dashboard(
         raise SystemExit(f"sable dashboard refused to start: {e}")
     except Exception:
         logger.exception("queue dispatcher failed to start")
-    # D-17 (audit §4): delegation dispatcher — bounded worker pool + liveness
-    # watchdog for delegate_task children, and crash reconcile: any row left
-    # non-terminal by a previous process becomes 'interrupted' (never
-    # requeued; side effects may have happened mid-child).
+    # D-17 (audit §4): delegation dispatcher — bounded worker pool + inbox
+    # wake watcher for delegate_task children, and crash reconcile: any row
+    # left non-terminal by a previous process becomes 'interrupted' (never
+    # requeued; side effects may have happened mid-child). Children have no
+    # liveness watchdog / timeout.
     try:
         from ..core import delegation as _deleg
 

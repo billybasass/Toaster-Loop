@@ -318,7 +318,6 @@ def test_loop_blocked_mark_uses_lock_and_rereads(home):
     loop.progress = {"iteration": 1, "tasks": []}
     loop.publish = lambda *a: None
     loop.cancel_event = threading.Event()
-    loop.per_task_timeout_s = 1.0
     loop.require_verification = True
     loop.max_consecutive_failures = 99
     loop.max_tasks = 10

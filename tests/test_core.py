@@ -477,7 +477,7 @@ def test_load_config_silent_on_known_keys(home, caplog):
 
     _write_yaml(home / "sable.yaml", {
         "context_length": 8192, "model_name": "m", "recording": {"enabled": True},
-        "delegation": {"timeout_seconds": 60}, "training": {"eval_seed": 3},
+        "delegation": {"max_concurrent": 3}, "training": {"eval_seed": 3},
         "agent": {"guardrails": True}, "tools": {"lint_on_write": False},
     })
     with caplog.at_level(logging.WARNING, logger="sable.config"):
@@ -530,7 +530,7 @@ def test_all_mistypes_reported_at_once(home__test_config_strictness):
         "attach_url": 42,              # mistyped str field
         "training": "nope",            # mistyped mapping field
         "recording": {"retention_days": "soon"},   # nested mistype
-        "delegation": {"timeout_seconds": "abc"},  # nested mistype
+        "delegation": {"max_concurrent": "abc"},   # nested mistype
     })
     with pytest.raises(ConfigError) as ei:
         load_config(cfg_path)
@@ -541,7 +541,7 @@ def test_all_mistypes_reported_at_once(home__test_config_strictness):
     assert "attach_url" in msg
     assert "training" in msg
     assert "recording.retention_days" in msg
-    assert "delegation.timeout_seconds" in msg
+    assert "delegation.max_concurrent" in msg
     # consolidated-count header + the strictness note (documented choice)
     assert "6 problems" in msg
     assert "SABLE_CONFIG_STRICT" in msg
@@ -631,7 +631,7 @@ FULL_VALID = {
     "gpu_layers": 0,
     "llama_auto_setup": False,
     "recording_enabled": False,
-    "delegation": {"enabled": True, "timeout_seconds": 60},
+    "delegation": {"enabled": True, "max_concurrent": 3},
     "curation": {"min_score": 0.5},
     "training": {"base_model": "B/M"},
     "validation": {"min_pass_rate": 0.8},
@@ -658,7 +658,7 @@ def test_valid_config_loads_identical(home__test_config_strictness):
     assert base == strict
     # spot-check the flat fields actually landed
     assert base.port == 8080 and base.context_length == 4096
-    assert base.delegation_timeout_seconds == 60.0
+    assert base.delegation_max_concurrent == 3
     assert base.recording_enabled is False
     assert base.run_settings["flash_attn"] is True
 
@@ -685,7 +685,7 @@ def test_benign_string_coercions_still_load(home__test_config_strictness):
         "port": "8080",
         "context_length": "4096",
         "recording": {"enabled": "off"},
-        "delegation": {"timeout_seconds": "60"},
+        "delegation": {"max_concurrent": "2"},
     })
     cfg = load_config(cfg_path)  # must not raise
     # NOTE: the pre-WP2 loader stores top-level YAML scalars verbatim (no int
@@ -696,7 +696,7 @@ def test_benign_string_coercions_still_load(home__test_config_strictness):
     # pre-WP2 quirk pinned verbatim: recording.enabled uses bool(...) so the
     # string "off" is truthy. WP2 must not change it (byte-identical rule).
     assert cfg.recording_enabled is True
-    assert cfg.delegation_timeout_seconds == 60.0
+    assert cfg.delegation_max_concurrent == 2
 
 
 def test_explicit_null_workspace_root_preserved(home__test_config_strictness):

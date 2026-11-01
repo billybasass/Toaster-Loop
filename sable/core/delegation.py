@@ -1,8 +1,8 @@
 """Agent discovery + delegation (feature-wave Phase 2; D-17 async inbox).
 
 Lets one agent profile hand a subtask to another profile on the SAME project.
-Response shapes (success / timeout-with-diagnostics / error payloads) follow
-modeled on the delegation tool contract in spirit.
+Response shapes (success / error payloads) follow modeled on the delegation
+tool contract in spirit.
 
 Execution model — D-17 (amends D-11): ``delegate_task`` DISPATCHES by default.
 It registers a durable record (``core/delegation_store.py`` — SQLite, the
@@ -11,8 +11,8 @@ process-wide dispatcher pool, and returns ``{status: "dispatched",
 delegation_id}`` immediately. The legacy synchronous wait survives behind an
 explicit ``wait=true`` (config ``delegation.async_default: false`` restores it
 globally): the child runs on the shared dispatcher pool while the parent
-polls up to a bounded timeout, then returns the same timeout-with-diagnostics
-payload as before.
+waits UNTIL the child settles (or is cancelled) — children have no timeout and
+may take as long as they need.
 
 Durable registry: every lifecycle transition writes through to the store
 (queued -> running via the atomic claim; terminal set writes result + error +
@@ -20,9 +20,8 @@ Durable registry: every lifecycle transition writes through to the store
 consumes those). The in-process ``_delegations`` OrderedDict stays as the hot
 cache (heartbeats + ``check_delegation`` fast path); on cache miss reads fall
 back to the store, so ``check_delegation`` survives restarts (audit §4 item
-3). A liveness watchdog enforces ``delegation.liveness_timeout_seconds`` on
-queue dwell + heartbeat staleness (wedge-detect -> cooperative cancel ->
-``wedged``), and startup reconcile marks crash-orphaned rows ``interrupted``.
+3). Startup reconcile marks crash-orphaned rows ``interrupted``. There is no
+liveness watchdog: a slow child is a working child, never wedged away.
 
 Fault posture mirrors the rest of core: tools never raise into the loop;
 errors come back as JSON payloads with an ``error`` field (which
@@ -61,17 +60,12 @@ from . import delegation_store
 from .failure_types import FAILURE_CANCELLED
 
 MAX_RESULT_CHARS = 8_000        # child answer kept in the payload
-# Audit §6 floor: now that timeout/cancel is cooperative (§2), a mistyped tiny
-# timeout abandons AND cancel-signals a perfectly healthy child, so anything
-# below 15s is clamped up (with a "warning" field in the tool payload — see
-# _resolve_timeout). Tests needing sub-second waits monkeypatch this constant.
-MIN_TIMEOUT_S = 15.0
-MAX_TIMEOUT_S = 3_600.0
 DELEGATION_BLOCKED_TOOLS_NOTE = "nested delegation is not allowed (depth limit 1)"
 
 #: Heartbeat store-write throttle (§3.1): at most one SQLite write per this
 #: many seconds per delegation — the loop-boundary tick can fire far more
-#: often than the watchdog needs.
+#: often than readers need it (last_activity_ts is observability only now:
+#: there is no liveness watchdog and no timeout).
 TOUCH_THROTTLE_S = 2.0
 
 _THREAD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -232,7 +226,7 @@ def _store_delegation(record: Dict[str, Any]) -> None:
                 _pruned_summaries[old_id] = {
                     k: old.get(k) for k in
                     ("agent", "status", "result", "child_trace_id", "error",
-                     "created", "last_activity_ts", "timeout_warning")}
+                     "created", "last_activity_ts")}
                 while len(_pruned_summaries) > _PRUNED_RING_CAP:
                     _pruned_summaries.pop(next(iter(_pruned_summaries)))
 
@@ -355,9 +349,9 @@ def _row_from_record(record: Dict[str, Any], cfg: Any) -> Dict[str, Any]:
         "started_ts": record.get("started_ts"),
         "settled_ts": record.get("settled_ts"),
         "last_activity_ts": record.get("last_activity_ts"),
-        "liveness_timeout": float(record.get(
-            "liveness_timeout",
-            getattr(cfg, "delegation_liveness_timeout_seconds", 600.0))),
+        # Vestigial column (kept for old DB compatibility): there is no
+        # liveness watchdog anymore, so nothing reads it.
+        "liveness_timeout": 0.0,
         "result": record.get("result"),
         "error": record.get("error"),
         "child_trace_id": record.get("child_trace_id"),
@@ -521,7 +515,7 @@ def _error_payload(message: str, **extra: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Dispatcher — bounded supervised pool + liveness watchdog (D-17 §3)
+# Dispatcher — bounded supervised pool + inbox wake watcher (D-17 §3)
 # ---------------------------------------------------------------------------
 
 _disp_lock = threading.Lock()
@@ -553,12 +547,12 @@ _override_wake_retry_s: Optional[float] = None
 
 
 def init_dispatcher(cfg: Any) -> None:
-    """Create the bounded worker pool + liveness watchdog (idempotent).
-    Called at dashboard/CLI startup; also lazily on first dispatch. The same
-    loop also drives the D-17 Phase 2 inbox wake watcher (spec §4.1: "watcher
-    loop (same watchdog thread is fine)"), sleeping
-    ``delegation.wake_retry_seconds`` between passes and waking early via
-    ``nudge_delivery()`` when a chat run ends."""
+    """Create the bounded worker pool + inbox wake watcher (idempotent).
+    Called at dashboard/CLI startup; also lazily on first dispatch. The
+    watcher thread drives the D-17 Phase 2 inbox wake pass (spec §4.1),
+    sleeping ``delegation.wake_retry_seconds`` between passes and waking
+    early via ``nudge_delivery()`` when a chat run ends. There is no liveness
+    watchdog: children have no timeout and are never wedged away."""
     global _executor, _dispatcher_cfg, _accepting, _watchdog_stop, \
         _watchdog_thread, _wake_nudge
     with _disp_lock:
@@ -572,19 +566,16 @@ def init_dispatcher(cfg: Any) -> None:
                 max_workers=max(1, n), thread_name_prefix="deleg-worker")
         if _watchdog_thread is None or not _watchdog_thread.is_alive():
             _watchdog_stop = threading.Event()
-            interval = float(getattr(cfg, "delegation_liveness_check_interval_seconds", 5.0) or 5.0)
             wake_retry = float(getattr(cfg, "delegation_wake_retry_seconds",
                                        2.0) or 2.0)
             stop = _watchdog_stop
             nudge = _wake_nudge
 
             def _wd_loop() -> None:
-                # One loop drives both duties (spec §4.1): the wake pass runs
-                # at the (fast, wake_retry_seconds) cadence; the liveness scan
-                # keeps its own slower interval. The shared nudge Event lets an
-                # ended chat run (nudge_delivery) — or shutdown — trigger an
-                # immediate iteration instead of idling out the retry window.
-                last_liveness = time.monotonic()
+                # Wake pass at the (fast, wake_retry_seconds) cadence. The
+                # nudge Event lets an ended chat run (nudge_delivery) — or
+                # shutdown — trigger an immediate iteration instead of idling
+                # out the retry window.
                 while not stop.is_set():
                     if nudge.wait(timeout=max(0.2,
                                               _override_wake_retry_s
@@ -596,16 +587,9 @@ def init_dispatcher(cfg: Any) -> None:
                         run_wake_pass(_dispatcher_cfg)
                     except Exception:  # noqa: BLE001 — watcher never dies
                         pass
-                    now = time.monotonic()
-                    if now - last_liveness >= max(1.0, interval):
-                        last_liveness = now
-                        try:
-                            _liveness_scan_once(_dispatcher_cfg)
-                        except Exception:  # noqa: BLE001
-                            pass
 
             _watchdog_thread = threading.Thread(
-                target=_wd_loop, daemon=True, name="deleg-watchdog")
+                target=_wd_loop, daemon=True, name="deleg-watcher")
             _watchdog_thread.start()
 
 
@@ -734,107 +718,10 @@ def _pump() -> None:
         pass
 
 
-# ---------------------------------------------------------------------------
-# Liveness watchdog (D-17 §3): queue starvation + heartbeat staleness
-# ---------------------------------------------------------------------------
-
-def _settle_wedged(row: Dict[str, Any], error: str, cfg: Any) -> bool:
-    """CAS a non-terminal row to ``wedged`` (+ inbox pending when it has a
-    thread and was dispatched async). Returns whether we won the race."""
-    did = row["delegation_id"]
-    inbox = ("pending" if row.get("thread") and not row.get("wait_mode")
-             else "none")
-    won = False
-    try:
-        won = delegation_store.update_delegation(
-            did, cfg=cfg, status="wedged", settled_ts=_utcnow(), error=error,
-            last_activity_ts=_utcnow(), inbox_state=inbox,
-            expect_status=row.get("status"))
-    except Exception:  # noqa: BLE001
-        return False
-    if not won:
-        return False
-    with _registry_lock:
-        rec = _delegations.get(did)
-        if rec is not None and not rec.get("_settled"):
-            rec["status"] = "wedged"
-            rec["error"] = error
-            rec["last_activity_ts"] = _utcnow()
-            rec["_settled"] = True
-    return True
-
-
-def _liveness_scan_once(cfg: Any = None) -> int:
-    """One watchdog pass over the non-terminal rows (spec §3):
-
-    - ``queued`` older than the liveness window -> ``wedged`` (dispatcher
-      starvation is itself a wedge signal);
-    - ``running`` with a stale heartbeat -> set the cooperative cancel event
-      and flip to ``cancelling`` (in-process records only; cross-process
-      orphans belong to startup reconcile);
-    - ``cancelling`` that never observed the cancel within one more full
-      window -> ``wedged``.
-
-    Returns the number of rows touched. Runs from the watchdog thread and is
-    directly callable by tests (no sleeping required)."""
-    cfg = cfg if cfg is not None else _default_cfg()
-    liveness = float(getattr(cfg, "delegation_liveness_timeout_seconds", 600.0))
-    touched = 0
-    try:
-        rows = delegation_store.list_delegations(
-            statuses=delegation_store.NON_TERMINAL_STATUSES, limit=10_000,
-            cfg=cfg)
-    except Exception:  # noqa: BLE001 — scan is best-effort per tick
-        return 0
-    for row in rows:
-        status = row.get("status")
-        if status == "queued":
-            age = _age_seconds(row.get("created_ts"))
-            if age is not None and age > liveness:
-                if _settle_wedged(
-                        row, "child never started within the liveness window",
-                        cfg):
-                    touched += 1
-        elif status == "running":
-            age = _age_seconds(row.get("last_activity_ts")
-                               or row.get("started_ts"))
-            if age is None or age <= liveness:
-                continue
-            did = row["delegation_id"]
-            with _registry_lock:
-                rec = _delegations.get(did)
-            if rec is None or rec.get("_settled"):
-                # Cross-process orphan or already settling: startup reconcile
-                # owns the first, the worker settles the second.
-                continue
-            ev = rec.get("cancel_event")
-            if isinstance(ev, threading.Event):
-                ev.set()
-            err = f"liveness timeout after {liveness:g}s of silence"
-            try:
-                moved = delegation_store.update_delegation(
-                    did, cfg=cfg, status="cancelling", error=err,
-                    expect_status="running")
-            except Exception:  # noqa: BLE001
-                continue
-            if moved:
-                with _registry_lock:
-                    if not rec.get("_settled"):
-                        rec["status"] = "cancelling"
-                        rec["error"] = err
-                touched += 1
-        elif status == "cancelling":
-            # One full extra window after the cancel was requested (the row
-            # was already stale by `liveness` when we marked it, so total
-            # staleness > 2 * liveness means the child never observed it).
-            age = _age_seconds(row.get("last_activity_ts"))
-            if age is not None and age > 2 * liveness:
-                if _settle_wedged(
-                        row,
-                        f"never observed cancel after liveness timeout "
-                        f"({liveness:g}s)", cfg):
-                    touched += 1
-    return touched
+# NOTE (D-18): the D-17 §3 liveness watchdog (_settle_wedged /
+# _liveness_scan_once) is gone by design — children have no timeout and may
+# run as long as they need. The `wedged` status remains in the store schema
+# only so historical rows from older versions stay readable.
 
 
 # ---------------------------------------------------------------------------
@@ -937,32 +824,6 @@ def run_wake_pass(cfg: Any = None) -> int:
 # ---------------------------------------------------------------------------
 # delegate_task execution
 # ---------------------------------------------------------------------------
-
-def _resolve_timeout(cfg: Any, timeout_seconds: Any) -> "tuple[float, Optional[str]]":
-    """Clamp the requested wait into [MIN_TIMEOUT_S, MAX_TIMEOUT_S].
-
-    Returns (timeout, warning). Audit §6: with cooperative cancel landed (§2),
-    a mistyped tiny timeout no longer just returns early — it abandons AND
-    cancel-signals a healthy child — so anything under MIN_TIMEOUT_S is clamped
-    up and the caller gets an explicit warning for the tool payload instead of
-    silently honoring the footgun. Kept in-tool (not config load) because the
-    floor is about *this call's* wait, per-call overrides included; mirrors the
-    existing clamp-and-note pattern used elsewhere in core."""
-    raw = timeout_seconds
-    if raw is None:
-        raw = getattr(cfg, "delegation_timeout_seconds", 300)
-    warning: Optional[str] = None
-    try:
-        val = float(raw)
-    except (TypeError, ValueError):
-        val = 300.0
-    clamped = max(MIN_TIMEOUT_S, min(val, MAX_TIMEOUT_S))
-    if clamped != val:
-        warning = (f"timeout {val:g}s clamped to minimum {MIN_TIMEOUT_S:g}s"
-                   if val < MIN_TIMEOUT_S else
-                   f"timeout {val:g}s clamped to maximum {MAX_TIMEOUT_S:g}s")
-    return clamped, warning
-
 
 def _resolve_peer_profile(cfg: Any, agent: str) -> Optional[Dict[str, Any]]:
     """Profile dict for a <agent>@<host> peer agent, or None. Lazy, guarded
@@ -1078,10 +939,10 @@ def _run_child(cfg: Any, prof: Dict[str, Any], task: str, ctx: Dict[str, Any],
         cancel_event=cancel_event,
         # Remote peer agents: X-Sable-Instance for multi-instance gateways.
         extra_headers=extra_headers)
-    # D-17 §3.1: intra-loop liveness heartbeat — the runner ticks
-    # delegation.touch() at every loop boundary and after each tool call so a
-    # long (but healthy) tool call never looks wedged to the watchdog.
-    # Default None on every other caller = zero behavior change.
+    # D-17 §3.1: intra-loop heartbeat — the runner ticks delegation.touch() at
+    # every loop boundary and after each tool call so last_activity_ts stays
+    # current for observability (check_delegation). Default None on every
+    # other caller = zero behavior change.
     try:
         runner._heartbeat = lambda: touch(delegation_id)
     except Exception:  # noqa: BLE001 — exotic stub runners may forbid attrs
@@ -1105,7 +966,6 @@ def _run_child(cfg: Any, prof: Dict[str, Any], task: str, ctx: Dict[str, Any],
 
 
 def execute_delegation(agent: str, task: str, context: str = "",
-                       timeout_seconds: Any = None,
                        plan_task: Optional[str] = None,
                        _ctx: Optional[Dict[str, Any]] = None,
                        wait: Optional[bool] = None) -> str:
@@ -1119,9 +979,10 @@ def execute_delegation(agent: str, task: str, context: str = "",
 
     ``wait`` (D-17): ``None`` -> config ``delegation.async_default`` (true:
     dispatch immediately, result arrives via inbox/check_delegation);
-    ``True`` -> the legacy D-11 bounded synchronous wait; ``False`` -> force
-    async. Deterministic internal callers (plan_loop-style code that needs
-    results inline) must pass ``wait=True`` explicitly."""
+    ``True`` -> the legacy D-11 synchronous wait; ``False`` -> force async.
+    Deterministic internal callers (plan_loop-style code that needs results
+    inline) must pass ``wait=True`` explicitly. The synchronous wait has no
+    deadline: it blocks until the child settles or is cancelled."""
     ctx = dict(_ctx or {})
     cfg = ctx.get("cfg")
     if cfg is None:
@@ -1197,7 +1058,6 @@ def execute_delegation(agent: str, task: str, context: str = "",
             f"dispatcher saturated — {queued_now} delegations queued; "
             "retry shortly", code="dispatcher_saturated")
 
-    timeout, timeout_warning = _resolve_timeout(cfg, timeout_seconds)
     record: Dict[str, Any] = {
         "delegation_id": uuid.uuid4().hex[:12],
         "agent": agent,
@@ -1211,10 +1071,6 @@ def execute_delegation(agent: str, task: str, context: str = "",
         "thread": ctx.get("thread"),
         "parent_run_id": ctx.get("run_id"),
         "depth": int(ctx.get("depth", 0)) + 1,
-        "timeout_seconds": timeout,
-        # Audit §6: set when the requested timeout was clamped (footgun guard);
-        # surfaced verbatim in every tool payload for this delegation.
-        "timeout_warning": timeout_warning,
         "started_mono": time.monotonic(),
         "result": None,
         "child_trace_id": None,
@@ -1224,10 +1080,9 @@ def execute_delegation(agent: str, task: str, context: str = "",
         # runner's intra-loop _heartbeat tick (delegation.touch). The liveness
         # watchdog keys wedge-detection off its staleness.
         "last_activity_ts": _utcnow(),
-        # Cooperative cancel (audit §2 bug B): set on parent timeout, via
-        # cancel_delegation(), the watchdog, or when the parent chat run is
-        # cancelled. Forwarded into create_runner(cancel_event=...) for the
-        # child.
+        # Cooperative cancel (audit §2 bug B): set via cancel_delegation() or
+        # when the parent chat run is cancelled. Forwarded into
+        # create_runner(cancel_event=...) for the child.
         "cancel_event": threading.Event(),
         # Internal: True once a terminal state (completed/failed/cancelled/
         # wedged/interrupted) has been settled into the record; guards against
@@ -1236,8 +1091,7 @@ def execute_delegation(agent: str, task: str, context: str = "",
         "_settled": False,
         # D-17: durable bookkeeping.
         "wait_mode": 0 if async_mode else 1,
-        "liveness_timeout": float(getattr(
-            cfg, "delegation_liveness_timeout_seconds", 600.0)),
+        "liveness_timeout": 0.0,   # vestigial column (no watchdog anymore)
         "inbox_state": "none",
         # Non-serialized refs for durable write-through (underscore keys are
         # never copied into payloads or the pruned ring).
@@ -1260,10 +1114,6 @@ def execute_delegation(agent: str, task: str, context: str = "",
                 pass
 
     def _finish(payload_fields: Dict[str, Any]) -> str:
-        # Audit §6: a clamped timeout must be visible in the tool result, not
-        # silently honored — attach the warning to every payload path.
-        if record.get("timeout_warning") and "timeout_warning" not in payload_fields:
-            payload_fields["timeout_warning"] = record["timeout_warning"]
         _notify()
         return _payload(**payload_fields)
 
@@ -1403,21 +1253,17 @@ def execute_delegation(agent: str, task: str, context: str = "",
         return _finish(fields)
 
     # ---- legacy synchronous path (wait=true, D-11 semantics) --------------
-    # Parent-level cancel (audit §2 bug B): chat passes its run's cancel Event
-    # into the delegation context; a set parent event flips this delegation's
-    # cooperative cancel too. CLI/stubs pass none and behave exactly as before.
+    # No deadline: the child takes as long as it needs and the parent waits
+    # for its real terminal state. Parent-level cancel (audit §2 bug B): chat
+    # passes its run's cancel Event into the delegation context; a set parent
+    # event flips this delegation's cooperative cancel too. CLI/stubs pass
+    # none and behave exactly as before.
     parent_cancel = ctx.get("cancel_event")
-    timed_out = False
     cancelled_by_parent = False
-    deadline = time.monotonic() + timeout
     while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            timed_out = True
-            break
         # Heartbeat wait slice: cheap poll granularity so last_activity_ts
         # keeps ticking while the child runner is registered in _active_runs.
-        time.sleep(min(_HEARTBEAT_POLL_S, remaining))
+        time.sleep(_HEARTBEAT_POLL_S)
         with _registry_lock:
             settled_now = bool(record.get("_settled"))
             if record["delegation_id"] in _active_runs:
@@ -1451,47 +1297,6 @@ def execute_delegation(agent: str, task: str, context: str = "",
             "error": ("parent run cancelled; child notified to stop "
                       "(record settles to cancelled)"),
         })
-    if timed_out:
-        # Race boundary: the child may have settled right as we timed out —
-        # prefer its real terminal state over the timeout payload.
-        with _registry_lock:
-            settled = bool(record.get("_settled"))
-        elapsed = round(time.monotonic() - record["started_mono"], 2)
-        if not settled:
-            with _registry_lock:
-                if not record.get("_settled"):
-                    record["status"] = "timed_out"
-                    record["error"] = (
-                        f"child agent {agent!r} timed out after {timeout}s "
-                        "without returning")
-            # Bug B: cooperative stop instead of pure abandonment — the child
-            # polls this event at runner loop boundaries. If it observes it,
-            # the record reconciles timed_out -> cancelled; if the child
-            # finishes anyway (older runners, in-flight syscall) its terminal
-            # state still lands via _settle_from_box. A row still 'queued'
-            # (pool saturation) gets its pending exec dropped so no pump ever
-            # starts it late.
-            record["cancel_event"].set()
-            with _registry_lock:
-                _pending_exec.pop(record["delegation_id"], None)
-            _store_write(record, status="timed_out", error=record["error"])
-            return _finish({
-                "status": "timed_out",
-                "delegation_id": record["delegation_id"],
-                "agent": agent,
-                "error": record["error"],
-                "timeout_seconds": timeout,
-                "elapsed_s": elapsed,
-                "partial_output": None,
-                "diagnostics": {
-                    "child_agent": agent,
-                    "project": record.get("project"),
-                    "task_preview": task[:200],
-                    "note": ("child notified to stop (cooperative cancel); "
-                             "its trace (if any) is still recorded; re-check "
-                             "with check_delegation for the settled state"),
-                },
-            })
 
     # Normal path: the worker has settled the record — build the payload from
     # its terminal state (identical shapes to before, plus cancelled).
@@ -1641,8 +1446,6 @@ def check_delegation_status(delegation_id: str,
                          "(cap/age); this is its terminal summary and its "
                          "trace remains in the Traces store"),
             }
-            if pruned.get("timeout_warning"):
-                fields["timeout_warning"] = pruned["timeout_warning"]
             return _payload(**fields)
         try:
             row = delegation_store.get_delegation(did, cfg=_default_cfg())
@@ -1669,8 +1472,7 @@ def check_delegation_status(delegation_id: str,
         "delegation_id": rec.get("delegation_id"),
         "agent": rec.get("agent"),
         "created": rec.get("created"),
-        # Heartbeat (groundwork for liveness timeout): last time the registry
-        # saw activity for this run.
+        # Heartbeat: last time the registry saw activity for this run.
         "last_activity_ts": rec.get("last_activity_ts"),
     }
     if rec.get("status") == "queued":

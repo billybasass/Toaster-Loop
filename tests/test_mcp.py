@@ -857,39 +857,15 @@ def test_delegate_schema_mentions_depth_limit(_clean_registry):
     assert "cannot itself delegate" in desc
 
 
-def test_resolve_timeout_clamps_floor_and_ceiling(home__test_delegation):
-    """Audit §6: MIN_TIMEOUT_S footgun — tiny timeouts clamp UP with an
-    explicit warning (cooperative cancel would otherwise kill a healthy
-    child); the ceiling clamps too."""
-    cfg = _cfg(PROFILES, home=home__test_delegation)
-    assert delegation.MIN_TIMEOUT_S == 15.0
-    val, warn = delegation._resolve_timeout(cfg, 0.1)
-    assert val == 15.0
-    assert warn == "timeout 0.1s clamped to minimum 15s"
-    big, warn_big = delegation._resolve_timeout(cfg, 99_999)
-    assert big == 3600.0
-    assert warn_big == "timeout 99999s clamped to maximum 3600s"
-    ok, warn_ok = delegation._resolve_timeout(cfg, 42)
-    assert ok == 42.0 and warn_ok is None
-    # default (None -> config) stays unclamped, no warning
-    dflt, warn_d = delegation._resolve_timeout(cfg, None)
-    assert dflt == 300.0 and warn_d is None
-
-
-def test_delegate_tiny_timeout_clamped_with_warning_in_payload(
-        home__test_delegation, monkeypatch, _clean_registry):
-    """End-to-end: the clamped timeout + warning surface in the tool result."""
-    cfg = _cfg(PROFILES, home=home__test_delegation)
-    monkeypatch.setattr(delegation, "_run_child", _fake_run_child({}))
-    payload = json.loads(TOOL_IMPLS["delegate_task"](
-        agent="coder", task="quick thing", timeout_seconds=0.1, wait=True,
-        _ctx=_cfg_ctx(cfg, "http://127.0.0.1:1/v1")))
-    assert payload["status"] == "completed", payload
-    # The success payload shape is unchanged apart from the additive warning;
-    # the record itself carries the effective (clamped) timeout.
-    assert payload["timeout_warning"] == "timeout 0.1s clamped to minimum 15s"
-    rec = delegation.get_delegation(payload["delegation_id"])
-    assert rec is not None and rec["timeout_seconds"] == pytest.approx(15.0)
+def test_delegate_has_no_timeout_knobs():
+    """D-18: the timeout machinery (clamps, config knob, tool arg) is gone —
+    children run as long as they need."""
+    assert not hasattr(delegation, "_resolve_timeout")
+    assert not hasattr(delegation, "MIN_TIMEOUT_S")
+    assert not hasattr(delegation, "MAX_TIMEOUT_S")
+    schema = next(s for s in TOOL_SCHEMAS
+                  if s["function"]["name"] == "delegate_task")
+    assert "timeout_seconds" not in schema["function"]["parameters"]["properties"]
 
 
 # --------------------------------------- audit §6: list_agents peer busy state
@@ -1082,87 +1058,33 @@ def test_delegate_without_context_degrades(home__test_delegation, _clean_registr
     assert out["status"] == "failed" and "configuration context" in out["error"]
 
 
-# -------------------------------------------------------------------- timeout
-
-def test_delegate_timeout_returns_diagnostics_payload(home__test_delegation, monkeypatch, _clean_registry):
-    cfg = _cfg(PROFILES, home=home__test_delegation)
-    # Audit §6 raised the real floor to 15s; this test needs a sub-second wait.
-    monkeypatch.setattr(delegation, "MIN_TIMEOUT_S", 0.1)
-
-    def slow_child(cfg_, prof, task, ctx, delegation_id, out,
-                   plan_task=None, cancel_event=None):
-        # Wait for the cooperative cancel (audit §2 bug B) instead of a
-        # blind sleep: proves the timeout path actually flips the event.
-        deadline = time.monotonic() + 5
-        while (time.monotonic() < deadline
-               and not (cancel_event is not None and cancel_event.is_set())):
-            time.sleep(0.05)
-
-    monkeypatch.setattr(delegation, "_run_child", slow_child)
-    t0 = time.monotonic()
-    with FakeOpenAIServer() as srv:
-        payload = json.loads(TOOL_IMPLS["delegate_task"](
-            agent="coder", task="take forever", timeout_seconds=0.3, wait=True,
-            _ctx=_cfg_ctx(cfg, srv.base_url)))
-    elapsed = time.monotonic() - t0
-    assert elapsed < 3.0, "timeout payload must not wait for the child"
-    assert payload["status"] == "timed_out"
-    assert payload["delegation_id"] and payload["timeout_seconds"] == pytest.approx(0.3)
-    assert payload["diagnostics"]["child_agent"] == "coder"
-    assert "timed out" in payload["error"]
-    # Registry state for check_delegation: the record flips to timed_out and
-    # the cooperative cancel lands; the fake child notices fast, so by read
-    # time it has usually reconciled to the terminal 'cancelled' (audit §2
-    # bug A state machine). Either transitional/terminal state is valid here;
-    # the heartbeat timestamp must be present either way.
-    poll = json.loads(TOOL_IMPLS["check_delegation"](id=payload["delegation_id"]))
-    assert poll["status"] in ("timed_out", "cancelled"), poll
-    assert poll.get("last_activity_ts")
-
-
 def _cfg_ctx(cfg, base_url):
     return _ctx(cfg, base_url, profile="researcher")
 
 
-def test_delegate_timeout_reconciles_when_child_finishes_later(
+def test_delegate_wait_blocks_until_slow_child_settles(
         home__test_delegation, monkeypatch, _clean_registry):
-    """Audit §2 bug A: a child that finishes AFTER the parent's timeout must
-    settle its real terminal state into the registry record — check_delegation
-    flips timed_out -> completed with the result (docstring promise)."""
+    """D-18: wait=true has NO deadline — a slow child finishes on its own and
+    the parent returns its real terminal state (no timed_out payload)."""
     cfg = _cfg(PROFILES, home=home__test_delegation)
-    # Audit §6 raised the real floor to 15s; this test needs a sub-second wait.
-    monkeypatch.setattr(delegation, "MIN_TIMEOUT_S", 0.1)
 
     def slow_then_done(cfg_, prof, task, ctx, delegation_id, out,
                        plan_task=None, cancel_event=None):
-        time.sleep(1.0)  # longer than the 0.3s parent timeout below
+        time.sleep(1.0)  # any duration: nothing cuts the wait short anymore
         out["completed"] = True
-        out["result"] = "late but done"
+        out["result"] = "slow but done"
         out["child_trace_id"] = "tr-late"
 
     monkeypatch.setattr(delegation, "_run_child", slow_then_done)
     with FakeOpenAIServer() as srv:
         payload = json.loads(TOOL_IMPLS["delegate_task"](
-            agent="coder", task="finish late", timeout_seconds=0.3, wait=True,
+            agent="coder", task="finish late", wait=True,
             _ctx=_cfg_ctx(cfg, srv.base_url)))
-    did = payload["delegation_id"]
-    assert payload["status"] == "timed_out"
-
-    # Immediately after: still timed_out (child not done yet), heartbeat ts set.
-    poll = json.loads(TOOL_IMPLS["check_delegation"](id=did))
-    assert poll["status"] == "timed_out"
-    assert poll.get("last_activity_ts")
-
-    # Once the child thread settles: record reconciles to completed+result.
-    deadline = time.monotonic() + 4.0
-    while time.monotonic() < deadline:
-        poll = json.loads(TOOL_IMPLS["check_delegation"](id=did))
-        if poll["status"] != "timed_out":
-            break
-        time.sleep(0.05)
+    assert payload["status"] == "completed", payload
+    assert "slow but done" in payload["result"]
+    assert payload["child_trace_id"] == "tr-late"
+    poll = json.loads(TOOL_IMPLS["check_delegation"](id=payload["delegation_id"]))
     assert poll["status"] == "completed", poll
-    assert "late but done" in poll["result"]
-    assert poll["child_trace_id"] == "tr-late"
 
 
 def test_delegate_parent_cancel_stops_child_and_settles_cancelled(
@@ -1198,7 +1120,7 @@ def test_delegate_parent_cancel_stops_child_and_settles_cancelled(
 
     def run_delegate():
         result["payload"] = json.loads(TOOL_IMPLS["delegate_task"](
-            agent="coder", task="loop forever", timeout_seconds=10, wait=True,
+            agent="coder", task="loop forever", wait=True,
             _ctx=ctxd))
 
     t = threading.Thread(target=run_delegate, daemon=True)
@@ -1253,7 +1175,7 @@ def test_cancel_delegation_stops_running_child(home__test_delegation,
 
     def run_delegate():
         result["payload"] = json.loads(TOOL_IMPLS["delegate_task"](
-            agent="coder", task="loop forever", timeout_seconds=10, wait=True,
+            agent="coder", task="loop forever", wait=True,
             _ctx=_cfg_ctx(cfg, "http://127.0.0.1:1/v1")))
 
     t = threading.Thread(target=run_delegate, daemon=True)
@@ -1404,23 +1326,19 @@ def test_recorder_metadata_and_nullrecorder_passthrough(home__test_delegation, _
 
 def test_config_section_and_env_overrides(tmp_path, monkeypatch, _clean_registry):
     cfg_file = tmp_path / "c.yaml"
-    cfg_file.write_text(
-        "delegation:\n  enabled: false\n  timeout_seconds: 42\n")
+    cfg_file.write_text("delegation:\n  enabled: false\n")
     monkeypatch.delenv("SABLE_DELEGATION", raising=False)
-    monkeypatch.delenv("SABLE_DELEGATION_TIMEOUT_S", raising=False)
     cfg = load_config(str(cfg_file))
     assert cfg.delegation_enabled is False
-    assert cfg.delegation_timeout_seconds == 42.0
 
     monkeypatch.setenv("SABLE_DELEGATION", "true")
-    monkeypatch.setenv("SABLE_DELEGATION_TIMEOUT_S", "77")
     cfg2 = load_config(str(cfg_file))
     assert cfg2.delegation_enabled is True
-    assert cfg2.delegation_timeout_seconds == 77.0
 
     defaults = SableConfig()
     assert defaults.delegation_enabled is True
-    assert defaults.delegation_timeout_seconds == 300.0
+    # D-18: no timeout knob anymore.
+    assert not hasattr(defaults, "delegation_timeout_seconds")
 
 
 def test_chat_stream_passes_delegation_context_and_thread(home__test_delegation, monkeypatch, _clean_registry):

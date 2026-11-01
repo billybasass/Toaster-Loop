@@ -226,19 +226,16 @@ tools:
 # `delegations` list when run from the dashboard. By default delegate_task
 # DISPATCHES asynchronously (returns {status: dispatched} immediately; the
 # result arrives as an inbox turn / check_delegation). wait=true keeps the
-# legacy synchronous behavior, bounded by timeout_seconds. Children share a
+# legacy synchronous behavior — it blocks until the child settles (children
+# have NO timeout and may take as long as they need). Children share a
 # bounded dispatcher pool — async removes D-11's accidental one-at-a-time
 # serialization, so cap concurrency against your GPU (set max_concurrent: 1
 # on a single-GPU box). Env: SABLE_DELEGATION (0/false disables),
-# SABLE_DELEGATION_TIMEOUT_S, SABLE_DELEGATION_MAX,
-# SABLE_DELEGATION_LIVENESS_S.
+# SABLE_DELEGATION_MAX.
 delegation:
   enabled: true
-  timeout_seconds: 300           # wait-cap for wait=true calls only
   max_concurrent: 2              # dispatcher pool size (GPU contention cap)
   queue_max: 16                  # queued-but-unstarted cap; beyond -> retry
-  liveness_timeout_seconds: 600  # child must start + heartbeat within this
-  liveness_check_interval_seconds: 5   # watchdog scan period
   wake_retry_seconds: 2          # (Phase 2) wake redelivery interval
   async_default: true            # false restores D-11 sync behavior globally
 
@@ -600,8 +597,9 @@ plans:
     require_verification: true   # a run ending on the verification-stop nudge
                                  # marks its task blocked (never auto-done)
     max_tasks: 10          # tasks per loop invocation (CLI --max-tasks caps)
-    per_task_timeout_seconds: 900  # hard cap on one task run
     max_consecutive_failures: 1    # stop the loop after N non-done in a row
+                           # (task runs have no timeout — agents take as long
+                           # as they need; only cancel/stop interrupts a run)
 
 # Easy training — turnkey loop for one or more agent profiles (dashboard "Easy"
 # panel). Pick agent profiles that are already bound to managed server

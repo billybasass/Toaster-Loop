@@ -81,8 +81,9 @@ class ConfigRoutes(ApiContext):
             # Prompt evolution (pass 4 #39) master switch + call budget.
             "evolution": {"enabled", "max_call_budget"},
             # Delegation (feature-wave Phase 2): flat fields populated from
-            # the `delegation:` section by the loader.
-            "delegation": {"enabled", "timeout_seconds"},
+            # the `delegation:` section by the loader. D-18: no timeout knob —
+            # children have no deadlines.
+            "delegation": {"enabled"},
             # Agent runtime (core/agent_runner.py): raw `agent:` section.
             # Keys the runner reads; `capabilities`/`vision` are nested
             # dicts/lists handled opaquely here (Profiles owns per-profile).

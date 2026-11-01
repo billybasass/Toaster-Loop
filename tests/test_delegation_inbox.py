@@ -4,10 +4,9 @@ pending-inbox surfacing, wake-run trace metadata).
 
 Covers the plans/delegation-inbox.md §9 test plan rows for Phase 1 (store
 round-trip / FIFO claim atomicity / take_pending flips once / reconcile-on-
-startup per status; dispatcher pool bound + saturation payload; queued->wedged
-starvation and running->cancelling->wedged heartbeat-staleness transitions —
-direct `_liveness_scan_once` calls, no sleeping on the watchdog interval, per
-spec risk #5; the runner `_heartbeat` hook; `wait=True` vs async dispatch
+startup per status; dispatcher pool bound + saturation payload; D-18 removed
+the liveness watchdog (children have no timeout — old rows are never wedged);
+the runner `_heartbeat` hook; `wait=True` vs async dispatch
 payloads; config defaults/overrides; check_delegation surviving a registry
 reset) and Phase 2 (wake hook registry; watcher delivers when thread idle and
 defers when busy; drain-on-user-message prepends the block + marks delivered;
@@ -295,65 +294,24 @@ def test_dispatcher_saturation_error_payload(home, _clean):
 
 
 # ---------------------------------------------------------------------------
-# Liveness watchdog (direct scans — deterministic, no sleeping)
+# Liveness watchdog is GONE (D-18): children have no timeout and are never
+# wedge-detected. These former watchdog tests now assert the opposite: an old,
+# silent row stays untouched forever.
 # ---------------------------------------------------------------------------
 
-def test_queued_starvation_settles_wedged(home):
-    cfg = _cfg(delegation_liveness_timeout_seconds=600.0)
+def test_aged_queued_row_never_wedged(home):
+    cfg = _cfg()
     delegation_store.insert_delegation(
         _rec("starved", created_ts=_iso(-700), thread="th-1"))
-    touched = delegation._liveness_scan_once(cfg)
-    assert touched == 1
     row = delegation_store.get_delegation("starved")
-    assert row["status"] == "wedged"
-    assert "never started within the liveness window" in row["error"]
-    assert row["inbox_state"] == "pending"
+    assert row["status"] == "queued"          # no watchdog -> stays queued
 
 
-def test_fresh_queued_not_flagged(home):
-    cfg = _cfg(delegation_liveness_timeout_seconds=600.0)
-    delegation_store.insert_delegation(_rec("fresh", created_ts=_iso()))
-    assert delegation._liveness_scan_once(cfg) == 0
-    assert delegation_store.get_delegation("fresh")["status"] == "queued"
-
-
-def test_stale_heartbeat_cancelling_then_wedged(home, monkeypatch, _clean):
-    """A child that registers and then goes silent: scan #1 sets the
-    cooperative cancel event + 'cancelling'; a child that never observes it
-    settles 'wedged' on the next overdue scan."""
-    cfg = _cfg(delegation_liveness_timeout_seconds=60.0)
-    stop = threading.Event()
-    # child blocks forever (ignores cancel) -> wedge path, not cancelled
-    monkeypatch.setattr(delegation, "_run_child",
-                        _fake_child({}, block_on=stop, ignore_cancel=True))
-    payload = json.loads(delegation.execute_delegation(
-        "coder", "go silent", _ctx=_ctx(cfg)))
-    did = payload["delegation_id"]
-    assert payload["status"] == "dispatched"
-    assert _wait_until(lambda: delegation.get_delegation(did)["status"]
-                       == "running")
-
-    # simulate silence: backdate the durable heartbeat past the window
-    delegation_store.update_delegation(did, last_activity_ts=_iso(-120))
-    assert delegation._liveness_scan_once(cfg) == 1
-    rec = delegation.get_delegation(did)
-    assert rec["status"] == "cancelling"
-    assert rec["cancel_event"].is_set(), \
-        "watchdog must flip the cooperative cancel event"
-
-    # still no observation (child ignores cancel): next overdue scan wedges it
-    delegation_store.update_delegation(did, last_activity_ts=_iso(-400))
-    assert delegation._liveness_scan_once(cfg) == 1
-    assert delegation_store.get_delegation(did)["status"] == "wedged"
-    stop.set()
-
-
-def test_healthy_heartbeating_child_not_flagged(home):
-    cfg = _cfg(delegation_liveness_timeout_seconds=60.0)
+def test_aged_running_row_never_cancelled(home):
+    cfg = _cfg()
     delegation_store.insert_delegation(
-        _rec("alive", status="running", started_ts=_iso(-30),
-             last_activity_ts=_iso()))
-    assert delegation._liveness_scan_once(cfg) == 0
+        _rec("alive", status="running", started_ts=_iso(-700),
+             last_activity_ts=_iso(-400)))
     assert delegation_store.get_delegation("alive")["status"] == "running"
 
 
@@ -587,30 +545,26 @@ def test_config_defaults():
     cfg = SableConfig()
     assert cfg.delegation_max_concurrent == 2
     assert cfg.delegation_queue_max == 16
-    assert cfg.delegation_liveness_timeout_seconds == 600.0
-    assert cfg.delegation_liveness_check_interval_seconds == 5.0
     assert cfg.delegation_wake_retry_seconds == 2.0
     assert cfg.delegation_async_default is True
+    # D-18: timeout/liveness knobs are gone — children have no deadlines.
+    assert not hasattr(cfg, "delegation_timeout_seconds")
+    assert not hasattr(cfg, "delegation_liveness_timeout_seconds")
 
 
 def test_config_yaml_section(tmp_path, monkeypatch):
     monkeypatch.delenv("SABLE_DELEGATION_MAX", raising=False)
-    monkeypatch.delenv("SABLE_DELEGATION_LIVENESS_S", raising=False)
     f = tmp_path / "c.yaml"
     f.write_text(
         "delegation:\n"
         "  enabled: true\n"
         "  max_concurrent: 5\n"
         "  queue_max: 9\n"
-        "  liveness_timeout_seconds: 60\n"
-        "  liveness_check_interval_seconds: 1.5\n"
         "  wake_retry_seconds: 3\n"
         "  async_default: false\n")
     cfg = load_config(str(f))
     assert cfg.delegation_max_concurrent == 5
     assert cfg.delegation_queue_max == 9
-    assert cfg.delegation_liveness_timeout_seconds == 60.0
-    assert cfg.delegation_liveness_check_interval_seconds == 1.5
     assert cfg.delegation_wake_retry_seconds == 3.0
     assert cfg.delegation_async_default is False
 
@@ -618,10 +572,8 @@ def test_config_yaml_section(tmp_path, monkeypatch):
 def test_config_env_overrides(tmp_path, monkeypatch):
     monkeypatch.setenv("SABLE_CONFIG", str(tmp_path / "none.yaml"))
     monkeypatch.setenv("SABLE_DELEGATION_MAX", "7")
-    monkeypatch.setenv("SABLE_DELEGATION_LIVENESS_S", "42.5")
     cfg = load_config()
     assert cfg.delegation_max_concurrent == 7
-    assert cfg.delegation_liveness_timeout_seconds == 42.5
 
 
 # ===========================================================================

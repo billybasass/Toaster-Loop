@@ -33,7 +33,6 @@ def test_full_plans_section_loads(home):
         "plans": {"enabled": True, "inject_summary": False,
                   "max_inject_chars": 500,
                   "loop": {"require_verification": False, "max_tasks": 3,
-                           "per_task_timeout_seconds": 60,
                            "max_consecutive_failures": 2}},
     }))
     assert cfg.plans["enabled"] is True
@@ -48,7 +47,6 @@ def test_plans_keys_registered_in_strict_mode(home, monkeypatch):
                       "max_inject_chars": 800,
                       "loop": {"require_verification": True,
                                "max_tasks": 10,
-                               "per_task_timeout_seconds": 900,
                                "max_consecutive_failures": 1}}}
     cfg = load_config(_write(home, data))   # must NOT raise
     assert cfg.plans == data["plans"]

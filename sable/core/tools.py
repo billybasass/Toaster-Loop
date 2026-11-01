@@ -1575,7 +1575,6 @@ def list_agents(**kwargs: Any) -> str:
 
 
 def delegate_task(agent: str = "", task: str = "", context: str = "",
-                  timeout_seconds: Optional[float] = None,
                   plan_task: str = "", wait: Optional[bool] = None,
                   **kwargs: Any) -> str:
     """Delegate a subtask to another agent profile on the same project.
@@ -1586,11 +1585,11 @@ def delegate_task(agent: str = "", task: str = "", context: str = "",
     instead of only the free-text ``task``. Existing callers are unchanged.
 
     ``wait`` (D-17): None -> config delegation.async_default (true: return
-    {status: dispatched} immediately); True/False force sync/async per call."""
+    {status: dispatched} immediately); True/False force sync/async per call.
+    A synchronous wait has no deadline — it blocks until the child settles."""
     from .delegation import execute_delegation
 
     return execute_delegation(agent=agent, task=task, context=context,
-                              timeout_seconds=timeout_seconds,
                               plan_task=str(plan_task or "") or None,
                               _ctx=kwargs.get("_ctx"), wait=wait)
 
@@ -1868,8 +1867,9 @@ TOOL_SCHEMAS: list[dict] = [
         "{status: dispatched, delegation_id}; the child runs in the "
         "background and its result is delivered to you as a follow-up turn — "
         "keep working or finish your answer, do NOT busy-poll. Pass wait=true "
-        "only when you genuinely cannot proceed without the answer (blocks up "
-        "to timeout_seconds). Check status any time with check_delegation(id). "
+        "only when you genuinely cannot proceed without the answer (blocks "
+        "until the child settles — children have no timeout). Check status "
+        "any time with check_delegation(id). "
         "Cannot delegate to yourself or nest further: the depth limit is 1, "
         "so a delegated child cannot itself delegate (do not instruct the "
         "child to delegate). Dispatcher capacity is bounded — a saturated "
@@ -1882,12 +1882,6 @@ TOOL_SCHEMAS: list[dict] = [
                      "description": "Self-contained subtask description"},
             "context": {"type": "string",
                         "description": "Supporting context for the child (optional)"},
-            "timeout_seconds": {
-                "type": "number",
-                "description": "Max seconds to wait when wait=true (default "
-                               "from config delegation.timeout_seconds; values "
-                               "below the 15s floor are clamped up with a "
-                               "warning); ignored for async dispatch"},
             # WP12: optional plan-task binding (additive; existing callers
             # unchanged). When set, the child prompt is built from that task.
             "plan_task": {"type": "string",
@@ -1900,7 +1894,7 @@ TOOL_SCHEMAS: list[dict] = [
                      "description": "false (default): returns dispatched "
                                     "immediately and the result arrives as an "
                                     "inbox turn later; true: block until the "
-                                    "child settles or timeout_seconds elapses"},
+                                    "child settles (no deadline)"},
         },
         ["agent", "task"],
     ),

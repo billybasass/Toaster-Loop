@@ -3,9 +3,9 @@
 Runs unblocked plan tasks back-to-back with real agent runs, then closes each
 task ONLY on explicit completion: the task must have been flipped to ``done``
 via the ``plan_progress`` tool during its own run. Anything else (the agent
-stopped without closing, hit the verification nudge, crashed, or timed out)
-marks the task ``blocked`` with a machine-readable reason — the loop never
-decides on the agent's behalf that work is finished.
+stopped without closing, hit the verification nudge, or crashed) marks the
+task ``blocked`` with a machine-readable reason — the loop never decides on
+the agent's behalf that work is finished.
 
 Sable-style constraints (WP12 spec §6):
 
@@ -26,9 +26,9 @@ Sable-style constraints (WP12 spec §6):
 * SSE kind ``plan.loop`` {project, task_id, status, iteration} per event via
   an injected ``publish`` callable (dashboard bus; CLI prints instead).
 
-Timeouts are enforced with a daemon worker + join deadline: a wedged run is
-counted as blocked(timeout) and abandoned rather than hanging the loop (the
-stray agent thread inherits the best-effort contract, same as shutdown kill).
+Task runs have NO timeout: an agent may take as long as it needs to finish a
+task. The loop waits for each run to settle; only cancel (Event) or dashboard
+shutdown (daemon thread dies best-effort) interrupt an in-flight run.
 """
 
 from __future__ import annotations
@@ -166,17 +166,16 @@ class PlanLoop:
         self.max_tasks = int(max_tasks if max_tasks is not None
                              else lcfg.get("max_tasks", 10))
         self.require_verification = bool(lcfg.get("require_verification", True))
-        self.per_task_timeout_s = float(lcfg.get(
-            "per_task_timeout_seconds", 900))
         self.max_consecutive_failures = max(
             1, int(lcfg.get("max_consecutive_failures", 1)))
         self.publish = publish or (lambda kind, payload: None)
         self.cancel_event = threading.Event()
         self.finished = False
         # The default runner shares the loop's cancel event so cancel()
-        # reaches in-flight agent runs at their loop boundaries instead of
-        # only taking effect when per_task_timeout expires. Signature-tolerant
-        # for injected/legacy run_fn factories that predate the kwarg.
+        # reaches in-flight agent runs at their loop boundaries. There is no
+        # per-task timeout: a run goes as long as it needs; cancel is the only
+        # interrupt. Signature-tolerant for injected/legacy run_fn factories
+        # that predate the kwarg.
         if run_fn is not None:
             self._run_fn = run_fn
         else:
@@ -276,7 +275,7 @@ class PlanLoop:
             self._emit(task_id, "started")
 
             prompt = build_task_prompt(store, task_id)
-            result = self._run_with_timeout(prompt, task)
+            result = self._run_task(prompt, task)
 
             # Re-read: the agent's plan_progress calls mutated the store.
             store = load_plan(self.project_id)
@@ -330,8 +329,6 @@ class PlanLoop:
             return "done", ""
         if status_now == "cancelled":
             return "skipped", "task cancelled during run"
-        if result.get("timeout"):
-            return "blocked", f"per-task timeout {self.per_task_timeout_s:.0f}s"
         fr = result.get("failure_reason")
         if self.require_verification and fr == "verification_nudge":
             return "blocked", ("require_verification: run ended on the "
@@ -344,23 +341,17 @@ class PlanLoop:
                                "(left in_progress)")
         return "blocked", f"task not closed by the run (status={status_now})"
 
-    def _run_with_timeout(self, prompt: str, task: Dict[str, Any]
-                          ) -> Dict[str, Any]:
+    def _run_task(self, prompt: str, task: Dict[str, Any]) -> Dict[str, Any]:
+        """Run one task to completion — no deadline. The agent takes as long
+        as it needs; the loop thread simply waits. Exceptions surface as a
+        blocked outcome instead of killing the loop."""
         box: Dict[str, Any] = {}
         prof = task.get("profile") or None
-
-        def _work() -> None:
-            try:
-                box.update(self._run_fn(prompt, task, prof) or {})
-            except Exception as e:  # noqa: BLE001 - surfaced as blocked
-                box["ok"] = False
-                box["error"] = f"{type(e).__name__}: {e}"
-
-        t = threading.Thread(target=_work, daemon=True)
-        t.start()
-        t.join(timeout=self.per_task_timeout_s)
-        if t.is_alive():
-            return {"ok": False, "timeout": True}
+        try:
+            box.update(self._run_fn(prompt, task, prof) or {})
+        except Exception as e:  # noqa: BLE001 - surfaced as blocked
+            box["ok"] = False
+            box["error"] = f"{type(e).__name__}: {e}"
         box.setdefault("ok", False)
         return box
 
@@ -396,15 +387,14 @@ def _default_run_fn(cfg: Any, project_id: Optional[str], *,
     capabilities are whatever that profile grants — no bypass).
 
     The endpoint is deliberately NOT torn down between tasks: in spawn mode a
-    stop/start per iteration would reload the whole model inside every
-    per_task_timeout window. The callable carries a ``close()`` attribute the
-    loop invokes when it ends (see PlanLoop._guarded), which stops a
-    supervisor THIS loop spawned — attach-mode servers are never touched.
+    stop/start per iteration would reload the whole model for every task.
+    The callable carries a ``close()`` attribute the loop invokes when it ends
+    (see PlanLoop._guarded), which stops a supervisor THIS loop spawned —
+    attach-mode servers are never touched.
 
     Cancellation is forwarded into create_runner so runner.run stops at its
-    own boundaries when the user cancels, instead of only when the join
-    deadline expires; an abandoned run after timeout keeps the same
-    best-effort contract as dashboard shutdown."""
+    own boundaries when the user cancels. There is no per-task deadline: each
+    run goes as long as it needs."""
 
     state: Dict[str, Any] = {}          # {"supervisor": ...} once resolved
 

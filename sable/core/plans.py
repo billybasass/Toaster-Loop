@@ -100,7 +100,7 @@ def plans_config(cfg: Any) -> Dict[str, Any]:
       inject_summary: bool (default True — append the bounded plan section)
       max_inject_chars: int (default 800 — hard cap on that section)
       loop: {require_verification: true, max_tasks: 10,
-             per_task_timeout_seconds: 900, max_consecutive_failures: 1}
+             max_consecutive_failures: 1}   (task runs have no timeout)
     """
     sec = getattr(cfg, "plans", None)
     return dict(sec) if isinstance(sec, dict) else {}

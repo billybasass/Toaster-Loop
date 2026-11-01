@@ -82,10 +82,7 @@ class ConfigError(ValueError):
 _INT_FIELDS = frozenset({"port", "context_length", "recording_retention_days",
                          "gpu_layers", "delegation_max_concurrent",
                          "delegation_queue_max"})
-_FLOAT_FIELDS = frozenset({"delegation_timeout_seconds",
-                           "delegation_liveness_timeout_seconds",
-                           "delegation_liveness_check_interval_seconds",
-                           "delegation_wake_retry_seconds"})
+_FLOAT_FIELDS = frozenset({"delegation_wake_retry_seconds"})
 _BOOL_FIELDS = frozenset({"recording_enabled", "recording_redact_secrets",
                           "delegation_enabled", "auto_model",
                           "llama_auto_setup", "delegation_async_default"})
@@ -215,11 +212,11 @@ def _type_problem(path: str, v: Any,
 _NESTED_SECTIONS = {
     "recording": {"enabled": "bool", "redact_secrets": "bool",
                   "retention_days": "int"},
-    "delegation": {"enabled": "bool", "timeout_seconds": "float",
-                   "max_concurrent": "int", "queue_max": "int",
-                   "liveness_timeout_seconds": "float",
-                   "liveness_check_interval_seconds": "float",
-                   "wake_retry_seconds": "float",
+    # D-18: `timeout_seconds`, `liveness_timeout_seconds` and
+    # `liveness_check_interval_seconds` are gone — children have no deadlines.
+    # Old YAML carrying them still loads (unknown sub-keys are warn-only).
+    "delegation": {"enabled": "bool", "max_concurrent": "int",
+                   "queue_max": "int", "wake_retry_seconds": "float",
                    "async_default": "bool"},
     # WP12 plans: sub-keys registered for the consolidated report; `loop` is
     # a dict of loop knobs validated leniently by core/plans.plans_config and
@@ -347,13 +344,8 @@ class SableConfig:
     # switch for list_agents/delegate_task/check_delegation (default true).
     # Env: SABLE_DELEGATION ("0"/"false" disables).
     delegation_enabled: bool = True
-    # YAML `delegation.timeout_seconds`: default hard cap on how long
-    # delegate_task waits for a child run before returning a timeout payload
-    # (default 300; per-call override via the tool's timeout_seconds arg).
-    # Env: SABLE_DELEGATION_TIMEOUT_S. D-17: only used on the legacy
-    # wait=true path now (async dispatch does not wait).
-    delegation_timeout_seconds: float = 300.0
-    # D-17 (audit §4) async delegation inbox — dispatcher + liveness knobs:
+    # D-17 (audit §4) async delegation inbox — dispatcher knobs. There is no
+    # wait timeout and no liveness watchdog: children run as long as they need.
     # YAML `delegation.max_concurrent`: bounded dispatcher pool size (the
     # accidental one-parent-at-a-time serialization of D-11 is gone, so this
     # cap keeps GPU contention in check; set 1 on a single-GPU box).
@@ -362,13 +354,6 @@ class SableConfig:
     # YAML `delegation.queue_max`: queued-but-unstarted cap; beyond it
     # delegate_task returns an explicit dispatcher_saturated error payload.
     delegation_queue_max: int = 16
-    # YAML `delegation.liveness_timeout_seconds`: a child must leave the queue
-    # AND keep heartbeating (last_activity_ts) within this window or the
-    # watchdog wedge-detects it (cooperative cancel -> cancelling -> wedged).
-    # Env: SABLE_DELEGATION_LIVENESS_S.
-    delegation_liveness_timeout_seconds: float = 600.0
-    # YAML `delegation.liveness_check_interval_seconds`: watchdog scan period.
-    delegation_liveness_check_interval_seconds: float = 5.0
     # YAML `delegation.wake_retry_seconds`: Phase 2 watcher redelivery
     # interval for threads busy with an in-flight run (stored, unused until
     # the wake loop lands).
@@ -558,8 +543,8 @@ class SableConfig:
     #   loop: dict                  — guarded autonomous loop knobs
     #     (core/plan_loop.py): require_verification: bool (default true — a
     #     run ending on the verification nudge blocks the task), max_tasks:
-    #     int (default 10), per_task_timeout_seconds: float (default 900),
-    #     max_consecutive_failures: int (default 1 — stop after one non-done)
+    #     int (default 10), max_consecutive_failures: int (default 1 — stop
+    #     after one non-done). Task runs have no timeout.
     plans: dict[str, Any] = field(default_factory=dict)
     # Raw `logging:` YAML section (consumed by cli._setup_logging). Keys:
     #   level: str              — root level for non-verbose runs
@@ -781,9 +766,7 @@ _ENV_MAP = {
     "attach_api_key": "SABLE_ATTACH_API_KEY",
     "recording_enabled": "SABLE_RECORDING",
     "delegation_enabled": "SABLE_DELEGATION",
-    "delegation_timeout_seconds": "SABLE_DELEGATION_TIMEOUT_S",
     "delegation_max_concurrent": "SABLE_DELEGATION_MAX",
-    "delegation_liveness_timeout_seconds": "SABLE_DELEGATION_LIVENESS_S",
     "auto_model": "SABLE_AUTO_MODEL",
     "gpu_layers": "SABLE_GPU_LAYERS",
     "llama_auto_setup": "SABLE_LLAMA_AUTO_SETUP",
@@ -800,9 +783,6 @@ def _coerce(fieldname: str, value: Any) -> Any:
     if fieldname in ("recording_enabled", "auto_model", "llama_auto_setup",
                      "delegation_enabled"):
         return str(value).strip().lower() in ("1", "true", "yes", "on")
-    if fieldname in ("delegation_timeout_seconds",
-                     "delegation_liveness_timeout_seconds"):
-        return float(value)
     return str(value)
 
 
@@ -936,14 +916,11 @@ def load_config(config_path: Optional[str] = None, *,
         d = data.pop("delegation")
         if "enabled" in d and data.get("delegation_enabled") is None:
             data["delegation_enabled"] = bool(d["enabled"])
-        if "timeout_seconds" in d \
-                and data.get("delegation_timeout_seconds") is None:
-            data["delegation_timeout_seconds"] = float(d["timeout_seconds"])
         # D-17 async delegation inbox knobs (same pop-onto-flat-field rule;
-        # types are already validated by _NESTED_SECTIONS above).
+        # types are already validated by _NESTED_SECTIONS above). D-18: the
+        # old timeout_seconds / liveness_* keys are gone — children have no
+        # deadlines; old YAML carrying them warns as unknown and is ignored.
         for sub, kind in (("max_concurrent", int), ("queue_max", int),
-                          ("liveness_timeout_seconds", float),
-                          ("liveness_check_interval_seconds", float),
                           ("wake_retry_seconds", float),
                           ("async_default", bool)):
             flat = "delegation_" + sub

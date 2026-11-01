@@ -39,8 +39,7 @@ def home(tmp_path, monkeypatch):
 
 def _cfg(**plans):
     base = {"enabled": True,
-            "loop": {"max_tasks": 10, "max_consecutive_failures": 1,
-                     "per_task_timeout_seconds": 30}}
+            "loop": {"max_tasks": 10, "max_consecutive_failures": 1}}
     base.update(plans)
     return SableConfig(plans=base)
 
@@ -118,8 +117,7 @@ def test_require_verification_blocks_on_nudge(home):
         save_plan(store)
         return {"ok": False, "failure_reason": "verification_nudge"}
 
-    loop = start_plan_loop(_cfg(loop={"require_verification": True,
-                                      "per_task_timeout_seconds": 30}),
+    loop = start_plan_loop(_cfg(loop={"require_verification": True}),
                            None, run_fn=run)
     prog = _wait(loop)
     assert prog["tasks"][0]["outcome"] == "blocked"
@@ -135,8 +133,7 @@ def test_verification_nudge_ok_when_not_required(home):
         save_plan(store)
         return {"ok": False, "failure_reason": "verification_nudge"}
 
-    loop = start_plan_loop(_cfg(loop={"require_verification": False,
-                                      "per_task_timeout_seconds": 30}),
+    loop = start_plan_loop(_cfg(loop={"require_verification": False}),
                            None, run_fn=run)
     prog = _wait(loop)
     assert prog["tasks"][0]["outcome"] == "done"    # explicit done wins
@@ -164,8 +161,7 @@ def test_no_unblocked_tasks_stop(home):
 
 def test_consecutive_failures_stop(home):
     _seed("x", "y")
-    loop = start_plan_loop(_cfg(loop={"max_consecutive_failures": 2,
-                                      "per_task_timeout_seconds": 30}),
+    loop = start_plan_loop(_cfg(loop={"max_consecutive_failures": 2}),
                            None,
                            run_fn=lambda p, t, prof: {"ok": False,
                                                       "failure_reason":
@@ -314,15 +310,17 @@ def test_task_profile_passed_to_run_fn(home):
     assert seen == ["coder"]                         # profile flows through
 
 
-def test_per_task_timeout_blocks(home):
+def test_long_task_runs_without_timeout(home):
+    """D-18: task runs have no deadline — a slow agent finishes on its own."""
     _seed("slowpoke")
 
-    def hang(p, t, prof):
-        time.sleep(5)
+    def slow(p, t, prof):
+        time.sleep(0.7)                       # longer than any old default cap
+        s = load_plan(None)
+        set_status(s, t["id"], "done")
+        save_plan(s)
         return {"ok": True}
 
-    loop = start_plan_loop(_cfg(loop={"per_task_timeout_seconds": 0.2}),
-                           None, run_fn=hang)
+    loop = start_plan_loop(_cfg(), None, run_fn=slow)
     prog = _wait(loop, timeout=15)
-    assert prog["tasks"][0]["outcome"] == "blocked"
-    assert "timeout" in prog["tasks"][0]["reason"]
+    assert prog["tasks"][0]["outcome"] == "done"

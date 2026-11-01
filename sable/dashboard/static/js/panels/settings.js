@@ -400,8 +400,8 @@ export default {
             ["max_inject_chars", plCapIn, "num"]]);
           // The server replaces the whole `loop` dict on a section patch, so
           // seed it from the CURRENT config and overlay the edited fields —
-          // unexposed loop keys (e.g. per_task_timeout_seconds) survive an
-          // apply instead of being silently dropped.
+          // unexposed loop keys survive an apply instead of being silently
+          // dropped.
           const loop = Object.assign({}, pl.loop || {});
           const edits = collect([
             ["require_verification", plLoopReqSel, "bool"],
