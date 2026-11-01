@@ -121,7 +121,7 @@ class PlanLoop:
                  max_tasks: Optional[int] = None,
                  run_fn: Optional[RunFn] = None,
                  publish: Optional[Callable[[str, Dict[str, Any]], None]] = None,
-                 resume: bool = False):
+                 resume: bool = False, force: bool = False):
         global _current
         with _active_lock:
             if _current is not None and not getattr(_current, "finished",
@@ -131,14 +131,17 @@ class PlanLoop:
                     f"{_current.project_id or 'default'} "
                     f"(iteration {_current.progress.get('iteration')})")
             # Cross-process marker: a previous run of THIS project still says
-            # running => refuse too (two CLIs against one SABLE_HOME).
+            # running => refuse too (two CLIs against one SABLE_HOME). A hard
+            # kill leaves this marker stale forever, so `force` overrides it
+            # after an in-process check confirms nothing local is running.
             prior = read_loop_progress(project_id, _home(cfg))
-            if prior and prior.get("status") == "running" \
+            if not force and prior and prior.get("status") == "running" \
                     and str(prior.get("project") or "") == \
                     str(project_id or ""):
                 raise LoopConflictError(
                     "progress file says a loop is still running for this "
-                    "project (stale? delete the .loop.json to override)")
+                    "project (stale? pass force/--force, or delete the "
+                    ".loop.json to override)")
             _current = self  # reserved now; cleared on exit OR init failure
         try:
             self._init_body(cfg, project_id, max_tasks=max_tasks,
@@ -170,7 +173,18 @@ class PlanLoop:
         self.publish = publish or (lambda kind, payload: None)
         self.cancel_event = threading.Event()
         self.finished = False
-        self._run_fn: RunFn = run_fn or _default_run_fn(cfg, self.project_id)
+        # The default runner shares the loop's cancel event so cancel()
+        # reaches in-flight agent runs at their loop boundaries instead of
+        # only taking effect when per_task_timeout expires. Signature-tolerant
+        # for injected/legacy run_fn factories that predate the kwarg.
+        if run_fn is not None:
+            self._run_fn = run_fn
+        else:
+            try:
+                self._run_fn = _default_run_fn(
+                    cfg, self.project_id, cancel_event=self.cancel_event)
+            except TypeError:
+                self._run_fn = _default_run_fn(cfg, self.project_id)
         self.thread: Optional[threading.Thread] = None
         self.resume = resume
 
@@ -231,6 +245,15 @@ class PlanLoop:
                 _write(self)
             except OSError:
                 pass
+            # Release a llama-server this loop spawned (no-op in attach
+            # mode / injected run_fns without a close hook).
+            closer = getattr(self._run_fn, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:  # noqa: BLE001
+                    logger.debug("plan loop endpoint close failed",
+                                 exc_info=True)
             with _active_lock:
                 if _current is self:
                     _current = None
@@ -265,9 +288,18 @@ class PlanLoop:
                 # Mark blocked with the reason unless the agent moved it on.
                 if cur is not None and status_now not in ("done", "cancelled"):
                     try:
-                        set_status(store, task_id, "blocked",
-                                   note=f"loop: {reason}")
-                        save_plan(store)
+                        from .plans import lock as _plan_lock
+                        with _plan_lock():
+                            # Re-read under the lock: the store may have been
+                            # edited since our post-run load above.
+                            store = load_plan(self.project_id)
+                            cur2 = next((t for t in store["tasks"]
+                                         if t["id"] == task_id), None)
+                            if cur2 is not None and cur2["status"] not in \
+                                    ("done", "cancelled"):
+                                set_status(store, task_id, "blocked",
+                                           note=f"loop: {reason}")
+                                save_plan(store)
                     except Exception as e:  # noqa: BLE001 - report, keep going
                         logger.warning("loop could not mark %s blocked: %s",
                                        task_id, e)
@@ -357,59 +389,88 @@ def _write(loop: PlanLoop) -> None:
 # Default run_fn: real agent runs through create_runner (profile grants kept)
 # ---------------------------------------------------------------------------
 
-def _default_run_fn(cfg: Any, project_id: Optional[str]) -> RunFn:
-    """Resolve the serving endpoint ONCE, then run each task through
-    create_runner with the task's profile (tool subset + capabilities are
-    whatever that profile grants — no bypass). Cancellation is enforced at
-    iteration boundaries and by per_task_timeout_seconds (the loop joins the
-    run thread with a deadline); an in-flight agent run finishes or gets
-    abandoned best-effort, same contract as dashboard shutdown."""
+def _default_run_fn(cfg: Any, project_id: Optional[str], *,
+                    cancel_event: Optional[threading.Event] = None) -> RunFn:
+    """Resolve the serving endpoint ONCE per loop (lazily on first task), then
+    run each task through create_runner with the task's profile (tool subset +
+    capabilities are whatever that profile grants — no bypass).
+
+    The endpoint is deliberately NOT torn down between tasks: in spawn mode a
+    stop/start per iteration would reload the whole model inside every
+    per_task_timeout window. The callable carries a ``close()`` attribute the
+    loop invokes when it ends (see PlanLoop._guarded), which stops a
+    supervisor THIS loop spawned — attach-mode servers are never touched.
+
+    Cancellation is forwarded into create_runner so runner.run stops at its
+    own boundaries when the user cancels, instead of only when the join
+    deadline expires; an abandoned run after timeout keeps the same
+    best-effort contract as dashboard shutdown."""
+
+    state: Dict[str, Any] = {}          # {"supervisor": ...} once resolved
+
+    def _endpoint() -> tuple:
+        if "base_url" not in state:
+            from ..cli import _resolve_endpoint
+
+            base_url, model, supervisor = _resolve_endpoint(
+                cfg, spawn_if_needed=True)
+            state["base_url"] = base_url
+            state["model"] = model
+            state["supervisor"] = supervisor
+        return state["base_url"], state["model"]
 
     def run(prompt: str, task: Dict[str, Any],
             profile_name: Optional[str]) -> Dict[str, Any]:
-        from ..cli import _resolve_endpoint
         from ..store.recorder import make_recorder
         from .agent_runner import create_runner
         from .delegation import load_project
 
-        base_url, model, supervisor = _resolve_endpoint(
-            cfg, spawn_if_needed=True)
-        try:
-            prof = None
-            if profile_name:
-                profs = cfg.profiles if isinstance(cfg.profiles, list) else []
-                prof = next((p for p in profs
-                             if isinstance(p, dict)
-                             and p.get("name") == profile_name), None)
-            proj = load_project(cfg, project_id) if project_id else None
-            tools = (prof or {}).get("tools")
-            recorder = make_recorder(cfg, project=project_id,
-                                     plan_task=task.get("id"))
-            runner = create_runner(
-                cfg, base_url, str((prof or {}).get("model_name") or model),
-                api_key=getattr(cfg, "attach_api_key", None) or None,
-                recorder=recorder,
-                system_prompt=str((prof or {}).get("system_prompt") or "")
-                or None,
-                enabled_tool_names=[str(t) for t in tools]
-                if isinstance(tools, list) else None,
-                workspace_root_override=(prof or {}).get("workspace_root"),
-                project_workspace_dir=(proj or {}).get("workspace_dir"),
-                project_context=proj,
-                capabilities=(prof or {}).get("capabilities"),
-                project_id=project_id,
-                profile_name=(prof or {}).get("name"))
-            res = runner.run(prompt)
-            return {"ok": bool(getattr(res, "completed", False)),
-                    "failure_reason": getattr(res, "failure_reason", None),
-                    "trace_id": getattr(res, "trace_id", None)}
-        finally:
-            if supervisor is not None:
-                try:
-                    supervisor.stop()
-                except Exception:  # noqa: BLE001
-                    pass
+        base_url, model = _endpoint()
+        prof = None
+        if profile_name:
+            profs = cfg.profiles if isinstance(cfg.profiles, list) else []
+            prof = next((p for p in profs
+                         if isinstance(p, dict)
+                         and p.get("name") == profile_name), None)
+        tools = (prof or {}).get("tools")
+        if isinstance(tools, list) and "plan_progress" not in tools:
+            # The loop only closes a task when the agent flips it to done via
+            # plan_progress; without that tool every iteration deterministically
+            # ends blocked("never closed"). Warn loudly instead of looping dry.
+            logger.warning(
+                "plan loop: profile %r does not grant plan_progress — tasks "
+                "can never close and will all end blocked", profile_name)
+        proj = load_project(cfg, project_id) if project_id else None
+        recorder = make_recorder(cfg, project=project_id,
+                                 plan_task=task.get("id"))
+        runner = create_runner(
+            cfg, base_url, str((prof or {}).get("model_name") or model),
+            api_key=getattr(cfg, "attach_api_key", None) or None,
+            recorder=recorder,
+            system_prompt=str((prof or {}).get("system_prompt") or "")
+            or None,
+            enabled_tool_names=[str(t) for t in tools]
+            if isinstance(tools, list) else None,
+            workspace_root_override=(prof or {}).get("workspace_root"),
+            project_workspace_dir=(proj or {}).get("workspace_dir"),
+            project_context=proj,
+            capabilities=(prof or {}).get("capabilities"),
+            cancel_event=cancel_event,
+            project_id=project_id,
+            profile_name=(prof or {}).get("name"))
+        res = runner.run(prompt)
+        return {"ok": bool(getattr(res, "completed", False)),
+                "failure_reason": getattr(res, "failure_reason", None),
+                "trace_id": getattr(res, "trace_id", None)}
 
+    def close() -> None:
+        sup = state.get("supervisor")
+        if sup is not None:
+            try:
+                sup.stop()
+            except Exception:  # noqa: BLE001
+                pass
+    run.close = close  # type: ignore[attr-defined]
     return run
 
 
@@ -421,11 +482,12 @@ def start_plan_loop(cfg: Any, project_id: Optional[str], *,
                     max_tasks: Optional[int] = None,
                     run_fn: Optional[RunFn] = None,
                     publish: Optional[Callable[[str, Dict[str, Any]], None]] = None,
-                    resume: bool = False) -> PlanLoop:
+                    resume: bool = False, force: bool = False) -> PlanLoop:
     """Create + start a loop on its daemon thread. Raises LoopConflictError
-    when another loop (in-process or marked running on disk) holds the slot."""
+    when another loop (in-process or marked running on disk) holds the slot;
+    ``force`` overrides only the stale on-disk marker, never a live loop."""
     return PlanLoop(cfg, project_id, max_tasks=max_tasks, run_fn=run_fn,
-                    publish=publish, resume=resume).start()
+                    publish=publish, resume=resume, force=force).start()
 
 
 def cancel_plan_loop(project_id: Optional[str]) -> bool:

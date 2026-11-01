@@ -33,7 +33,7 @@ import logging
 import re
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .plans import PlanError, add_task, load_plan, save_plan, validate
+from .plans import PlanError, add_task, issues, load_plan, lock, save_plan
 
 logger = logging.getLogger("sable.core.plan_llm")
 
@@ -306,6 +306,7 @@ def apply_parsed(store: Dict[str, Any], fields_list: List[Dict[str, Any]],
     import copy
 
     trial = copy.deepcopy(store)
+    before = issues(trial)   # pre-existing problems are not this import's
     alias: Dict[str, str] = {}
     added: List[Dict[str, Any]] = []
     pending_deps: List[Tuple[Dict[str, Any], List[str]]] = []
@@ -342,11 +343,11 @@ def apply_parsed(store: Dict[str, Any], fields_list: List[Dict[str, Any]],
                     f"task {t['id']}: unknown dep {d!r} dropped")
         if resolved and resolved != t["deps"]:
             trial = _set_deps(trial, t["id"], resolved, warnings)
-    report = validate(trial)
-    if not report["ok"]:
-        problems = ([f"cycle {'->'.join(c)}" for c in report.get("cycles") or []]
-                    + [f"{d['task']} depends on missing {d['dep']}"
-                       for d in report.get("dangling_deps") or []])
+    # Reject only problems THIS import introduced: a dangling edge already
+    # sitting elsewhere in the store must not brick every future import.
+    new = issues(trial) - before
+    if new:
+        problems = [str(n) for n in sorted(new)]
         raise PlanError(
             "import rejected: resulting plan invalid "
             f"({'; '.join(problems)[:300]})")
@@ -486,16 +487,21 @@ def plan_import(project: Optional[str], text: Any, *, use_ai: bool = False,
         return {"ok": False, "source": source, "added": [],
                 "warnings": warnings or ["no tasks could be parsed"]}
 
-    existing_ids = [t["id"] for t in store["tasks"]]
-    # Deterministic intra-line aliases reference positional tN of THIS import;
-    # pre-seed them so deps to later lines resolve after their add below.
-    fields_list = fields_list[:num_tasks]
-    added, w2 = apply_parsed(store, fields_list)
-    warnings.extend(w2)
-    if not added:
-        return {"ok": False, "source": source, "added": [],
-                "warnings": warnings or ["all parsed tasks were rejected"]}
-    save_plan(store)
+    # Re-read under the store lock so nothing added while the (possibly slow)
+    # model call ran is clobbered by our save.
+    with lock():
+        store = load_plan(project)
+        existing_ids = [t["id"] for t in store["tasks"]]
+        # Deterministic intra-line aliases reference positional tN of THIS
+        # import; pre-seed them so deps to later lines resolve after their
+        # add below.
+        fields_list = fields_list[:num_tasks]
+        added, w2 = apply_parsed(store, fields_list)
+        warnings.extend(w2)
+        if not added:
+            return {"ok": False, "source": source, "added": [],
+                    "warnings": warnings or ["all parsed tasks were rejected"]}
+        save_plan(store)
     logger.info("plan import (%s): %d task(s) into %s", source, len(added),
                 project or "default")
     return {"ok": True, "source": source, "added": added,
@@ -530,10 +536,14 @@ def plan_expand(project: Optional[str], task_id: str, num: int = 3,
     if not fields_list:
         return {"ok": False, "source": "ai", "added": [],
                 "warnings": warnings or ["no subtasks could be parsed"]}
-    added, w2 = apply_parsed(store, fields_list[:num], parent=task["id"])
-    warnings.extend(w2)
-    if not added:
-        return {"ok": False, "source": "ai", "added": [],
-                "warnings": warnings or ["all generated subtasks rejected"]}
-    save_plan(store)
+    # Re-read under the store lock (the model call may have taken a while).
+    with lock():
+        store = load_plan(project)
+        added, w2 = apply_parsed(store, fields_list[:num], parent=task["id"])
+        warnings.extend(w2)
+        if not added:
+            return {"ok": False, "source": "ai", "added": [],
+                    "warnings": warnings
+                    or ["all generated subtasks rejected"]}
+        save_plan(store)
     return {"ok": True, "source": "ai", "added": added, "warnings": warnings}

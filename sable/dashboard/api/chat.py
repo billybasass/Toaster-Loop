@@ -28,6 +28,19 @@ from ..events import sse_frame
 from .base import (ApiContext, HttpError, SSE_HEARTBEAT_S, ApiResponse,
                    logger, _utcnow)
 
+#: Cap on the per-run SSE frame buffer: a re-attaching reader that falls
+#: further behind than this skips frames (announced via a ``stream.note``
+#: event in _follow_chat_run — finding #11).
+MAX_CHAT_RUN_FRAMES = 5000
+
+#: Directory under home holding thread JSON files.
+CHAT_DIRNAME = "chat"
+
+#: Grace window before a registered-but-never-admitted run (its SSE stream
+#: was rejected by the server's admission control before gen() ever ran) is
+#: evicted by h_chat_runs, so it can never wedge a thread via single-flight.
+_STALE_UNADMITTED_S = 300.0
+
 
 class ChatRoutes(ApiContext):
     """Chat: raw proxy passthrough, the agent SSE stream with run
@@ -204,6 +217,9 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                 return ApiResponse(r.status_code, {"raw": r.text[:4000]})
 
         def gen() -> Iterator[str]:
+            # Quiet-upstream heartbeat (parity with _follow_chat_run): a slow
+            # model keeps intermediate proxies from timing the connection out.
+            last_beat = time.monotonic()
             try:
                 with track_request(base), \
                         httpx.Client(timeout=httpx.Timeout(600.0,
@@ -216,6 +232,9 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                                 "status": upstream.status_code, "detail": detail})
                             return
                         for line in upstream.iter_lines():
+                            if time.monotonic() - last_beat >= SSE_HEARTBEAT_S:
+                                last_beat = time.monotonic()
+                                yield ": ping\n\n"
                             if not line:
                                 continue
                             # Verbatim SSE passthrough.
@@ -373,7 +392,8 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                         plan_task: Optional[str] = None,
                         run_id: Optional[str] = None,
                         inbox_wake: bool = False,
-                        drain_inbox: bool = False) -> ApiResponse:
+                        drain_inbox: bool = False,
+                        register_now: bool = False) -> ApiResponse:
         """Spawn one chat run and return the streaming SSE response.
 
         Extracted verbatim from ``h_chat_stream`` (D-17 Phase 2, spec §4.1:
@@ -393,10 +413,36 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         Raises HttpError(409) when the thread already has an in-flight run —
         wake callers catch it and leave their entries pending.
         """
+        if run_id is None:
+            run_id = uuid.uuid4().hex[:12]
+
+        def _new_run() -> Dict[str, Any]:
+            return {
+                "cancel": cancel, "done": False, "thread": thread_id,
+                "model": model, "profile": prof.get("name") if prof else None,
+                # Re-attaching panels render the in-flight user turn from the
+                # registry (the transcript is only persisted when the run
+                # ends), so the prompt travels with the run record.
+                "prompt": prompt,
+                "status": "running",
+                "frames": [], "dropped": 0, "cond": threading.Condition(),
+                # gen() flips this once the stream is admitted and its worker
+                # starts (both paths). An entry that stays un-admitted long
+                # after spawn — rejected stream, crashed wake caller — gets
+                # evicted by h_chat_runs so it can never wedge single-flight.
+                "admitted": False, "registered_at": time.monotonic(),
+            }
+
+        cancel = threading.Event()
+        run: Optional[Dict[str, Any]] = None
         # Single-flight per thread: a second POST for a thread with an
         # in-flight run gets a clean 409 carrying the active run_id, instead
         # of silently spawning a duplicate agent (the orphan-duplicate cascade
-        # — user resends a message they believed was stopped).
+        # — user resends a message they believed was stopped). With
+        # register_now the scan AND the registry insert happen under ONE lock
+        # hold: the wake path's entries are consumed outside this function,
+        # so leaving a check->insert gap would let a concurrent user POST
+        # start a second run on the same thread (finding #2).
         if thread_id:
             with self._chat_runs_lock:
                 for rid, r in self._chat_runs.items():
@@ -406,15 +452,19 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                                         "thread — stop it first",
                                         code="run_in_flight",
                                         extra={"run_id": rid})
-        if run_id is None:
-            run_id = uuid.uuid4().hex[:12]
-        cancel = threading.Event()
+                if register_now:
+                    run = _new_run()
+                    self._chat_runs[run_id] = run
         # D-17 §4.3 row 1 ("user wins"): a real user message on a thread with
         # pending inbox entries drains them into THIS turn's prompt (the user
         # never waits on a wake). Runs only after the single-flight check, so
         # entries are consumed by exactly one consumer.
+        drained = False
         if drain_inbox and thread_id:
-            prompt = self._drain_inbox_into_prompt(thread_id, prompt, run_id)
+            prompt, drained = self._drain_inbox_into_prompt(
+                thread_id, prompt, run_id)
+            if drained and run is not None:
+                run["prompt"] = prompt
         # Ping-pong guard (spec §10 risk #2): any real user-initiated run on
         # the thread clears its consecutive-wake streak.
         if thread_id and not inbox_wake:
@@ -473,7 +523,10 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
 
         def gen() -> Iterator[str]:
             # First iteration = the stream was admitted: register now so a
-            # rejected (never-started) stream leaves no phantom run behind.
+            # rejected (never-started) stream leaves no phantom run behind
+            # (the deferred path). The wake path (register_now) already
+            # inserted its entry under the single-flight lock; here we only
+            # flip `admitted`.
             # Run lifecycle: the registry entry owns a frame buffer + a
             # condition variable. The worker thread publishes every SSE frame
             # into it; readers (this generator, or a panel re-attaching via
@@ -481,34 +534,33 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
             # come and go freely — a reader leaving NEVER stops the run and
             # never marks it done. Only the worker marks done, after it has
             # persisted the complete transcript.
-            run: Dict[str, Any] = {
-                "cancel": cancel, "done": False, "thread": thread_id,
-                "model": model, "profile": prof.get("name") if prof else None,
-                # Re-attaching panels render the in-flight user turn from the
-                # registry (the transcript is only persisted when the run
-                # ends), so the prompt travels with the run record.
-                "prompt": prompt,
-                "status": "running",
-                "frames": [], "dropped": 0, "cond": threading.Condition(),
-            }
-            with self._chat_runs_lock:
-                self._chat_runs[run_id] = run
+            nonlocal run
+            if run is None:
+                run = _new_run()
+                with self._chat_runs_lock:
+                    self._chat_runs[run_id] = run
+            # gen() running at all == the stream was admitted. Wake-path
+            # entries briefly carry admitted=False between spawn and this
+            # first read; that window is exactly what the stale eviction in
+            # h_chat_runs protects (a wake caller that never reads).
+            run["admitted"] = True
+            entry: Dict[str, Any] = run
 
             def _emit(frame: str) -> None:
-                with run["cond"]:
-                    frames = run["frames"]
+                with entry["cond"]:
+                    frames = entry["frames"]
                     frames.append(frame)
                     if len(frames) > MAX_CHAT_RUN_FRAMES:
                         frames.pop(0)
-                        run["dropped"] += 1
-                    run["cond"].notify_all()
+                        entry["dropped"] += 1
+                    entry["cond"].notify_all()
 
             def _finish() -> None:
-                with run["cond"]:
-                    if run.get("status") != "cancelling":
-                        run["status"] = "completed"
-                    run["done"] = True
-                    run["cond"].notify_all()
+                with entry["cond"]:
+                    if entry.get("status") != "cancelling":
+                        entry["status"] = "completed"
+                    entry["done"] = True
+                    entry["cond"].notify_all()
 
             t0 = time.monotonic()
             _emit(sse_frame("run.started",
@@ -517,7 +569,16 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                              else None,
                              # Context tracker: the window the
                              # chat UI renders usage against.
-                             "context_window": ctx_window}))
+                             "context_window": ctx_window,
+                             # Authoritative user turn (finding #7): a
+                             # "user wins" drain prepends the inbox block to
+                             # the typed prompt before anything reaches this
+                             # frame, and wake turns are synthetic entirely.
+                             # The client replaces its locally-pushed raw
+                             # message with this so its in-memory copy and
+                             # the server-persisted transcript never diverge.
+                             "prompt": prompt,
+                             "inbox": bool(inbox_wake or drained)}))
 
             # reference-style live streaming: the runner executes on a worker
             # thread and forwards token/reasoning/tool events through _sink.
@@ -586,7 +647,9 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                                  "duration_s": round(time.monotonic() - t0, 3),
                                  "backend": res.backend,
                                  "failure_reason": res.failure_reason},
-                                prof.get("name") if prof else None)
+                                prof.get("name") if prof else None,
+                                inbox=bool(inbox_wake or drained),
+                                run_entry=entry)
                         except Exception:  # persistence must never eat the run
                             logging.getLogger("sable.dashboard").debug(
                                 "chat transcript persist failed for thread %s",
@@ -757,28 +820,31 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
     # --------------------------------------------------- D-17 Phase 2: inbox
 
     def _drain_inbox_into_prompt(self, thread_id: str, prompt: str,
-                                 run_id: Optional[str] = None) -> str:
+                                 run_id: Optional[str] = None,
+                                 ) -> Tuple[str, bool]:
         """Consume any pending delegation-inbox entries for the thread into a
         context block prepended to the user's prompt (the "user wins" rule,
         D-17 §4.3 / spec §4.4 — same header as a wake turn). Marks them
-        delivered against this run id. Best-effort: store failures leave the
-        prompt untouched (a broken inbox must never break a user message)."""
+        delivered against this run id. Returns ``(prompt, drained)`` so the
+        caller can mark the persisted turn as an inbox turn without content
+        sniffing (finding #6/#7). Best-effort: store failures leave the prompt
+        untouched (a broken inbox must never break a user message)."""
         try:
             from ...core import delegation as _delegation
 
             rows = _delegation.delegation_store.take_pending_inbox(
                 thread_id, cfg=self.cfg)
         except Exception:  # noqa: BLE001
-            return prompt
+            return prompt, False
         if not rows:
-            return prompt
+            return prompt, False
         try:
             _delegation.delegation_store.mark_delivered_run(
                 [str(r.get("delegation_id")) for r in rows],
                 run_id or "user-turn", cfg=self.cfg)
         except Exception:  # noqa: BLE001 — provenance is best-effort
             pass
-        return _delegation.format_inbox_message(rows) + "\n\n" + prompt
+        return (_delegation.format_inbox_message(rows) + "\n\n" + prompt, True)
 
     def start_inbox_wake_run(self, thread_id: str) -> Dict[str, Any]:
         """D-17 wake path: start a FRESH chat run on the thread whose user
@@ -839,7 +905,11 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                 thread_id=thread_id, run_id=run_id, inbox_wake=True,
                 sampling_override={**_inst_sampling, **_prof_sampling},
                 ctx_window=self._instance_context_length(
-                    (prof or {}).get("server_instance")))
+                    (prof or {}).get("server_instance")),
+                # Register inside the single-flight lock: entries are already
+                # consumed here, so a check->insert gap would let a concurrent
+                # user POST start a second run on this thread.
+                register_now=True)
         except HttpError as e:
             # Lost the single-flight race to a real user message (or nothing
             # is serving): nothing started, so nothing was consumed.
@@ -849,16 +919,27 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         except Exception as e:  # noqa: BLE001 — watcher must never die
             _requeue()
             return {"started": False, "error": f"{type(e).__name__}: {e}"}
-        # Admit the stream (first frame): this registers the run in the
-        # registry and starts its worker thread. Nobody reads this synthetic
-        # stream live; frames buffer for any attached panel exactly like a
-        # user run (re-attach via /api/chat/runs/<id>/stream still works).
+        # Admit the stream (first frame): this starts the worker thread.
+        # Nobody reads this synthetic stream live; frames buffer for any
+        # attached panel exactly like a user run (re-attach via
+        # /api/chat/runs/<id>/stream still works). If admission itself blows
+        # up before the worker ever ran, drop the registry entry (it would
+        # otherwise wedge the thread's single-flight slot until the stale-run
+        # sweep) and requeue: delivered-but-never-started must not eat inbox
+        # entries.
         stream = resp.stream
-        if stream is not None:
-            try:
+        try:
+            if stream is not None:
                 next(iter(stream))
-            except (StopIteration, ValueError):  # pragma: no cover - defensive
-                pass
+        except (StopIteration, ValueError):  # pragma: no cover - defensive
+            pass
+        except Exception as e:  # noqa: BLE001 — watcher must never die
+            with self._chat_runs_lock:
+                r = self._chat_runs.pop(run_id, None)
+            if r is not None and not r.get("done"):
+                _requeue()
+                return {"started": False,
+                        "error": f"admission failed: {type(e).__name__}: {e}"}
         ids = [str(r.get("delegation_id")) for r in rows]
         try:
             _delegation.delegation_store.mark_delivered_run(ids, run_id,
@@ -896,12 +977,18 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
 
     def h_chat_cancel(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         run_id = str(b.get("run_id", ""))
-        run = self._chat_runs.get(run_id)
-        if run is None:
-            raise HttpError(404, f"no chat run {run_id}")
-        run["cancel"].set()
-        run["status"] = "cancelling"
-        return {"ok": True, "cancelling": not run["done"]}
+        # Read + mutate under the registry lock: h_chat_runs prunes done runs
+        # under the same lock, so an unlocked get here could race a prune and
+        # report a successful cancel for an entry that no longer exists.
+        with self._chat_runs_lock:
+            run = self._chat_runs.get(run_id)
+            if run is None:
+                raise HttpError(404, f"no chat run {run_id}")
+            cancelling = not run.get("done")
+            if cancelling:
+                run["cancel"].set()
+                run["status"] = "cancelling"
+        return {"ok": True, "cancelling": cancelling}
 
     def h_chat_runs(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         """In-flight chat run registry (run lifecycle, step 2).
@@ -915,9 +1002,17 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         """
         with self._chat_runs_lock:
             # Prune finished runs (their state is no longer needed — the
-            # trace/summary already recorded everything).
+            # trace/summary already recorded everything). Also evict a
+            # register_now entry whose stream was never admitted after the
+            # grace window: its worker never started, so without this it
+            # would wedge the thread's single-flight slot forever. Entries
+            # predating the flag (test seeds, legacy shapes) are untouched.
+            now = time.monotonic()
             for rid in [r for r, v in self._chat_runs.items()
-                        if v.get("done")]:
+                        if v.get("done")
+                        or (v.get("admitted") is False
+                            and now - float(v.get("registered_at") or 0.0)
+                            > _STALE_UNADMITTED_S)]:
                 del self._chat_runs[rid]
             runs = [{
                 "run_id": rid,
@@ -969,7 +1064,8 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
 
     def _persist_run_turn(self, thread_id: str, prompt: str, acc: Dict[str, Any],
                           res: Any, footer: Dict[str, Any],
-                          profile_name: Optional[str]) -> None:
+                          profile_name: Optional[str], *, inbox: bool = False,
+                          run_entry: Optional[Dict[str, Any]] = None) -> None:
         """Server-side transcript persistence for a finished chat run.
 
         Persistence used to be client-only: the starting panel saved the thread
@@ -989,7 +1085,16 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
 
         Runners without live events (test stubs) never filled the accumulator;
         for those the assistant text falls back to ``res.final_response``.
+
+        ``inbox`` stamps the persisted user turn with ``{"inbox": True}`` so
+        the UI renders its "⧗ inbox" chip from data instead of regex-sniffing
+        content a user could accidentally type (finding #6). ``run_entry`` is
+        the run's registry dict: if the thread was deleted while this run was
+        in flight (h_thread_delete flips ``thread_deleted``), persisting would
+        resurrect the deleted file — skip instead.
         """
+        if run_entry is not None and run_entry.get("thread_deleted"):
+            return
         p = self._thread_path(thread_id)
         t: Dict[str, Any] = {}
         if p.is_file():
@@ -1011,9 +1116,18 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
              if msgs[i].get("role") == "user"
              and str(msgs[i].get("content") or "") == prompt), None)
         if last_user is not None:
-            del msgs[last_user + 1:]   # drop this run's partial leftovers
+            # Drop this run's partial leftovers (an aborted panel's
+            # half-rendered reply); keep the matched user turn itself and
+            # stamp its inbox provenance so the chip survives a reload
+            # without content sniffing.
+            del msgs[last_user + 1:]
+            if inbox:
+                msgs[last_user]["inbox"] = True
         else:
-            msgs.append({"role": "user", "content": prompt})
+            user_msg: Dict[str, Any] = {"role": "user", "content": prompt}
+            if inbox:
+                user_msg["inbox"] = True
+            msgs.append(user_msg)
 
         assistant: Dict[str, Any] = {"role": "assistant", "content": text}
         reasoning = str(acc.get("reasoning") or "")
@@ -1050,6 +1164,10 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                 t["title"] = title
                 t["title_source"] = DERIVED
 
+        # Second tombstone check right before the write: a thread deleted
+        # during the run must stay deleted.
+        if run_entry is not None and run_entry.get("thread_deleted"):
+            return
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(t, ensure_ascii=False, indent=2),
@@ -1075,6 +1193,10 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
             raise HttpError(500, f"unreadable thread file: {e}") from e
 
     def h_threads_list(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
+        """List thread summaries. Optional ?limit=N&offset=M paginate the
+        listing (each row is one file read; hundreds of threads should not
+        have to wait on all of them). Absent params keep the classic
+        return-everything behavior byte-identical."""
         d = self.home / CHAT_DIRNAME
         threads = []
         # Phase 3 (D-17): per-thread undelivered inbox counts drive the chat
@@ -1088,7 +1210,17 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         except Exception:  # noqa: BLE001
             pending = {}
         if d.is_dir():
-            for f in sorted(d.glob("*.json")):
+            files = sorted(d.glob("*.json"))
+            # Slice ONLY when a caller passes limit/offset; the default path
+            # stays byte-identical (read every file, return everything).
+            try:
+                off = int(q.get("offset") or 0)
+                lim = int(q.get("limit") or 0)
+            except (TypeError, ValueError):
+                off, lim = 0, 0
+            if off > 0 or lim > 0:
+                files = files[off: (off + lim) if lim > 0 else None]
+            for f in files:
                 try:
                     t = json.loads(f.read_text())
                 except (OSError, json.JSONDecodeError):
@@ -1178,8 +1310,11 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
             "profile": b.get("profile", existing.get("profile")),
             # Phase 2 (delegation): lineage entries are appended server-side by
             # the delegation tools; a client save that omits the key must not
-            # wipe them. An explicit list replaces (client-authoritative edit).
-            "delegations": (b["delegations"]
+            # wipe them. An explicit list replaces (client-authoritative edit),
+            # but only dict-shaped entries survive — a stray string/number in
+            # the array used to render as "?" owner chips forever.
+            "delegations": ([d for d in b["delegations"]
+                             if isinstance(d, dict)]
                             if isinstance(b.get("delegations"), list)
                             else existing.get("delegations") or []),
         }
@@ -1237,6 +1372,16 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                 if not should_apply_title(t.get("title_source"), LLM):
                     return  # user renamed (or llm already set) while we queued
 
+                # Don't spend a GPU slot while a run is in flight anywhere:
+                # the title can wait for the next save or the quiet moment
+                # after the run (a busy single-GPU box should never contend
+                # with the user's agent for this cosmetic call).
+                with self._chat_runs_lock:
+                    busy = any(not r.get("done")
+                               for r in self._chat_runs.values())
+                if busy:
+                    return
+
                 base, key, model = self._resolve_chat_target()
                 import httpx
 
@@ -1277,15 +1422,27 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         p = self._thread_path(thread_id)
         if not p.is_file():
             raise HttpError(404, f"no thread {thread_id}")
+        # Deleting a thread with an in-flight run: ask the run to stop and
+        # tombstone its registry entry so _persist_run_turn does not recreate
+        # the file we are about to remove (a finished run would otherwise
+        # resurrect a deleted transcript).
+        with self._chat_runs_lock:
+            for r in self._chat_runs.values():
+                if r.get("thread") == thread_id and not r.get("done"):
+                    r["cancel"].set()
+                    r["status"] = "cancelling"
+                    r["thread_deleted"] = True
+        try:
+            from ...core import delegation as _delegation
+
+            _delegation.unregister_wake_hook(thread_id)
+        except Exception:  # noqa: BLE001 — cleanup never blocks the delete
+            pass
         p.unlink()
         return {"ok": True}
 
 
 # ------------------------------------------- module-level helpers
-
-MAX_CHAT_RUN_FRAMES = 5000
-
-CHAT_DIRNAME = "chat"
 
 def _follow_chat_run(run: Dict[str, Any]) -> Iterator[str]:
     """Reader over a chat run's frame buffer, from a fresh cursor.
@@ -1305,6 +1462,7 @@ def _follow_chat_run(run: Dict[str, Any]) -> Iterator[str]:
         return
     cursor = 0
     idle_s = 0.0
+    noted = False
     while True:
         with cond:
             base = int(run.get("dropped") or 0)
@@ -1319,6 +1477,15 @@ def _follow_chat_run(run: Dict[str, Any]) -> Iterator[str]:
                 idle_s += 1.0
         for frame in batch:
             yield frame
+        if base and not noted:
+            # Honest replay (finding #11): the reader skipped frames the ring
+            # buffer evicted. Announce it exactly once, right after replaying
+            # what survived, so a re-attaching panel can say "N frames
+            # dropped" instead of silently showing a gapped transcript.
+            noted = True
+            yield sse_frame("stream.note", {
+                "note": f"{base} buffered frame(s) were dropped",
+                "dropped": base})
         if batch:
             idle_s = 0.0
         elif not finished and idle_s >= SSE_HEARTBEAT_S:
@@ -1329,5 +1496,10 @@ def _follow_chat_run(run: Dict[str, Any]) -> Iterator[str]:
             return
 
 def _looks_like_error(content: str) -> bool:
-    low = content.lstrip().lower()
-    return (low.startswith("error") or "traceback" in low or "exception" in low)
+    """Heuristic error flag for the no-stream synthesis path only. Anchored:
+    a successful search/read whose body merely *mentions* "exception" (e.g.
+    grepping Python code) must not render as a failed tool call, so the loose
+    keywords are checked only in the first line."""
+    first_line = content.lstrip().split("\n", 1)[0].lower()
+    return (first_line.startswith("error") or "traceback" in first_line
+            or "exception" in first_line)

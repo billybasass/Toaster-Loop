@@ -292,6 +292,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Override plans.loop.max_tasks for this run")
     ploop.add_argument("--resume", action="store_true",
                        help="Continue from the project's .loop.json progress")
+    ploop.add_argument("--force", action="store_true",
+                       help="Override a stale .loop.json running marker "
+                            "(left by a hard kill; never overrides a live loop)")
     ploop.set_defaults(func=cmd_plan)
 
     ploopst = psub.add_parser("loop-status", help="Show loop progress file")
@@ -2406,7 +2409,8 @@ def cmd_plan(args: argparse.Namespace) -> int:
             try:
                 loop = start_plan_loop(cfg, project,
                                        max_tasks=args.max_tasks,
-                                       resume=bool(args.resume))
+                                       resume=bool(args.resume),
+                                       force=bool(args.force))
             except LoopConflictError as e:
                 print(f"error: {e}", file=sys.stderr)
                 return 1

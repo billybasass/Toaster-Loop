@@ -34,6 +34,19 @@ from typing import Any, Dict, Optional
 from .base import ApiContext, HttpError
 
 
+def _opt_int(value: Any, field: str) -> Optional[int]:
+    """Coerce an optional int body field; 400 (not a raw 500) on junk."""
+    if value is None or value == "":
+        return None
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise HttpError(400, f"{field} must be an integer, got {value!r}")
+    if n < 1:
+        raise HttpError(400, f"{field} must be >= 1")
+    return n
+
+
 class PlansRoutes(ApiContext):
     """Project-scoped task-graph endpoints (WP12)."""
 
@@ -61,6 +74,10 @@ class PlansRoutes(ApiContext):
         pid = str(project_id or "").strip()
         if not re.match(r"^[A-Za-z0-9._-]{1,64}$", pid):
             raise HttpError(400, "invalid project id")
+        if pid.lower().endswith(".json"):
+            # "foo.json" and "foo" would collide on one plan file; the core
+            # plan_path rejects it too — surface a clean 400 here.
+            raise HttpError(400, "project id may not end in .json")
         if pid == "default":
             return None
         if self._load_project(pid) is None:
@@ -127,15 +144,20 @@ class PlansRoutes(ApiContext):
                   ("title", "description", "details", "test_strategy",
                    "priority", "deps", "parent", "labels")
                   if b.get(k) is not None}
-        store = P.load_plan(key)
         try:
-            t = P.add_task(store, fields)
-            report = P.validate(store)
-            if not report["ok"]:
-                raise PlanError(
-                    f"plan invalid after add ({report['cycles']} "
-                    f"{report['dangling_deps']}); task NOT saved")
-            P.save_plan(store)
+            with P.lock():   # read-modify-write against concurrent writers
+                store = P.load_plan(key)
+                before = P.issues(store)
+                t = P.add_task(store, fields)
+                new = P.issues(store) - before
+                if new:
+                    # Scope to what THIS add introduced: a pre-existing
+                    # dangling edge elsewhere must not brick every future
+                    # add (global validate() used to reject unrelated work).
+                    raise PlanError(
+                        f"plan invalid after add ({sorted(new)}); "
+                        "task NOT saved")
+                P.save_plan(store)
         except PlanError as e:
             raise HttpError(400, str(e)) from e
         self._publish_updated(key, [t["id"]])
@@ -145,14 +167,15 @@ class PlansRoutes(ApiContext):
         from ...core import plans as P
         from ...core.plans import PlanError
 
-        store = P.load_plan(key)
         try:
-            t = P.update_task(store, str(b.get("task_id") or ""),
-                              {k: b[k] for k in
-                               ("title", "description", "details",
-                                "test_strategy", "priority", "labels")
-                               if k in b})
-            P.save_plan(store)
+            with P.lock():
+                store = P.load_plan(key)
+                t = P.update_task(store, str(b.get("task_id") or ""),
+                                  {k: b[k] for k in
+                                   ("title", "description", "details",
+                                    "test_strategy", "priority", "labels")
+                                   if k in b})
+                P.save_plan(store)
         except PlanError as e:
             status = 404 if "no such task" in str(e) else 400
             raise HttpError(status, str(e)) from e
@@ -164,12 +187,13 @@ class PlansRoutes(ApiContext):
         from ...core import plans as P
         from ...core.plans import PlanError
 
-        store = P.load_plan(key)
         try:
-            t = P.set_status(store, str(b.get("task_id") or ""),
-                             str(b.get("status") or ""),
-                             note=str(b.get("note") or "") or None)
-            P.save_plan(store)
+            with P.lock():
+                store = P.load_plan(key)
+                t = P.set_status(store, str(b.get("task_id") or ""),
+                                 str(b.get("status") or ""),
+                                 note=str(b.get("note") or "") or None)
+                P.save_plan(store)
         except PlanError as e:
             status = 404 if "no such task" in str(e) else 400
             raise HttpError(status, str(e)) from e
@@ -180,15 +204,16 @@ class PlansRoutes(ApiContext):
         from ...core import plans as P
         from ...core.plans import PlanError
 
-        store = P.load_plan(key)
         task_id = str(b.get("task_id") or "")
         dep_id = str(b.get("dep_id") or "")
         try:
-            if b.get("remove"):
-                t = P.remove_dependency(store, task_id, dep_id)
-            else:
-                t = P.add_dependency(store, task_id, dep_id)
-            P.save_plan(store)
+            with P.lock():
+                store = P.load_plan(key)
+                if b.get("remove"):
+                    t = P.remove_dependency(store, task_id, dep_id)
+                else:
+                    t = P.add_dependency(store, task_id, dep_id)
+                P.save_plan(store)
         except PlanError as e:
             status = 404 if "no such task" in str(e) else 400
             raise HttpError(status, str(e)) from e
@@ -241,7 +266,8 @@ class PlansRoutes(ApiContext):
             client, model = self._ai_client()
         try:
             rep = plan_import(key, text, use_ai=use_ai,
-                              num_tasks=int(b.get("num_tasks") or 8),
+                              num_tasks=_opt_int(b.get("num_tasks"),
+                                                 "num_tasks") or 8,
                               client_fn=client, model=model)
         except PlanImportError as e:
             raise HttpError(400, str(e)) from e
@@ -262,7 +288,8 @@ class PlansRoutes(ApiContext):
             raise HttpError(400, "task_id required")
         client, model = self._ai_client()
         try:
-            rep = plan_expand(key, task_id, num=int(b.get("num") or 3),
+            rep = plan_expand(key, task_id,
+                              num=_opt_int(b.get("num"), "num") or 3,
                               prompt=str(b.get("prompt") or "") or None,
                               client_fn=client, model=model)
         except PlanImportError as e:
@@ -292,6 +319,15 @@ class PlansRoutes(ApiContext):
         if task is None:
             raise HttpError(404, f"no such task {task_id!r}",
                             code="unknown_task")
+        # Double-click / stale-view guard: a finished or already-running task
+        # must not silently spawn a second thread + run on top of itself.
+        if task["status"] in ("done", "cancelled"):
+            raise HttpError(409, f"task {task_id} is already "
+                                 f"{task['status']}", code="task_closed")
+        if task["status"] == "in_progress":
+            raise HttpError(409, f"task {task_id} is already in progress "
+                                 "(reopen its thread instead of re-starting)",
+                            code="task_running")
         prompt = P.build_task_prompt(store, task_id)
         extra = str(b.get("instruction") or "").strip()
         if extra:
@@ -321,20 +357,39 @@ class PlansRoutes(ApiContext):
             run_body["profile"] = prof
         # Kick the existing chat run path. Its worker thread owns the run;
         # this handler is only a reader (dropping the stream never affects
-        # the run — same contract as a navigating-away browser).
-        resp = self.h_chat_stream({}, run_body)
-        if getattr(resp, "stream", None) is not None:
+        # the run — same contract as a navigating-away browser). If admission
+        # fails, delete the just-seeded thread so no orphan lingers, and
+        # close the generator instead of leaving cleanup to GC.
+        try:
+            resp = self.h_chat_stream({}, run_body)
+            if getattr(resp, "stream", None) is not None:
+                it = iter(resp.stream)
+                try:
+                    next(it)          # starts the worker; frames unread
+                finally:
+                    closer = getattr(it, "close", None)
+                    if callable(closer):
+                        try:
+                            closer()  # generator done at once, not at GC
+                        except Exception:  # noqa: BLE001
+                            pass
+        except HttpError as e:
+            # Admission failed (bad profile, thread vanished...): drop the
+            # seeded thread so no orphan lingers, surface a clean 502.
             try:
-                next(iter(resp.stream))  # starts the worker; frames unread
-            except StopIteration:
+                self.handle("DELETE", f"/api/chat/threads/{thread_id}")
+            except Exception:  # noqa: BLE001 - best-effort cleanup
                 pass
+            raise HttpError(502, f"could not start run for task {task_id}: "
+                                 f"{e.message}") from e
 
         try:
-            store = P.load_plan(key)
-            t = P.set_status(store, task_id, "in_progress",
-                             note=f"started from plan (thread {thread_id})")
-            P.record_run(store, task_id, thread=thread_id)
-            P.save_plan(store)
+            with P.lock():
+                store = P.load_plan(key)
+                t = P.set_status(store, task_id, "in_progress",
+                                 note=f"started from plan (thread {thread_id})")
+                P.record_run(store, task_id, thread=thread_id)
+                P.save_plan(store)
         except PlanError as e:  # run may have raced ahead; report the task state
             raise HttpError(409, f"task not startable: {e}") from e
         self._publish_updated(key, [task_id])
@@ -349,10 +404,10 @@ class PlansRoutes(ApiContext):
         try:
             loop = start_plan_loop(
                 self.cfg, key,
-                max_tasks=(int(b["max_tasks"]) if b.get("max_tasks")
-                           else None),
+                max_tasks=_opt_int(b.get("max_tasks"), "max_tasks"),
                 publish=lambda kind, payload: self.bus.publish(kind, payload),
-                resume=bool(b.get("resume")))
+                resume=bool(b.get("resume")),
+                force=bool(b.get("force")))
         except LoopConflictError as e:
             # Single-flight: a second start is a conflict, never queued.
             raise HttpError(409, str(e), code="loop_running") from e

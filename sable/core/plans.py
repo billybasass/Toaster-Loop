@@ -31,7 +31,9 @@ import json
 import logging
 import os
 import re
+import tempfile
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -65,7 +67,25 @@ DEFAULT_PROJECT = "default"
 # Module-level lock: one sable process at a time is the project assumption,
 # but dashboard threads + CLI + MCP can interleave inside it. The lock covers
 # read-modify-write cycles so two concurrent adds never lose an update.
-_LOCK = threading.Lock()
+# Re-entrant: compound writers hold it across load/modify/save (via the public
+# ``lock()`` below) and may still call helpers that re-enter. Save itself also
+# takes it, so even a caller that forgot the context manager cannot interleave
+# two file writes.
+_LOCK = threading.RLock()
+
+
+@contextmanager
+def lock():
+    """Hold the store lock across a compound load -> modify -> save sequence.
+
+    Every writer that reads a plan and later saves it MUST wrap the whole
+    sequence (``with plans.lock(): ...``), otherwise a concurrent writer —
+    another dashboard thread, a loop task closing via plan_progress, or the
+    runner's finalize linkage — can overwrite the interleaving update (the
+    atomic os.replace in save_plan only prevents torn files, not lost
+    updates). Re-entrant, so nesting is safe."""
+    with _LOCK:
+        yield
 
 
 def _utcnow() -> str:
@@ -103,6 +123,12 @@ def plans_dir(home: Optional[Path] = None) -> Path:
     return resolve_sable_home() / "plans"
 
 
+#: A project id ending in ".json" would collide on disk with the plan file of
+#: the same name minus the suffix ("foo.json" and "foo" -> foo.json), silently
+#: sharing one graph. Reject it at the single chokepoint instead.
+_JSON_SUFFIX_RE = re.compile(r"\.json$", re.I)
+
+
 def plan_path(project_id: Optional[str], home: Optional[Path] = None) -> Path:
     """File for one project's plan. Invalid/None project => default.json.
 
@@ -113,6 +139,8 @@ def plan_path(project_id: Optional[str], home: Optional[Path] = None) -> Path:
         return plans_dir(home) / f"{DEFAULT_PROJECT}.json"
     if not _PROJECT_ID_RE.match(pid):
         raise ValueError(f"invalid project id {pid!r}")
+    if _JSON_SUFFIX_RE.search(pid):
+        raise ValueError(f"invalid project id {pid!r} (may not end in .json)")
     return plans_dir(home) / f"{pid}.json"
 
 
@@ -251,17 +279,31 @@ def load_plan(project_id: Optional[str] = None, *,
 
 def save_plan(store: Dict[str, Any], *, home: Optional[Path] = None) -> None:
     """Atomic tmp + os.replace write of a validated store (raises OSError on
-    real I/O failure — callers decide how loud to be)."""
+    real I/O failure — callers decide how loud to be).
+
+    Takes the module lock so two writers in this process can never interleave
+    file writes even if a caller forgot ``with lock():`` around its
+    read-modify-write; the tmp file is mkstemp-unique so concurrent saves
+    (this or another process) cannot clobber each other's partial temp."""
     clean = validate_store(store)
     clean["version"] = SCHEMA_VERSION
     clean["updated"] = _utcnow()
     pid = clean.get("project")
     p = plan_path(pid, home=home)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=2),
-                   encoding="utf-8")
-    os.replace(tmp, p)
+    with _LOCK:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".plan-",
+                                   suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(clean, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, p)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 def next_task_id(store: Dict[str, Any]) -> str:
@@ -435,7 +477,12 @@ def validate(store: Dict[str, Any]) -> Dict[str, Any]:
 
     Shape: {"ok": bool, "cycles": [[ids]], "dangling_deps":
     [{"task": id, "dep": id}], "duplicate_ids": [..]}. Used by the CLI
-    (`sable plan validate`), the dashboard GET, and MCP plans_list."""
+    (`sable plan validate`), the dashboard GET, and MCP plans_list.
+
+    ``duplicate_ids`` is defensive only: ``validate_store`` already drops a
+    second task with an existing id on every load/save, so well-formed stores
+    can never report one. Mutations that need "did THIS change break things"
+    should diff :func:`issues` before/after instead of trusting global ok."""
     tasks = store.get("tasks") or []
     ids = {t["id"] for t in tasks}
     dupes: List[str] = []
@@ -449,6 +496,25 @@ def validate(store: Dict[str, Any]) -> Dict[str, Any]:
     cycles = find_cycles(store)
     return {"ok": not (cycles or dangling), "cycles": cycles,
             "dangling_deps": dangling, "duplicate_ids": dupes}
+
+
+def issues(store: Dict[str, Any]) -> set:
+    """Normalized snapshot of every graph problem (cycles + dangling deps).
+
+    Used to scope validation on mutations: a mutation is acceptable when it
+    introduces NO NEW problems. Validating global ``ok`` instead would let one
+    pre-existing dangling dep — reachable via manual file edits or the
+    deliberate keep-on-load policy — brick every future add forever. Cycles
+    are canonicalized (smallest rotation) so the same cycle never reads as
+    "new" after an unrelated edit shifts traversal order."""
+    rep = validate(store)
+    out = set()
+    for cyc in rep["cycles"]:
+        k = cyc.index(min(cyc))
+        out.add(("cycle", tuple(cyc[k:] + cyc[:k])))
+    for d in rep["dangling_deps"]:
+        out.add(("dangling", d["task"], d["dep"]))
+    return out
 
 
 def add_dependency(store: Dict[str, Any], task_id: str,

@@ -1239,10 +1239,25 @@ export default {
           (kind, d) => {
             if (kind === "run.started") {
               ctxWindow = d.context_window || 0; renderCtxChip();
+              // Authoritative user turn from the server (drained-inbox or
+              // wake prompts differ from what any local copy would guess).
+              if (d.prompt && messages.length
+                  && messages[messages.length - 1].role === "user"
+                  && messages[messages.length - 1].content !== d.prompt) {
+                messages[messages.length - 1] = {
+                  role: "user", content: d.prompt,
+                  ...(d.inbox ? { inbox: true } : {}) };
+                renderMsgs();
+                msgHost.appendChild(bubble.node);   // renderMsgs replaced all
+              }
             }
             else if (kind === "message.delta") bubble.append(d.text || "");
             else if (kind === "message.reset") bubble.reset(d.text || "");
             else if (kind === "reasoning.delta") bubble.appendReasoning(d.text || "");
+            else if (kind === "stream.note" && d.dropped) {
+              toast(`⚠ ${d.dropped} frame(s) dropped from the replay buffer`,
+                "info");
+            }
             else if (kind === "context.usage") {
               ctxUsed = d.prompt_tokens || ctxUsed; renderCtxChip();
             }
@@ -1310,6 +1325,9 @@ export default {
           (m) => m && typeof m.role === "string");
         threadSummary = typeof d.thread.summary === "string"
           ? d.thread.summary : null;
+        // Context chip is per-thread: clear the previous thread's numbers so
+        // it never shows a stale percentage until this thread's next run.
+        ctxUsed = 0; ctxWindow = 0; renderCtxChip();
         // The dropdown follows the thread: reopen a "sable" conversation and
         // the selector shows sable, not default.
         selectThreadProfile(d.thread.profile || "");
@@ -1765,10 +1783,11 @@ export default {
     }
 
     // The server only ever needs role/content pairs: strip client-side
-    // display metadata (image names, reasoning, tool cards, footer) before
-    // sending history.
+    // display metadata (image names, reasoning, tool cards, footer, inbox
+    // chip flag) before sending history.
     function wireHistory(msgs) {
-      return msgs.map(({ images, reasoning, tools, footer, ...rest }) => rest);
+      return msgs.map(({ images, reasoning, tools, footer, inbox,
+                         ...rest }) => rest);
     }
 
     async function runAgent(promptText, imgs = []) {
@@ -1838,6 +1857,24 @@ export default {
               runId = d.run_id;
               ctxWindow = d.context_window || 0;
               ctxUsed = 0; renderCtxChip();
+              // The server may have prepended a drained delegation-inbox
+              // block to the prompt ("user wins"). Adopt its authoritative
+              // copy so our in-memory transcript, the next run's history,
+              // and the persisted thread file all agree (finding #7).
+              if (d.prompt && messages.length
+                  && messages[messages.length - 1].role === "user"
+                  && messages[messages.length - 1].content !== d.prompt) {
+                messages[messages.length - 1] = {
+                  ...messages[messages.length - 1],
+                  content: d.prompt,
+                  ...(d.inbox ? { inbox: true } : {}) };
+                renderMsgs();
+                msgHost.appendChild(bubble.node);
+              }
+            }
+            else if (kind === "stream.note" && d.dropped) {
+              toast(`⚠ ${d.dropped} frame(s) dropped from the replay buffer`,
+                "info");
             }
             else if (kind === "message.delta") bubble.append(d.text || "");
             // stream→non-stream fallback: swap the partially streamed text
@@ -1979,6 +2016,7 @@ export default {
     }
 
     async function runProxy(promptText) {
+      const session = viewSession;   // thread-switch guard (like runAgent)
       setRunning(true);
       messages.push({ role: "user", content: promptText });
       renderMsgs();
@@ -2010,7 +2048,16 @@ export default {
       } catch (e) {
         if (e.name === "AbortError") hint.textContent = "stopped";
         else { errored = true; toast(String(e.message || e), "error"); }
-      } finally { abort = null; setRunning(false); }
+      } finally {
+        // Same session guard as runAgent: a thread switch already reset the
+        // view (and may own a new abort) — do not clobber it.
+        if (session === viewSession) { abort = null; setRunning(false); }
+      }
+
+      // The user switched threads while this stream ran: the view now shows
+      // a different conversation — never mutate its messages or save over
+      // them with this dead attempt's buffer.
+      if (session !== viewSession) return;
 
       // Same persistence rationale as runAgent: keep the thinking so a
       // reopened playground thread shows the full turn.

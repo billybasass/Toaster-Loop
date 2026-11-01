@@ -1149,3 +1149,219 @@ def test_wake_run_trace_carries_inbox_wake_metadata(home, _clean, dash,
                        body={"prompt": "plain", "thread": "t-plain"})
     _drain_stream(resp)
     assert made[-1] is None
+
+
+# ------------------------------------------------- audit fixes (2026-11 pass)
+
+def test_wake_run_registers_eagerly_under_single_flight(home, _clean, dash,
+                                                         monkeypatch):
+    """Audit finding #2: the wake path registers its run inside the
+    single-flight lock (register_now), so a concurrent user POST for the same
+    thread cannot slip between spawn and first-read and double-start.
+
+    Observed INSIDE the old gap: _spawn_chat_run is wrapped and the registry
+    inspected the instant it returns — before the caller admits the stream.
+    Before the fix the entry only appeared after that admission."""
+    delegation_store.insert_delegation(
+        _pending_row("race1", thread="t-race"))
+
+    real = dash._spawn_chat_run
+    seen = {}
+
+    def spy(**kw):
+        resp = real(**kw)
+        seen["registered"] = kw["run_id"] in dash._chat_runs
+        return resp
+    monkeypatch.setattr(dash, "_spawn_chat_run", spy)
+
+    res = dash.start_inbox_wake_run("t-race")
+    assert res["started"] is True
+    assert seen.get("registered"), \
+        "wake run must be in the registry before its stream is admitted"
+
+
+def test_wake_admission_failure_requeues_entries(home, _clean, dash,
+                                                 monkeypatch):
+    """Audit finding #3: if admitting the wake stream blows up before the
+    worker ever ran, the taken inbox entries go back to pending instead of
+    dying with a phantom delivered_run_id."""
+    delegation_store.insert_delegation(
+        _pending_row("requeue1", thread="t-re"))
+
+    real = dash._spawn_chat_run
+
+    def boom(**kw):
+        resp = real(**kw)
+        # Sabotage the stream so first-read raises like an admission failure.
+        class _Bad:
+            def __iter__(self):
+                raise RuntimeError("admission exploded")
+        resp.stream = _Bad()
+        return resp
+    monkeypatch.setattr(dash, "_spawn_chat_run", boom)
+
+    res = dash.start_inbox_wake_run("t-re")
+    assert res["started"] is False
+    assert "admission failed" in (res.get("error") or "")
+    assert delegation_store.get_delegation("requeue1")["inbox_state"] \
+        == "pending", "entries must return to pending on failed admission"
+    # The phantom registry entry was evicted, so the thread is usable again.
+    assert "run_id" not in res or res["run_id"] not in dash._chat_runs
+
+
+def test_user_drain_marks_persisted_turn_inbox(home, _clean, dash):
+    """Audit finding #6/#7: a drained "user wins" turn persists with an
+    explicit inbox flag (server-stamped, no content sniffing), and the
+    persisted prompt carries the drained block."""
+    delegation_store.insert_delegation(
+        _pending_row("drain1", thread="t-dmark", result="queued answer"))
+    resp = dash.handle("POST", "/api/chat/stream",
+                       body={"prompt": "hello there", "thread": "t-dmark"})
+    text = _drain_stream(resp)
+    assert "event: run.started" in text
+    # run.started echoes the authoritative (drained) prompt + inbox flag.
+    started = next(d for k, d in _sse(text) if k == "run.started")
+    assert started["inbox"] is True
+    assert "[Delegation results" in started["prompt"]
+
+    t = json.loads((home / "chat" / "t-dmark.json").read_text())
+    user = t["messages"][0]
+    assert user["role"] == "user" and user.get("inbox") is True
+    assert "queued answer" in user["content"]
+
+
+def test_plain_run_not_marked_inbox(home, _clean, dash):
+    resp = dash.handle("POST", "/api/chat/stream",
+                       body={"prompt": "plain turn", "thread": "t-plain2"})
+    text = _drain_stream(resp)
+    started = next(d for k, d in _sse(text) if k == "run.started")
+    assert started["inbox"] is False
+    t = json.loads((home / "chat" / "t-plain2.json").read_text())
+    assert not t["messages"][0].get("inbox")
+
+
+def test_thread_delete_cancels_run_and_blocks_resurrection(home, _clean,
+                                                           monkeypatch):
+    """Audit finding: deleting a thread mid-run must cancel the run AND stop
+    its worker from re-creating the deleted file when it finishes."""
+    import threading as _th
+
+    from sable.core.agent_runner import AgentResult
+
+    class _SlowRunner:
+        def __init__(self, cfg, base_url, model, **kw):
+            self.on_event = None
+            self.kw = kw
+            self.started = _th.Event()
+
+        def run(self, prompt, history=None, previous_summary=None):
+            self.started.set()
+            for _ in range(200):     # up to 10s, polls the cancel event
+                ev = self.kw.get("cancel_event")
+                if ev is not None and ev.is_set():
+                    break
+                time.sleep(0.05)
+            return AgentResult(final_response="late answer",
+                               messages=[{"role": "assistant",
+                                          "content": "late answer"}],
+                               trace_id="tr-late")
+
+    from sable.dashboard.app import DashboardApp
+
+    slow = {}
+
+    def _create(cfg, base_url, model, **kw):
+        r = _SlowRunner(cfg, base_url, model, **kw)
+        slow["r"] = r
+        return r
+
+    with FakeOpenAIServer() as fs:
+        (home / "serve_state.json").write_text(json.dumps({
+            "mode": "attach", "base_url": fs.base_url,
+            "model_name": "fake-model"}))
+        import sable.core.agent_runner as ar
+        old = ar.create_runner
+        ar.create_runner = _create
+        try:
+            app = DashboardApp(SableConfig(), home=home)
+            # The real client creates the thread file before starting a run.
+            app.handle("PUT", "/api/chat/threads/t-del",
+                       body={"messages": [{"role": "user",
+                                           "content": "long job"}]})
+            resp = app.handle("POST", "/api/chat/stream",
+                              body={"prompt": "long job", "thread": "t-del"})
+            it = iter(resp.stream)
+            next(it)                       # admitted; worker starts
+            assert slow["r"].started.wait(5)
+            r = app.handle("DELETE", "/api/chat/threads/t-del")
+            assert r.status == 200
+            assert not (home / "chat" / "t-del.json").exists()
+            # The cancel event reached the runner...
+            run_id = next(iter(app._chat_runs))
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if app._chat_runs[run_id].get("done"):
+                    break
+                time.sleep(0.02)
+            assert app._chat_runs[run_id].get("done"), "run must finish fast"
+            # ...and its persistence step refused to recreate the file.
+            time.sleep(0.2)
+            assert not (home / "chat" / "t-del.json").exists(), \
+                "deleted thread must not resurrect from a finishing run"
+        finally:
+            ar.create_runner = old
+
+
+def _sse(text):
+    """Parse an SSE transcript into (kind, data) pairs."""
+    out, kind = [], None
+    for line in text.split("\n"):
+        if line.startswith("event:"):
+            kind = line[6:].strip()
+        elif line.startswith("data:") and kind:
+            try:
+                out.append((kind, json.loads(line[5:].strip())))
+            except json.JSONDecodeError:
+                pass
+            kind = None
+    return out
+
+
+def test_follow_chat_run_announces_dropped_frames():
+    """Audit finding #11: a reader attaching after ring-buffer rollover gets
+    exactly one stream.note frame naming the dropped count."""
+    from sable.dashboard.api.chat import _follow_chat_run
+
+    run = {"frames": ["event: message.delta\ndata: {}\n\n",
+                      "event: run.done\ndata: {}\n\n"],
+           "dropped": 7, "done": True, "cond": threading.Condition()}
+    text = "".join(_follow_chat_run(run))
+    notes = [d for k, d in _sse(text) if k == "stream.note"]
+    assert len(notes) == 1 and notes[0]["dropped"] == 7
+    # Frames that survived the rollover still replay.
+    kinds = [k for k, _ in _sse(text)]
+    assert "run.done" in kinds
+
+
+def test_threads_list_pagination(home, _clean, dash):
+    """Audit gap: h_threads_list supports ?limit/&offset without changing the
+    default return-everything behavior."""
+    for i in range(5):
+        dash.handle("PUT", f"/api/chat/threads/t-pg{i}",
+                    body={"messages": []})
+    full = dash.handle("GET", "/api/chat/threads").body["threads"]
+    assert len(full) == 5
+    page = dash.handle("GET", "/api/chat/threads",
+                       query={"limit": "2", "offset": "1"}).body
+    assert [t["id"] for t in page["threads"]] == ["t-pg1", "t-pg2"]
+
+
+def test_thread_put_filters_non_dict_delegations(home, _clean, dash):
+    """Audit gap: a client PUT with junk delegation entries keeps only dicts,
+    so owner chips can never render '?' forever."""
+    r = dash.handle("PUT", "/api/chat/threads/t-dels", body={
+        "messages": [], "delegations": [
+            {"agent": "coder", "status": "done"}, "junk", 42]})
+    assert r.status == 200
+    dels = r.body["thread"]["delegations"]
+    assert dels == [{"agent": "coder", "status": "done"}]

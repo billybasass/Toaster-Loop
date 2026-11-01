@@ -1687,11 +1687,15 @@ class SableAgentClient:
             try:
                 from . import plans as _plans
 
-                pstore = _plans.load_plan(
-                    (self._plan_ctx or {}).get("project"))
-                for tid in touched:
-                    _plans.record_run(pstore, tid, trace_id=result.trace_id)
-                _plans.save_plan(pstore)
+                # Lock the read-modify-write so a concurrent plan edit (or a
+                # second finishing run) can't be clobbered by this bookkeeping.
+                with _plans.lock():
+                    pstore = _plans.load_plan(
+                        (self._plan_ctx or {}).get("project"))
+                    for tid in touched:
+                        _plans.record_run(pstore, tid,
+                                          trace_id=result.trace_id)
+                    _plans.save_plan(pstore)
             except Exception:  # noqa: BLE001 - bookkeeping only
                 logger.debug("plan run linkage failed (ignored)", exc_info=True)
         return result

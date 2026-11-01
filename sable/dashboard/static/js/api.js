@@ -97,12 +97,25 @@ export function sseUrl(path) {
   return path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(t);
 }
 
-/** Consume an SSE response body, dispatching (kind, data) to onEvent. */
+/** Consume an SSE response body, dispatching (kind, data) to onEvent.
+ * Spec-conformant framing: `data:` lines accumulate and the event is
+ * dispatched ONCE at the blank-line boundary (multiple data lines join with
+ * "\n"), so a frame whose `event:` arrives after its `data:` still gets the
+ * right kind, and multi-line payloads are assembled instead of split. */
 async function consumeSSE(res, onEvent) {
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
   let kind = null;
+  let dataLines = [];
+  const dispatch = () => {
+    if (!dataLines.length) { kind = null; return; }   // empty frame: reset
+    let data;
+    try { data = JSON.parse(dataLines.join("\n")); }
+    catch { data = { raw: dataLines.join("\n") }; }
+    onEvent(kind || "message", data);
+    kind = null; dataLines = [];
+  };
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -111,18 +124,14 @@ async function consumeSSE(res, onEvent) {
     while ((idx = buf.indexOf("\n")) >= 0) {
       const line = buf.slice(0, idx).replace(/\r$/, "");
       buf = buf.slice(idx + 1);
-      if (!line) { kind = null; continue; }        // frame boundary
-      if (line.startsWith(":")) continue;          // SSE comment / heartbeat
-      if (line.startsWith("event:")) { kind = line.slice(6).trim(); }
-      else if (line.startsWith("data:")) {
-        const raw = line.slice(5).trim();
-        let data;
-        try { data = JSON.parse(raw); } catch { data = { raw }; }
-        onEvent(kind || "message", data);
-        kind = null;
-      }
+      if (!line) { dispatch(); continue }             // frame boundary
+      if (line.startsWith(":")) continue;             // SSE comment / heartbeat
+      if (line.startsWith("event:")) kind = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
     }
   }
+  dec.decode();          // flush any trailing partial multibyte sequence
+  dispatch();            // a final frame without a closing blank line
 }
 
 /**

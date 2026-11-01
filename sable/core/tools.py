@@ -1094,20 +1094,21 @@ def plan_progress(task_id: str = "", status: str = "", note: str = "",
         return "error: task_id required (see plan_next / plan_view ready)"
     try:
         ctx = _plan_ctx or {}
-        store = _plans.load_plan(ctx.get("project"))
-        task = _plans.set_status(store, str(task_id).strip(),
-                                 str(status or "").strip().lower(),
-                                 note=str(note or "") or None)
-        # Record this run's linkage (thread id when the runner bound one). The
-        # trace id is unknown mid-run, so touched task ids also ride in the
-        # shared ctx list and the runner's _finish fills them under task.runs
-        # once the trace exists ("records the run under task.runs at finalize").
-        _plans.record_run(store, task["id"],
-                          thread=str(ctx.get("thread") or "") or None)
-        touched = ctx.get("_touched")
-        if isinstance(touched, list) and task["id"] not in touched:
-            touched.append(task["id"])
-        _plans.save_plan(store)
+        with _plans.lock():   # read-modify-write vs concurrent writers
+            store = _plans.load_plan(ctx.get("project"))
+            task = _plans.set_status(store, str(task_id).strip(),
+                                     str(status or "").strip().lower(),
+                                     note=str(note or "") or None)
+            # Record this run's linkage (thread id when the runner bound one).
+            # The trace id is unknown mid-run, so touched task ids also ride
+            # in the shared ctx list and the runner's _finish fills them under
+            # task.runs once the trace exists.
+            _plans.record_run(store, task["id"],
+                              thread=str(ctx.get("thread") or "") or None)
+            touched = ctx.get("_touched")
+            if isinstance(touched, list) and task["id"] not in touched:
+                touched.append(task["id"])
+            _plans.save_plan(store)
     except _plans.PlanError as e:
         return f"error: {e}"
     except Exception as e:  # noqa: BLE001
@@ -1128,7 +1129,6 @@ def plan_add(title: str = "", description: str = "", details: str = "",
         return "error: title required"
     try:
         ctx = _plan_ctx or {}
-        store = _plans.load_plan(ctx.get("project"))
         fields: Dict[str, Any] = {"title": title, "description": description,
                                   "details": details,
                                   "test_strategy": test_strategy,
@@ -1139,12 +1139,18 @@ def plan_add(title: str = "", description: str = "", details: str = "",
             fields["deps"] = [str(d) for d in deps]
         if str(parent or "").strip():
             fields["parent"] = str(parent).strip()
-        t = _plans.add_task(store, fields)
-        # Validate the new edges before committing (cycles refused up front).
-        report = _plans.validate(store)
-        if not report["ok"]:
-            return f"error: plan invalid after add ({report}); task NOT saved"
-        _plans.save_plan(store)
+        with _plans.lock():   # read-modify-write vs concurrent writers
+            store = _plans.load_plan(ctx.get("project"))
+            before = _plans.issues(store)
+            t = _plans.add_task(store, fields)
+            # Scope to what THIS add introduced (cycles refused up front); a
+            # pre-existing dangling edge elsewhere must not block unrelated
+            # work forever — same rule as the dashboard's add op.
+            new = _plans.issues(store) - before
+            if new:
+                return f"error: plan invalid after add ({sorted(new)}); " \
+                       "task NOT saved"
+            _plans.save_plan(store)
     except _plans.PlanError as e:
         return f"error: {e}"
     except Exception as e:  # noqa: BLE001
