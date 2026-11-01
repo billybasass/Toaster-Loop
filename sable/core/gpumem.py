@@ -43,7 +43,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional
 
 MIB = 1024 * 1024
 
@@ -147,8 +147,8 @@ def unified_pool(drm_base: Optional[str] = None,
     where the vendor reports are wrong. A discrete card (class 0x030000)
     returns None so its honest VRAM numbers stay in charge.
     """
-    env = os.environ if env is None else env
-    override = str(env.get("SABLE_UNIFIED_MEMORY", "")).strip().lower()
+    env_map: Mapping[str, str] = os.environ if env is None else env
+    override = str(env_map.get("SABLE_UNIFIED_MEMORY", "")).strip().lower()
     if override in ("0", "false", "no", "off"):
         return None
     base = Path(drm_base) if drm_base else Path("/sys/class/drm")

@@ -168,6 +168,8 @@ def _detect_gpus() -> List[Any]:
         rt = Path(__file__).resolve().parents[1] / "serving" / "runtime.py"
         spec = importlib.util.spec_from_file_location(
             "sable_runtime_probe", rt)
+        if spec is None or spec.loader is None:
+            return []
         mod = importlib.util.module_from_spec(spec)
         # @dataclass resolves annotations via sys.modules at class-build
         # time: the module must be registered BEFORE exec_module.
@@ -285,7 +287,9 @@ def metadata_mismatch(version: str, want: TorchFlavor) -> Optional[str]:
         actual = "pypi-default(=CUDA on Linux)"
     else:
         actual = "unknown"
-    return _mismatch_for(version=version, hip=actual.startswith("rocm") or None,
+    return _mismatch_for(
+        version=version,
+        hip="rocm" if actual.startswith("rocm") else None,
                          cuda=None if actual.startswith("rocm")
                          or actual == "cpu" else "yes",
                          cuda_ok=False, want=want)
