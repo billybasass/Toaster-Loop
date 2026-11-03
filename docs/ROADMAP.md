@@ -864,3 +864,50 @@ full results table, split discipline, floor numbers, limitations. Spike code
 (outside the package = the deliberate not-wired seam), tests
 [`tests/test_training.py`](../tests/test_training.py).
 Full suite green, ruff clean, pyproject untouched.
+
+## Durability + Delegation-UI + Datasets program (shipped)
+
+Three work packages; every contract change below is ADDITIVE (legacy files and
+clients keep working — reads use `.get()` defaults, no migrations of data).
+
+**Chat-thread save durability (Windows fix).** All chat JSON writes go through
+`store/atomic.atomic_write_json()`: unique tmp name per write (`<name>.<pid>.
+<uuid8>.json.tmp`), `os.replace` wrapped in a 5×50ms retry loop tolerating
+transient sharing violations (AV/indexer handles — the WinError 32 root cause),
+WARNING log with the path on any failure. The LLM-title writer, delegation
+lineage writes and the child-run bridge share it. `sable doctor` gained
+`chat-tmp` (stale tmp files = smoking gun for failed replaces) and
+`home-consistency` (SABLE_HOME env vs config vs default must resolve to one
+root). Client thread PUT failures now toast instead of silently keeping
+in-memory state.
+
+**Delegated sub-threads.** A dispatch WITH a parent chat thread materializes a
+real child record `<home>/chat/dlg-<delegation_id>.json` (additive thread keys
+`parent_thread`, `delegation_id`, `agent`, `delegation_status`; hidden from
+top-level counts by those keys). The child run registers in the dashboard's
+chat-run registry through a core↔dashboard bridge (`delegation.
+register_child_run_bridge`), so opening a sub-thread mid-run streams live
+tokens over `/api/chat/runs/<id>/stream` and re-attaches after navigation; the
+final transcript persists atomically on completion. `GET /api/chat/threads`
+rows gained additive `parent_thread`/`delegation_id`/`agent`/
+`delegation_status` fields. Deleting a parent deletes its children
+(`?keep_children=1` opts out). Threadless/CLI delegations: byte-identical old
+behavior (no child file). Tests: `tests/test_delegation_children.py`.
+
+**Datasets page + hub downloads.** Hub file downloads retry 429/499/5xx and
+connection drops with exponential backoff + jitter (5 attempts, honors
+`Retry-After`; 401/403 stay fatal with HF_TOKEN guidance), resume via the
+existing Range/.part path; `job.attempt/attempts_max` surface "retrying n/5"
+in the hub UI; concurrent hub jobs capped at 2. New `core/datasetenv.py`
+preflights/installs `datasets` (WITHOUT bitsandbytes) into the training
+interpreter — `GET/POST /api/datasets/env[/install]` + a doctor check.
+`curate/sources.py` adds three curation sources materializing normal
+`<home>/datasets/<id>/` records: hub snapshot import
+(`POST /api/datasets/import_hub`, provenance `"hub"`), local folder ingest and
+bounded same-origin website crawl (`POST /api/datasets/curate_source`, queued
+job kind `curate_source`, 202+poll like `/api/curate`; provenances
+`"local_folder"`/`"website"` + source path/URL/crawled URLs in the manifest).
+Doc->ShareGPT synthesis uses the live serve endpoint when up, deterministic
+heading fallback otherwise. Registry: `curate_source` added to JOB_KINDS (+
+CHECK rebuild migration). Tests: `tests/test_datasets_sources.py`, retry tests
+in `tests/test_cli.py`.

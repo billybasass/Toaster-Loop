@@ -1616,6 +1616,9 @@ class _FakeHubHandler(BaseHTTPRequestHandler):
     """Subset of the HF Hub REST API + resolve endpoint (Range aware)."""
 
     interrupt_first = False  # when True: first resolve request dies mid-stream
+    throttle_first = 0       # WP3a: first N resolve requests answer 429
+    throttle_after = "0"     # Retry-After header value for the 429s
+    auth_first = False       # WP3a: first resolve answers 401 (fatal path)
 
     def log_message(self, format, *args):  # noqa: A002 - silence access log
         pass
@@ -1737,6 +1740,18 @@ class _FakeHubHandler(BaseHTTPRequestHandler):
             rel = p.split("/resolve/")[1].split("/", 1)[1]
             data = FILE_A if "00001" in rel else (
                 FILE_B if "00002" in rel else b"x" * 7)
+            # WP3a: 429-then-200 throttle injection (counts down per request).
+            if type(self).throttle_first > 0:
+                type(self).throttle_first -= 1
+                self.send_response(429)
+                self.send_header("Retry-After", type(self).throttle_after)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            if type(self).auth_first:
+                type(self).auth_first = False
+                self._json({"error": "gated"}, 401)
+                return
             rng = self.headers.get("Range")
             start = 0
             if rng:
@@ -1950,23 +1965,71 @@ def test_download_sync_writes_hub_layout(hub_server, hub):
             ).read_text().strip() == REPO_SHA
 
 
-def test_download_resumes_from_part(hub_server, hub):
+def test_download_resumes_from_part(hub_server, hub, monkeypatch):
+    """WP3a changed this path: a mid-stream drop is RETRYABLE, so one
+    download_sync now resumes from the .part automatically (Range) instead of
+    failing and needing a manual second click. The resume mechanics are the
+    same; only who retries changed."""
     _FakeHubHandler.interrupt_first = True
     hub_server.interrupted_once = False
+    monkeypatch.setattr(modelhub, "_retry_sleep", lambda d: None)
     try:
         job = hub.download_sync("testorg/Test-GGUF", "Q4_K_M")
-        # First pass fails on the lied-about size; .part survives.
-        assert job.state == "error"
+        assert job.state == "done", job.error   # auto-retried in place
         part = (hub.base_dir() / "models--testorg--Test-GGUF" / "snapshots"
                 / REPO_SHA / "Q4_K_M" / "model-00002-of-00002.gguf.part")
-        assert part.is_file() and part.stat().st_size == 1024
-        # Retry resumes with Range and completes.
-        job2 = hub.download_sync("testorg/Test-GGUF", "Q4_K_M")
-        assert job2.state == "done", job2.error
+        assert not part.exists()
         final = part.with_name(part.name[: -len(".part")])
         assert final.read_bytes() == FILE_B
     finally:
         _FakeHubHandler.interrupt_first = False
+
+
+def test_download_retries_429_then_succeeds(hub_server, hub, monkeypatch):
+    """WP3a acceptance: fake server answers 429 (with Retry-After) then 200;
+    the job retries with backoff and completes, surfacing attempt counts."""
+    slept = []
+    monkeypatch.setattr(modelhub, "_retry_sleep", lambda d: slept.append(d))
+    _FakeHubHandler.throttle_first = 2          # two 429s, then success
+    _FakeHubHandler.throttle_after = "1"
+    try:
+        job = hub.download_sync("testorg/Test-GGUF", "Q8_0")
+        assert job.state == "done", job.error
+        assert len(slept) == 2                  # two backoff waits happened
+        assert slept[0] == 1.0                  # Retry-After honored exactly
+        snap = hub.snapshot_dir("testorg/Test-GGUF", REPO_SHA)
+        assert (snap / "Q8_0" / "model.gguf").read_bytes() == b"x" * 7
+    finally:
+        _FakeHubHandler.throttle_first = 0
+
+
+def test_download_429_exhausts_and_reports_attempts(hub_server, hub,
+                                                    monkeypatch):
+    """Every attempt throttled => the job fails with an attempts count (and
+    the .part/resume path stays available for a manual retry)."""
+    monkeypatch.setattr(modelhub, "_retry_sleep", lambda d: None)
+    _FakeHubHandler.throttle_first = 99
+    try:
+        job = hub.download_sync("testorg/Test-GGUF", "Q8_0")
+        assert job.state == "error"
+        assert f"after {modelhub.DOWNLOAD_ATTEMPTS} attempts" in job.error
+        assert job.attempt == modelhub.DOWNLOAD_ATTEMPTS
+    finally:
+        _FakeHubHandler.throttle_first = 0
+
+
+def test_download_401_stays_fatal(hub_server, hub, monkeypatch):
+    """401 must NOT burn retries — HF_TOKEN guidance surfaces immediately."""
+    slept = []
+    monkeypatch.setattr(modelhub, "_retry_sleep", lambda d: slept.append(d))
+    _FakeHubHandler.auth_first = True
+    try:
+        job = hub.download_sync("testorg/Test-GGUF", "Q8_0")
+        assert job.state == "error"
+        assert "HF_TOKEN" in (job.error or "")
+        assert slept == [], "401 is fatal; no retry backoff may run"
+    finally:
+        _FakeHubHandler.auth_first = False
 
 
 def test_download_unknown_variant(hub_server, hub):

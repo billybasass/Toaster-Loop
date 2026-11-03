@@ -314,13 +314,41 @@ export default {
     }
 
     // -------------------------------------------------------- tree rendering
-    function threadRow(t) {
+    // WP2: delegated child threads (parent_thread set) render nested under
+    // their parent with an agent chip + live status badge; clicking opens the
+    // transcript — streaming from /api/chat/runs/<id>/stream when the child
+    // run is still going (openThread's adopt pass finds the bridge-registered
+    // run), or from the stored file once finished.
+    // Badge classes reuse the existing .chip.deleg-status.<status> palette
+    // (style.css); states without a specific rule fall back to the base.
+    const DELEG_BADGE = {
+      queued: "⧗ queued", running: "▶ running", completed: "✓ done",
+      failed: "✗ failed", cancelled: "⊘ cancelled", cancelling: "⊘ cancelling",
+      interrupted: "! interrupted", timed_out: "! timed out",
+    };
+
+    function childBadge(t) {
+      const st = t.delegation_status || "queued";
+      const text = DELEG_BADGE[st] || st;
+      return el("span", { class: `chip deleg-status thread-child-status ${st}`,
+        title: `delegated to ${t.agent || "?"} · ${text}`,
+        text });
+    }
+
+    function threadRow(t, isChild) {
       const active = t.id === threadId;
       // Phase 2 placeholder: delegation lineage chip ("A → B") when the
       // thread JSON carries delegations ({agent, ...} entries); absent = none.
       const lineage = (Array.isArray(t.delegations) && t.delegations.length)
         ? [el("span", { class: "thread-lineage mono", title: "delegation lineage",
             text: t.delegations.map((d) => d.agent || "?").join(" → ") })]
+        : [];
+      // WP2 child row: agent chip + status badge replace the lineage chip;
+      // children never render their own delegations (depth limit 1 anyway).
+      const childChips = isChild
+        ? [el("span", { class: "chip thread-child-agent",
+            title: "delegated sub-thread", text: t.agent || "agent" }),
+           childBadge(t)]
         : [];
       // D-17 Phase 3: undelivered delegation-inbox entries (server count from
       // the delegation store) render as a small "⧗ N waiting" badge — after a
@@ -331,12 +359,15 @@ export default {
               + "delivered (they arrive as a turn on this thread)" ,
             text: `⧗ ${t.pending_inbox}` })]
         : [];
-      const item = el("div", { class: "thread-item" + (active ? " active" : ""),
+      const item = el("div", { class: "thread-item" + (active ? " active" : "")
+        + (isChild ? " thread-child" : ""),
         tabindex: 0, role: "button" },
         el("span", { class: "thread-title", text: t.title || t.id }),
-        ...lineage, ...inbox,
+        ...(isChild ? childChips : [...lineage, ...inbox]),
         el("span", { class: "thread-meta",
-          text: `${t.profile || "default"} · ${t.message_count ?? 0} msg` }),
+          text: isChild
+            ? `${t.agent || "?"} · ${t.message_count ?? 0} msg`
+            : `${t.profile || "default"} · ${t.message_count ?? 0} msg` }),
         el("button", { class: "thread-x small", text: "✕", title: "delete",
           onclick: async (ev) => {
             ev.stopPropagation();
@@ -354,8 +385,8 @@ export default {
       const open = () => openThread(t.id);
       item.addEventListener("click", open);
       item.addEventListener("keydown", (e) => { if (e.key === "Enter") open(); });
-      // rename on double-click
-      item.addEventListener("dblclick", async () => {
+      // rename on double-click (children are machine-titled; skip)
+      if (!isChild) item.addEventListener("dblclick", async () => {
         const title = window.prompt("Thread title", t.title || t.id);
         if (!title) return;
         try {
@@ -364,7 +395,12 @@ export default {
           loadThreads();
         } catch (e) { toast(e.message, "error"); }
       });
-      return item;
+      // WP2: delegated children render nested beneath this row. Deleting the
+      // parent deletes them server-side too; the list repaint hides both.
+      const kids = isChild ? []
+        : threads.filter((c) => c.parent_thread === t.id)
+            .map((c) => threadRow(c, true));
+      return kids.length ? [item, ...kids] : item;
     }
 
     function projectNode(p, itsThreads) {
@@ -403,7 +439,9 @@ export default {
       const select = () => setActiveProject(isActive ? null : p.id);
       head.addEventListener("click", select);
       head.addEventListener("keydown", (e) => { if (e.key === "Enter") select(); });
-      const kids = isCollapsed ? [] : itsThreads.map(threadRow);
+      // WP2: delegated children are hidden from the top level here too — they
+      // render nested under their parent thread row instead.
+      const kids = isCollapsed ? [] : itsThreads.flatMap(threadRow);
       return [head, ...kids];
     }
 
@@ -827,17 +865,21 @@ export default {
         el("button", { class: "new-thread", text: "＋ New thread",
           onclick: newThread }),
       ];
+      // WP2: delegated child threads (parent_thread set) never list at the
+      // top level — threadRow nests them under their parent. Grouping and
+      // counts below operate on top-level threads only.
+      const top = threads.filter((t) => !t.parent_thread);
       // Project nodes (sorted by name), each with its threads beneath.
       for (const p of [...projects].sort((a, b) =>
           String(a.name).localeCompare(String(b.name)))) {
-        nodes.push(...projectNode(p, threads.filter(
+        nodes.push(...projectNode(p, top.filter(
           (t) => t.project === p.id)));
       }
       // Unfiled: threads with null/absent project — including legacy chat
       // files written before projects existed — and threads pointing at a
       // deleted project id.
       const known = new Set(projects.map((p) => p.id));
-      const unfiled = threads.filter((t) => !t.project || !known.has(t.project));
+      const unfiled = top.filter((t) => !t.project || !known.has(t.project));
       const unfiledActive = activeProject === null;
       const uHead = el("div", { class: "project-node unfiled-node" +
         (unfiledActive && projects.length ? " active" : ""),
@@ -861,7 +903,7 @@ export default {
       });
       nodes.push(uHead);
       if (!collapsed.has("__unfiled"))
-        nodes.push(...unfiled.map(threadRow));
+        nodes.push(...unfiled.flatMap(threadRow));
       threadList.replaceChildren(...nodes);
     }
 
@@ -1341,6 +1383,11 @@ export default {
       } catch (e) { toast(e.message, "error"); }
     }
 
+    // WP1b: returns true ONLY when the server confirmed the write. Callers
+    // that depend on durability (the pre-run initial save in runAgent) abort
+    // instead of continuing with a memory-only thread — before the backend
+    // retry fix, a Windows PermissionError here failed silently and the
+    // thread vanished on the next page switch ("message count 0").
     async function saveThread(profile) {
       const id = threadId || newId();
       // NOTE: we deliberately do NOT send `title` here. The backend treats an
@@ -1364,7 +1411,14 @@ export default {
         // the active-project context changed in the meantime.
         threadWasProjectless = false;
         loadThreads();
-      } catch (e) { toast("thread save failed: " + e.message, "error"); }
+        return true;
+      } catch (e) {
+        // WP1b: a failed PUT must never pass as success. The toast is the
+        // user-visible signal that only in-memory state exists; the boolean
+        // lets durable callers (pre-run save) abort instead of proceeding.
+        toast("thread save failed: " + e.message, "error");
+        return false;
+      }
     }
 
     // ------------------------------------------------------- message render
@@ -1809,8 +1863,17 @@ export default {
         sset(skey("ui", "", "last-thread"), threadId);
         // Awaited: the file must exist before the run can persist into it,
         // and a late-resolving empty save could otherwise clobber a very
-        // fast worker-persisted transcript.
-        await saveThread(profileSel.value || null);  // <home>/chat/<id>.json
+        // fast worker-persisted transcript. WP1b: if the server refused the
+        // write (saveThread already toasted), do NOT start the run — an
+        // unbacked thread loses its transcript on the next navigation,
+        // exactly the Windows "message count 0" symptom. Roll back to a
+        // clean draft so the user can retry.
+        if (!await saveThread(profileSel.value || null)) {
+          threadId = null;
+          sdel(skey("ui", "", "last-thread"));
+          setRunning(false);
+          return;
+        }
       }
       // D-17 Phase 3: a drained wake turn (prompt begins with the bracketed
       // results header) is marked so its bubble carries the "⧗ inbox" chip.
@@ -2133,9 +2196,12 @@ export default {
       renderThreadList();
     }));
     // Owner chips read delegation status off the thread summaries; refresh
-    // them live as delegations settle (audit §5).
-    unsubs.push(bus.on("delegation.update", () => {
-      if (explorerTab === "tasks") loadThreads();
+    // them live as delegations settle (audit §5). WP2: child sub-thread
+    // badges ride the same event — repaint whenever a delegation carries a
+    // child_thread so the nested row's status stays live (queued -> running
+    // -> completed/failed/cancelled).
+    unsubs.push(bus.on("delegation.update", (rec) => {
+      if (explorerTab === "tasks" || (rec && rec.child_thread)) loadThreads();
     }));
     // D-17 Phase 3: an inbox wake run started on a thread. If it is the thread
     // this view is showing and nothing else runs here, adopt the wake run so

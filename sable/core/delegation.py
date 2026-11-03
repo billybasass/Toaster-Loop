@@ -45,7 +45,6 @@ thread context (CLI) lineage is skipped and everything else still works.
 from __future__ import annotations
 
 import json
-import os
 import re
 import threading
 import time
@@ -116,6 +115,148 @@ _HEARTBEAT_POLL_S = 0.25
 #: claimed (see _pump). The DB `queued` status is the real queue; this map
 #: only carries the per-record context (profile/task/ctx) the worker needs.
 _pending_exec: "Dict[str, Callable[[], None]]" = {}
+
+# ---------------------------------------------------------------------------
+# Child-run bridge (WP2): dashboard chat-streaming for delegated children
+# ---------------------------------------------------------------------------
+
+#: The dashboard registers a bridge so delegated child runs stream through the
+#: SAME chat-run machinery as main threads (run registry + per-run SSE frame
+#: buffer + adopt/re-attach). Shape: {started, frame, finished} callables, each
+#: best-effort and NEVER allowed to break the child run. CLI / threadless
+#: delegations never see a bridge (registration happens in DashboardApp.init),
+#: so their behavior is byte-identical to before.
+_child_bridge: Optional[Dict[str, Callable[..., Any]]] = None
+_child_bridge_lock = threading.Lock()
+
+
+def register_child_run_bridge(
+        bridge: Optional[Dict[str, Callable[..., Any]]]) -> None:
+    """Install (or clear with None) the child-run streaming bridge."""
+    global _child_bridge
+    with _child_bridge_lock:
+        _child_bridge = bridge
+
+
+def _bridge_call(name: str, *args: Any) -> None:
+    """Fire one bridge hook; failures are swallowed — streaming sugar must
+    never break a delegation (same posture as wake hooks/lineage)."""
+    with _child_bridge_lock:
+        bridge = _child_bridge
+    if bridge is None:
+        return
+    fn = bridge.get(name)
+    if not callable(fn):
+        return
+    try:
+        fn(*args)
+    except Exception:  # noqa: BLE001 — the bridge is observability, not truth
+        pass
+
+
+def _bridge_start(info: Dict[str, Any]) -> Optional[str]:
+    """Bridge 'started' hook returning the dashboard-side child run id (None
+    when no bridge / the bridge refused)."""
+    with _child_bridge_lock:
+        bridge = _child_bridge
+    if bridge is None:
+        return None
+    fn = bridge.get("started")
+    if not callable(fn):
+        return None
+    try:
+        res = fn(info)
+        return str(res) if res else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def child_thread_id_for(delegation_id: str) -> str:
+    """Deterministic child thread id for a delegation (WP2). Matches the
+    dashboard's _THREAD_ID_RE, and 'dlg-' marks it as machine-created."""
+    return f"dlg-{delegation_id}"
+
+
+def create_child_thread(cfg: Any, parent_thread: Optional[str],
+                        record: Dict[str, Any], task: str) -> Optional[str]:
+    """Materialize the child run's thread record (WP2 item 1).
+
+    Called when a delegation dispatches WITH a parent chat thread: the child
+    becomes a real <home>/chat/<id>.json with additive keys ``parent_thread``,
+    ``delegation_id`` and ``agent`` — those keys are what hide it from the
+    top-level listing/counting (the explorer nests it under its parent), no
+    separate directory. Threadless dispatches (CLI) never reach here, so they
+    keep today's behavior byte-identically. Best-effort: a failed child-file
+    write must not break the delegation (lineage posture)."""
+    tid = str(parent_thread or "")
+    if not tid or not _THREAD_ID_RE.match(tid):
+        return None
+    from ..store.atomic import atomic_write_json
+    from ..store.paths import resolve_sable_home
+
+    child_id = child_thread_id_for(str(record.get("delegation_id") or ""))
+    p = resolve_sable_home(cfg) / "chat" / f"{child_id}.json"
+    now = _utcnow()
+    thread: Dict[str, Any] = {}
+    if p.is_file():  # idempotent re-dispatch (shouldn't happen; stay safe)
+        try:
+            loaded = json.loads(p.read_text())
+            if isinstance(loaded, dict):
+                thread = loaded
+        except (OSError, json.JSONDecodeError):
+            thread = {}
+    thread.setdefault("id", child_id)
+    thread["title"] = (task or "").strip().replace("\n", " ")[:60] or child_id
+    thread.setdefault("created", record.get("created") or now)
+    thread["updated"] = now
+    # Seed the transcript with the delegated task as the opening user turn;
+    # the bridge's persist step appends the assistant reply when the child
+    # finishes (same merge rules as a main-thread run).
+    if not thread.get("messages"):
+        thread["messages"] = [{"role": "user", "content": task or ""}]
+    thread["trace_ids"] = thread.get("trace_ids") or []
+    # --- additive WP2 keys (readers use .get(); legacy files unaffected) ---
+    thread["parent_thread"] = tid
+    thread["delegation_id"] = record.get("delegation_id")
+    thread["agent"] = record.get("agent")
+    thread["delegation_status"] = record.get("status") or "queued"
+    if record.get("project"):
+        thread["project"] = record["project"]
+    try:
+        atomic_write_json(p, thread)
+        return child_id
+    except Exception:  # noqa: BLE001 — observability, never fatal
+        return None
+
+
+def update_child_thread(cfg: Any, child_thread: Optional[str],
+                        status: str, *,
+                        trace_id: Optional[str] = None) -> None:
+    """Refresh the child thread's delegation_status badge field (WP2 item 4).
+    Best-effort; only touches the small metadata keys so it can never race the
+    bridge's transcript write into losing messages (last writer wins per key
+    is acceptable here — the bridge rewrites the whole record at persist)."""
+    if not child_thread or not _THREAD_ID_RE.match(child_thread):
+        return
+    from ..store.atomic import atomic_write_json
+    from ..store.paths import resolve_sable_home
+
+    p = resolve_sable_home(cfg) / "chat" / f"{child_thread}.json"
+    if not p.is_file():
+        return
+    try:
+        t = json.loads(p.read_text())
+        if not isinstance(t, dict):
+            return
+        t["delegation_status"] = status
+        t["updated"] = _utcnow()
+        if trace_id:
+            tids = set(t.get("trace_ids") or [])
+            tids.add(str(trace_id))
+            t["trace_ids"] = sorted(tids)
+        atomic_write_json(p, t)
+    except Exception:  # noqa: BLE001 — badge freshness, never fatal
+        pass
 
 # ---------------------------------------------------------------------------
 # Wake hooks + watcher state (D-17 Phase 2, spec §4.1)
@@ -493,11 +634,13 @@ def thread_record_delegation(cfg: Any, thread_id: Optional[str],
         thread.setdefault("created", record.get("created"))
         thread["delegations"] = delegs
         thread["updated"] = _utcnow()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(thread, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
-        os.replace(tmp, p)
+        # WP1: unique-tmp + retried replace. This writer runs on the
+        # dispatcher pool while the client/chat worker saves the same file —
+        # with the old fixed ".json.tmp" the two collided on Windows
+        # (PermissionError [WinError 32]) and the lineage write was lost.
+        from ..store.atomic import atomic_write_json
+
+        atomic_write_json(p, thread)
     except Exception:  # lineage is observability, never fatal
         pass
 
@@ -947,6 +1090,17 @@ def _run_child(cfg: Any, prof: Dict[str, Any], task: str, ctx: Dict[str, Any],
         runner._heartbeat = lambda: touch(delegation_id)
     except Exception:  # noqa: BLE001 — exotic stub runners may forbid attrs
         pass
+    # WP2: when the parent run came from the dashboard with a chat thread,
+    # child_ctx["sink"] is the bridge emitter — every live runner event goes
+    # into the child thread's chat-run frame buffer, so an open sub-thread
+    # view streams tokens exactly like a main thread. CLI/threadless runs and
+    # stubs carry no sink: zero behavior change.
+    _csink = ctx.get("sink")
+    if callable(_csink):
+        try:
+            runner.on_event = _csink  # type: ignore[assignment]
+        except Exception:  # noqa: BLE001 — exotic stub runners may forbid attrs
+            pass
     t0 = time.monotonic()
     res = runner.run(task)
     # Training flow-back (D-16): a remote-inference child's transcript is
@@ -1104,12 +1258,18 @@ def execute_delegation(agent: str, task: str, context: str = "",
         from either the parent or the child worker thread."""
         record["updated"] = _utcnow()
         thread_record_delegation(cfg, record.get("thread"), record)
+        # WP2: keep the child thread's status badge fresh on every transition
+        # (queued/running/completed/...). Best-effort; no-op without a child.
+        update_child_thread(cfg, record.get("child_thread"),
+                            str(record.get("status") or "queued"),
+                            trace_id=record.get("child_trace_id"))
         cb = ctx.get("on_update")
         if callable(cb):
             try:
                 cb({k: record.get(k) for k in
                     ("delegation_id", "agent", "status", "project", "thread",
-                     "child_trace_id", "parent_run_id")})
+                     # WP2 additive: lets the UI open the child sub-thread.
+                     "child_thread", "child_trace_id", "parent_run_id")})
             except Exception:  # observers never break the delegation
                 pass
 
@@ -1119,6 +1279,20 @@ def execute_delegation(agent: str, task: str, context: str = "",
 
     # Lineage entry appears as soon as the delegation exists (status queued).
     thread_record_delegation(cfg, record.get("thread"), record)
+
+    # WP2: a dispatch WITH a parent chat thread materializes a real child
+    # thread record (<home>/chat/dlg-<delegation_id>.json, hidden from the
+    # top-level listing via parent_thread/delegation_id keys). Threadless
+    # dispatches (CLI/MCP without a thread) skip this entirely and keep
+    # today's behavior. Best-effort: no child file -> no streaming, the
+    # delegation itself is unaffected.
+    if record.get("thread"):
+        try:
+            ct = create_child_thread(cfg, str(record["thread"]), record, task)
+        except Exception:  # noqa: BLE001 — never break a dispatch
+            ct = None
+        if ct:
+            record["child_thread"] = ct
 
     full_task = task if not context else f"{task}\n\nContext:\n{context}"
     # WP12: a plan-task id upgrades the child prompt to the full task graph
@@ -1191,6 +1365,24 @@ def execute_delegation(agent: str, task: str, context: str = "",
             settled_ts=record.get("settled_ts"),
             last_activity_ts=record.get("last_activity_ts"),
             inbox_state=record.get("inbox_state", "none"))
+        # WP2: refresh the child thread's terminal badge HERE (not only via
+        # _notify, which async paths skip unless abandoned) so the file is
+        # correct even with no dashboard/bridge attached.
+        update_child_thread(cfg, record.get("child_thread"),
+                            str(record.get("status") or "queued"),
+                            trace_id=record.get("child_trace_id"))
+        # WP2: tell the dashboard bridge the child run is finished so it can
+        # persist the final transcript to the child thread file and close the
+        # SSE stream for any attached reader (same frame protocol end as a
+        # main-thread run). The box carries the accumulated text/tools when a
+        # sink was attached; without one the bridge synthesizes from result.
+        _bridge_call("finished", record.get("child_run_id"), {
+            "status": record.get("status"),
+            "result": record.get("result"),
+            "failure_reason": box.get("failure_reason"),
+            "child_trace_id": record.get("child_trace_id"),
+            "acc": dict(box.get("acc") or {}),
+        })
         if was_abandoned:
             # The parent is gone (already returned timed_out): the child's
             # late terminal state still needs lineage + bus propagation.
@@ -1199,6 +1391,64 @@ def execute_delegation(agent: str, task: str, context: str = "",
     def _run_and_settle() -> None:
         """The dispatcher closure for THIS delegation: execute the child and
         settle (called by _pump after the atomic queued->running claim)."""
+        # WP2: mirror this child into the dashboard's chat-run machinery the
+        # moment it actually starts (not at dispatch — queued children have no
+        # stream yet). Also flip the child file's badge to running now: the
+        # FIFO claim mutates the record directly without a _notify pass.
+        if record.get("child_thread"):
+            update_child_thread(cfg, record["child_thread"], "running")
+        # The bridge returns a run id; every live runner event is
+        # forwarded through ctx["sink"] (_run_child attaches it to the runner),
+        # so an open sub-thread view streams tokens and re-attaches after
+        # navigation exactly like a main thread. No bridge (CLI/MCP standalone)
+        # -> no run id, no sink: byte-identical old behavior.
+        if record.get("child_thread"):
+            rid = _bridge_start({
+                "delegation_id": record["delegation_id"],
+                "child_thread": record["child_thread"],
+                "parent_thread": record.get("thread"),
+                "agent": agent,
+                "task": full_task[:200],
+                "project": record.get("project"),
+            })
+            if rid:
+                record["child_run_id"] = rid
+                acc: Dict[str, Any] = {"text": "", "reasoning": "",
+                                       "tools": []}
+                box["acc"] = acc
+
+                def _sink(kind: str, data: Dict[str, Any],
+                          _r: str = rid, _a: Dict[str, Any] = acc) -> None:
+                    # Accumulate the transcript server-side (same shape as the
+                    # dashboard's chat _sink) so the finish step can persist a
+                    # complete turn even when nobody was watching the stream.
+                    try:
+                        if kind == "message.delta":
+                            _a["text"] += str(data.get("text") or "")
+                        elif kind == "message.reset":
+                            _a["text"] = str(data.get("text") or "")
+                        elif kind == "reasoning.delta":
+                            _a["reasoning"] += str(data.get("text") or "")
+                        elif kind == "tool.call":
+                            _a["tools"].append({"id": data.get("id", ""),
+                                                "name": data.get("name", ""),
+                                                "args": data.get("args") or {},
+                                                "result": None})
+                        elif kind == "tool.result":
+                            for t in reversed(_a["tools"]):
+                                if t["id"] == data.get("id"):
+                                    t["result"] = {
+                                        "ok": bool(data.get("ok")),
+                                        "preview": str(
+                                            data.get("preview") or ""),
+                                        "truncated": bool(
+                                            data.get("truncated"))}
+                                    break
+                    except Exception:  # noqa: BLE001 — never kill the child
+                        pass
+                    _bridge_call("frame", _r, kind, data)
+
+                ctx["sink"] = _sink
         try:
             _run_child(cfg, prof, full_task, ctx, record["delegation_id"],
                        box, plan_task=str(plan_task or "") or None,

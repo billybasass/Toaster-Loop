@@ -136,6 +136,11 @@ dependency wiring only. Route handlers resolve by name via getattr.
         # Guards the single-flight scan-and-insert below (two concurrent POSTs
         # for the same thread must not both pass the in-flight check).
         self._chat_runs_lock = threading.Lock()
+        # WP2: delegated child runs stream through this app's chat-run
+        # machinery (run registry + frame buffer + adopt/re-attach) so a
+        # sub-thread opens live mid-run exactly like a main thread. Re-setting
+        # the bridge per instance is safe: one DashboardApp per process.
+        self.register_child_bridge()
         # /api/metrics TTL cache: (expires_at_monotonic, exposition_text).
         # Scrapes arrive every ~15 s; recomputation is cheap but this keeps
         # bursty scrapers off the DB entirely. Guarded by _metrics_lock.
@@ -261,6 +266,13 @@ dependency wiring only. Route handlers resolve by name via getattr.
         ("GET", "/api/datasets", "h_datasets_list"),
         ("POST", "/api/curate", "h_curate"),
         ("POST", "/api/datasets/export", "h_dataset_export"),
+        # WP3b: `datasets` package preflight + one-click install (static
+        # paths must precede <dataset_id> like the diff route below).
+        ("GET", "/api/datasets/env", "h_datasets_env"),
+        ("POST", "/api/datasets/env/install", "h_datasets_env_install"),
+        # WP3c/d: hub-snapshot import + queued folder/website curation.
+        ("POST", "/api/datasets/import_hub", "h_dataset_import_hub"),
+        ("POST", "/api/datasets/curate_source", "h_curate_source"),
         # static path before <dataset_id> (idea #6: version diff)
         ("GET", "/api/datasets/diff", "h_dataset_diff"),
         ("GET", "/api/datasets/<dataset_id>", "h_dataset_get"),

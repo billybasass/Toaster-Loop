@@ -49,6 +49,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -597,7 +598,117 @@ def check_stale_state(home: Path, *, alive_fn: Callable[[int], Optional[bool]],
                                       "or let doctor do it: sable doctor --fix"])
 
 
+# ------------------------------------------------------- chat durability (WP1)
+
+#: Age threshold for chat tmp files: concurrent saves legitimately have
+#: sub-second-old tmps in flight, so only older leftovers count as stale.
+CHAT_TMP_STALE_S = 60.0
+
+
+def find_stale_chat_tmp(home: Path, *, now: Optional[float] = None,
+                        max_age_s: float = CHAT_TMP_STALE_S) -> List[Path]:
+    """Leftover *.tmp files under <home>/chat/ older than ``max_age_s``.
+
+    The atomic writers clean up their own tmp even on failure, so anything
+    still here is the smoking gun of an interrupted replace — on Windows
+    classically a PermissionError [WinError 32] while an AV/indexer handle
+    was open. Their presence alongside 'message count 0' threads means saves
+    are failing at the rename step."""
+    d = Path(home) / "chat"
+    if not d.is_dir():
+        return []
+    now = time.time() if now is None else now
+    out: List[Path] = []
+    try:
+        for p in sorted(d.glob("*.tmp")):
+            try:
+                if now - p.stat().st_mtime > max_age_s:
+                    out.append(p)
+            except OSError:
+                continue  # vanished mid-scan
+    except OSError:
+        return out
+    return out
+
+
+def check_chat_tmp(home: Path) -> CheckResult:
+    """WP1c diagnostics: stale tmp files in chat/ flag failed atomic saves."""
+    stale = find_stale_chat_tmp(home)
+    if not stale:
+        return CheckResult("chat-tmp", "ok",
+                           ["no stale *.tmp files under <home>/chat"])
+    lines = [str(p) for p in stale[:10]]
+    if len(stale) > 10:
+        lines.append(f"... and {len(stale) - 10} more")
+    return CheckResult(
+        "chat-tmp", "warn",
+        lines + ["stale tmp files mean a thread save died between the tmp "
+                 "write and os.replace (Windows sharing violations are the "
+                 "usual cause — threads written before this write may be "
+                 "stale)"],
+        next_commands=[f"review then remove: rm {' '.join(str(p) for p in stale[:5])}"
+                       + (" ..." if len(stale) > 5 else "")])
+
+
+def check_home_consistency(cfg: Any, home: Path) -> CheckResult:
+    """WP1c diagnostics: SABLE_HOME env vs config `home:` vs the default
+    ~/.sable must agree, or two sable launches silently use different state
+    roots (threads 'vanish' because the other root has them). On Windows the
+    expected root is C:\\Users\\<name>\\.sable unless deliberately overridden;
+    launch.ps1 intentionally sets NO SABLE_HOME — a stray env var wins over
+    everything per store/paths.py precedence (env > config > default)."""
+    from .store.paths import DEFAULT_DIRNAME, ENV_HOME
+
+    env = os.environ.get(ENV_HOME, "").strip()
+    cfg_home = str(getattr(cfg, "home", "") or "").strip() if cfg else ""
+    default_root = Path.home() / DEFAULT_DIRNAME
+    lines = [f"resolved: {home}",
+             f"{ENV_HOME} env: {env or '(unset)'}",
+             f"config home:  {cfg_home or '(unset)'}",
+             f"default:      {default_root}"]
+    resolved = Path(home).expanduser().resolve() if Path(home).exists() \
+        else Path(home).expanduser()
+    conflicts: List[str] = []
+    if env and Path(env).expanduser() != resolved:
+        conflicts.append(f"{ENV_HOME}={env} does not match the resolved root")
+    if cfg_home and Path(cfg_home).expanduser() != resolved:
+        conflicts.append(f"config home={cfg_home} does not match the "
+                         f"resolved root (the {ENV_HOME} env overrides it)")
+    if conflicts:
+        return CheckResult("home-consistency", "warn", lines + conflicts,
+                           next_commands=[f"unset the conflicting value or "
+                                          f"point everything at one root; "
+                                          f"precedence is {ENV_HOME} env > "
+                                          f"config home > {default_root}"])
+    note = ("matches the per-user default"
+            if resolved == default_root.expanduser()
+            else "deliberate non-default root (consistent across sources)")
+    return CheckResult("home-consistency", "ok", lines + [note])
+
+
 # ------------------------------------------------------- measurement states
+
+def check_datasets_env(cfg: Any) -> CheckResult:
+    """WP3b: does `datasets` import in the TRAINING interpreter?
+
+    The package only rides the optional [training] extra — and on Windows
+    setup.ps1 may skip that extra entirely (--no-training / bitsandbytes build
+    failures), so dataset-backed training dies at worker import time. Report
+    the exact pip command as the next step (datasets WITHOUT bitsandbytes is
+    installable independently of the full extra)."""
+    from .core.datasetenv import preflight
+
+    st = preflight(cfg)
+    if st["datasets"]:
+        return CheckResult("datasets-env", "ok",
+                           [f"`datasets` imports in {st['python']}"])
+    return CheckResult(
+        "datasets-env", "warn",
+        [f"`datasets` NOT importable in the training interpreter "
+         f"{st['python']}", st["note"]],
+        next_commands=[st["install_command"] or
+                       "pip install datasets (in the training env)"])
+
 
 def check_noise_floor(home: Path, *,
                       load_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
@@ -719,6 +830,13 @@ def collect_checks(*, config_path: Optional[str] = None, fix: bool = False,
     results.append(check_ports(ports, live_owned))
 
     results.append(check_stale_state(home, alive_fn=alive_fn, fix=fix))
+    # WP1c chat-durability diagnostics: stale chat tmp files (failed atomic
+    # replaces) and SABLE_HOME resolution consistency across env/config.
+    results.append(check_chat_tmp(home))
+    results.append(check_home_consistency(cfg, home))
+    # WP3b: `datasets` importability in the training interpreter (warn with
+    # the exact pip command — datasets installs independently of [training]).
+    results.append(check_datasets_env(cfg))
     results.append(check_noise_floor(home))
     results.append(check_calibration_profile(cfg, home))
 

@@ -271,12 +271,12 @@ def remote_agent_entries(home: Path) -> List[Dict[str, Any]]:
             continue
         url = str(p.get("url") or "")
         host = urlparse(url).hostname or url
-        # The model/instance a remote run lands on: first running server.
-        model, instance = None, None
+        # The model a remote run lands on: first running server. (The server
+        # name is not surfaced in the peer row today — only model_name is.)
+        model = None
         for s in snap.get("servers") or []:
             if isinstance(s, dict) and s.get("running"):
                 model = s.get("model_name")
-                instance = s.get("name")
                 break
         for a in snap.get("agents") or []:
             an = str((a or {}).get("name") or "").strip()

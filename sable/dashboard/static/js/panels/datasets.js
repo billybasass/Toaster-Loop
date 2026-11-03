@@ -15,9 +15,11 @@ const ROWS_PAGE = 10;
  * POST /api/curate (5d: queued job, 202 {job_id}) and resolve when the job
  * finishes. Resolves {ok, dataset_id?, sft_count?, dpo_count?, claimed?,
  * warnings?, error?}. Rejects only on submit failure (ApiError).
+ * WP3d: same helper drives /api/datasets/curate_source (folder/website jobs
+ * share the 202+poll contract and the final {"event":"done", result} log line).
  */
-async function curateJob(body) {
-  const r = await api("/api/curate", { method: "POST", body });
+async function curateJob(body, endpoint = "/api/curate") {
+  const r = await api(endpoint, { method: "POST", body });
   const jobId = r.job_id;
   if (!jobId) return Promise.reject(new Error("no job id in response"));
   toast(`curate queued (${jobId})`, "info");
@@ -426,6 +428,137 @@ async function curateForm(onDone) {
   return host;
 }
 
+// ------------------------------------------------- WP3d: source curation card
+// Local folder / website ingestion + hub-snapshot import. Folder and website
+// run as queued kind="curate_source" jobs (202+poll, same contract as
+// /api/curate); hub import is synchronous local work. All three materialize a
+// normal dataset record — the table below needs no special cases beyond the
+// provenance chip.
+
+function sourcesCard(onDone) {
+  const host = el("div", { class: "card" });
+  const out = el("div", { class: "result" });
+
+  // -- local folder
+  const dirIn = el("input", { type: "text", class: "grow",
+    placeholder: "/path/to/docs (recursive: .md .txt .rst .html .json .jsonl)" });
+  const dirName = el("input", { type: "text", placeholder: "name",
+    class: "narrow" });
+  const dirBtn = el("button", { text: "Ingest folder" });
+  dirBtn.addEventListener("click", async () => {
+    if (!dirIn.value.trim()) return toast("folder path required", "error");
+    dirBtn.disabled = true;
+    out.textContent = "ingesting folder… (queued job; large folders take a while)";
+    try {
+      const body = { source: "local_folder", path: dirIn.value.trim() };
+      if (dirName.value.trim()) body.name = dirName.value.trim();
+      const r = await curateJob(body, "/api/datasets/curate_source");
+      if (r.ok) {
+        out.textContent = `created ${r.dataset_id} (${r.rows} rows)`;
+        toast(`dataset ${r.dataset_id} created from folder`, "ok");
+        (r.warnings || []).slice(0, 3).forEach((w) => toast(w, "info"));
+        onDone(r);
+      } else out.textContent = `failed: ${r.error}`;
+    } catch (e) { out.textContent = ""; toast(e.message, "error"); }
+    finally { dirBtn.disabled = false; }
+  });
+
+  // -- website crawl
+  // (placeholder deliberately avoids a scheme literal — the static-asset
+  // hygiene test forbids remote URL strings in shipped JS.)
+  const urlIn = el("input", { type: "text", class: "grow",
+    placeholder: "entry page URL, e.g. docs.example.org/start.html" });
+  const pagesIn = el("input", { type: "number", min: "1", max: "30",
+    placeholder: "30", class: "narrow" });
+  const urlBtn = el("button", { text: "Crawl site" });
+  urlBtn.addEventListener("click", async () => {
+    if (!urlIn.value.trim()) return toast("URL required", "error");
+    urlBtn.disabled = true;
+    out.textContent = "crawling… (queued job, same-origin bounded crawl)";
+    try {
+      const body = { source: "website", url: urlIn.value.trim() };
+      if (pagesIn.value) body.max_pages = Number(pagesIn.value);
+      const r = await curateJob(body, "/api/datasets/curate_source");
+      if (r.ok) {
+        out.textContent = `created ${r.dataset_id} (${r.rows} rows)`;
+        toast(`dataset ${r.dataset_id} created from site`, "ok");
+        (r.warnings || []).slice(0, 3).forEach((w) => toast(w, "info"));
+        onDone(r);
+      } else out.textContent = `failed: ${r.error}`;
+    } catch (e) { out.textContent = ""; toast(e.message, "error"); }
+    finally { urlBtn.disabled = false; }
+  });
+
+  // -- hub snapshot import (repo downloaded on the Hub page)
+  const hubIn = el("input", { type: "text", class: "grow",
+    placeholder: "hub dataset repo id (downloaded first, e.g. org/name)" });
+  const hubBtn = el("button", { text: "Import hub dataset" });
+  hubBtn.addEventListener("click", async () => {
+    if (!hubIn.value.trim()) return toast("repo id required", "error");
+    hubBtn.disabled = true;
+    out.textContent = "importing hub snapshot…";
+    try {
+      const r = await api("/api/datasets/import_hub",
+        { method: "POST", body: { repo_id: hubIn.value.trim() } });
+      out.textContent = `created ${r.dataset_id} (${r.rows} rows)`;
+      toast(`dataset ${r.dataset_id} imported from hub`, "ok");
+      (r.warnings || []).slice(0, 3).forEach((w) => toast(w, "info"));
+      onDone(r);
+    } catch (e) { out.textContent = ""; toast(e.message, "error"); }
+    finally { hubBtn.disabled = false; }
+  });
+
+  host.append(
+    el("h3", { text: "Curation sources" }),
+    el("p", { class: "hint", text:
+      "Ingest a local docs folder, crawl a documentation site, or import a "
+      + "dataset you downloaded on the Hub page. Doc files become ShareGPT "
+      + "pairs via the configured local model (heading fallback offline). "
+      + "Everything lands in the normal dataset list and trains as-is." }),
+    el("div", { class: "field" }, el("label", {}, "folder"), dirIn, dirName,
+      dirBtn),
+    el("div", { class: "field" }, el("label", {}, "website"), urlIn,
+      el("label", { title: "max pages (bounded crawl)" }, "pages"), pagesIn,
+      urlBtn),
+    el("div", { class: "field" }, el("label", {}, "hub repo"), hubIn, hubBtn),
+    out);
+  return host;
+}
+
+// WP3b: `datasets` package status strip (training env). Install = one click,
+// pip runs in the background against the training interpreter.
+function datasetsEnvCard() {
+  const host = el("div", { class: "card" });
+  const reload = async () => {
+    let st;
+    try { st = await api("/api/datasets/env"); }
+    catch { return; }
+    if (st.datasets) {
+      host.replaceChildren(el("p", { class: "hint", text:
+        "datasets package: ok (" + st.python + ")" }));
+      return;
+    }
+    const btn = el("button", { text: "Install datasets" });
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "installing…";
+      try {
+        await api("/api/datasets/env/install", { method: "POST" });
+        toast("pip install queued — poll back in a minute", "info");
+        setTimeout(reload, 15000);
+      } catch (e) { toast(e.message, "error"); btn.disabled = false;
+                   btn.textContent = "Install datasets"; }
+    });
+    host.replaceChildren(
+      el("p", { class: "hint", text: st.note || "datasets package missing" }),
+      el("div", { class: "field" }, btn,
+        el("code", { class: "mono hint",
+          text: st.install_command || "pip install datasets" })));
+  };
+  reload();
+  return host;
+}
+
 // ---------------------------------------------------------------- diff view
 
 // Idea #6: pick two datasets -> summary of added/removed/unchanged trace ids,
@@ -581,6 +714,15 @@ function listView(mount) {
       { label: "id", render: (d) => el("span", { class: "mono" },
           d.dataset_id || "–") },
       { label: "created", render: (d) => fmtTime(d.created_at, false) },
+      // WP3c/d: provenance chip — curated datasets show nothing extra (the
+      // common case stays quiet); hub/folder/website carry a source badge.
+      { label: "source", render: (d) => {
+          const p = d.provenance || "curated";
+          if (p === "curated") return el("span", { class: "hint", text: "traces" });
+          const what = p === "hub" ? (d.source_repo || "hub")
+            : p === "local_folder" ? "folder" : p === "website" ? "web" : p;
+          return badge(what, "info");
+        } },
       { label: "trust", render: (d) => trustBadge(d) },
       { label: "gate", render: (d) => lintCell(d) },
       { label: "sft", render: (d) => d.files?.["sft.jsonl"]?.count ?? 0 },
@@ -601,10 +743,20 @@ function listView(mount) {
     }));
   }
 
+  const envHost = el("div");
+  const sourcesHost = el("div");
   mount.replaceChildren(
     el("h2", { text: "Datasets" }), tableHost, funnelHost, diffHost);
   funnelHost.replaceChildren(funnelCard());
-  curateForm(() => load()).then((f) => mount.appendChild(f));
+  // WP3b/d: training-env package gate first (it blocks training, so it goes
+  // above the work), then the extra curation sources next to Curate.
+  envHost.replaceChildren(datasetsEnvCard());
+  mount.insertBefore(envHost, funnelHost);
+  sourcesHost.replaceChildren(sourcesCard(() => load()));
+  curateForm(() => load()).then((f) => {
+    mount.appendChild(f);
+    mount.appendChild(sourcesHost);
+  });
   load();
   return { destroy() { for (const u of unsubs) u(); } };
 }

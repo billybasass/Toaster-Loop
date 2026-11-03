@@ -9,12 +9,18 @@ WP9 analytics and guarded export.
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-
+from urllib.parse import urlparse
 
 from ...curate.curater import Curater
-from .base import ApiContext, HttpError
+from .base import ApiContext, ApiResponse, HttpError
+
+#: WP3b one-click install guard: one datasets-install at a time per process.
+_ENV_INSTALL: Dict[str, Any] = {"lock": threading.Lock(), "running": False,
+                                "result": None}
 
 
 class DatasetsRoutes(ApiContext):
@@ -242,6 +248,191 @@ WP9 analytics and guarded export.
             return Curater(store, self.home).load_manifest(dataset_id)
         finally:
             store.close()
+
+    # ------------------------------------------- WP3c/d: source curation
+
+    def h_dataset_import_hub(self, q: Dict[str, str],
+                             b: Dict[str, Any]) -> Dict[str, Any]:
+        """WP3c: materialize a downloaded hub dataset into <home>/datasets/.
+
+        POST /api/datasets/import_hub {repo_id, name?}. The snapshot is already
+        on disk (Hub page download), so this is pure local work: importer.py
+        auto-detection + ingest gate over the snapshot files -> a normal
+        dataset record (provenance "hub" + source_repo) that the Train panel
+        picker consumes with zero special cases. Synchronous by design (file
+        scan only; no network, seconds at worst)."""
+        from ...core.modelhub import HubError
+        from ...curate.importer import ImportError_ as CurateImportError
+        from ...curate.sources import import_hub_snapshot
+
+        repo_id = str(b.get("repo_id") or "").strip()
+        if not repo_id:
+            raise HttpError(400, "repo_id required")
+        try:
+            res = import_hub_snapshot(self.home, repo_id,
+                                      name=str(b.get("name") or "") or None)
+        except CurateImportError as e:
+            # Not-found snapshots are 404s; unusable content is a 422 — the
+            # hub UI shows the message verbatim.
+            status = 404 if "no downloaded hub snapshot" in str(e) else 422
+            raise HttpError(status, str(e)) from e
+        except HubError as e:
+            raise HttpError(400, str(e)) from e   # bad repo id (validate_repo_id)
+        return {"ok": True, "dataset_id": res.dataset_id,
+                "rows": res.rows, "warnings": res.warnings}
+
+    def h_curate_source(self, q: Dict[str, str],
+                        b: Dict[str, Any]) -> "ApiResponse":
+        """WP3d: queue a local-folder or website curation job.
+
+        POST /api/datasets/curate_source
+          {source: "local_folder", path: "/some/dir", name?}
+          {source: "website", url: "https://docs.example.org/", name?,
+           max_pages?, max_depth?}
+        Same 202+poll contract as /api/curate (kind="curate_source"): large
+        folders/crawls plus LLM synthesis must never block the HTTP thread.
+        The job's final log line carries {"event": "done", "result":
+        {dataset_id, rows, warnings}}."""
+        from .base import ApiResponse
+
+        source = str(b.get("source") or "").strip().lower()
+        if source not in ("local_folder", "website"):
+            raise HttpError(400, 'source must be "local_folder" or "website"')
+        if source == "local_folder":
+            path = str(b.get("path") or "").strip()
+            if not path:
+                raise HttpError(400, "path required for local_folder")
+            if not Path(path).expanduser().is_dir():
+                raise HttpError(400, f"not a directory: {path}")
+        else:
+            url = str(b.get("url") or "").strip()
+            if not url:
+                raise HttpError(400, "url required for website")
+            if urlparse(url).scheme not in ("http", "https"):
+                raise HttpError(400, "only http(s) URLs can be crawled")
+
+        reg = self._registry()
+        try:
+            sched = self._scheduler(reg)
+            job = sched.submit("curate_source",
+                               log_dir=self.home / "curate_runs",
+                               params=dict(b))
+        finally:
+            reg.close()
+
+        def _run(job_id: str, log_path: Optional[str]) -> None:
+            # In-process execution (like submit_curate): the crawl/folder scan
+            # plus per-chunk synthesis through the live serve endpoint is CPU/
+            # IO work with no GPU dependency; the scheduler slot machinery for
+            # training jobs does not apply.
+            reg = self._registry()
+            try:
+                if not reg.mark_running(job_id, os.getpid(), actor="dashboard"):
+                    return  # cancelled while queued
+                self._job_observer(job_id, "running")
+                try:
+                    res = self._curate_source_run(b)
+                except Exception as e:  # noqa: BLE001 — job errors are data
+                    msg = f"{type(e).__name__}: {e}"
+                    if log_path:
+                        try:
+                            with open(log_path, "a", encoding="utf-8") as f:
+                                f.write(json.dumps(
+                                    {"event": "error", "job": job_id,
+                                     "error": msg}) + "\n")
+                        except OSError:
+                            pass
+                    reg.finish_job(job_id, "error", error=msg,
+                                   actor="dashboard")
+                    self._job_observer(job_id, "error")
+                    return
+                if log_path:
+                    try:
+                        with open(log_path, "a", encoding="utf-8") as f:
+                            f.write(json.dumps(
+                                {"event": "done", "job": job_id,
+                                 "result": {"dataset_id": res.dataset_id,
+                                            "rows": res.rows,
+                                            "warnings": res.warnings[:20]}},
+                                ensure_ascii=False) + "\n")
+                    except OSError:
+                        pass
+                reg.finish_job(job_id, "done", actor="dashboard")
+                self._job_observer(job_id, "done")
+            except Exception:  # noqa: BLE001 — pragma: no cover defensive
+                try:
+                    reg.finish_job(job_id, "error",
+                                   error="curate_source runner failed",
+                                   actor="dashboard")
+                except Exception:
+                    pass
+            finally:
+                reg.close()
+
+        threading.Thread(target=_run, args=(job.job_id, job.log_path),
+                         daemon=True).start()
+        return ApiResponse(202, {"ok": True, "job_id": job.job_id,
+                                 "state": "queued"})
+
+    def _curate_source_run(self, b: Dict[str, Any]):
+        """Execute a curate_source body (folder or website) with live-model
+        synthesis when a server is up. Split out so tests can call it inline."""
+        from ...curate.sources import crawl_website, ingest_folder, \
+            live_synth_fn
+
+        source = str(b.get("source") or "").strip().lower()
+        synth = live_synth_fn(self)
+        name = str(b.get("name") or "") or None
+        if source == "local_folder":
+            return ingest_folder(self.home, str(b.get("path") or ""),
+                                 name=name, synth_fn=synth)
+        kwargs: Dict[str, Any] = {}
+        if b.get("max_pages") is not None:
+            kwargs["max_pages"] = int(b["max_pages"])
+        if b.get("max_depth") is not None:
+            kwargs["max_depth"] = int(b["max_depth"])
+        return crawl_website(self.home, str(b.get("url") or ""), name=name,
+                             synth_fn=synth, **kwargs)
+
+    # --------------------------------------------- WP3b: datasets env gate
+
+    def h_datasets_env(self, q: Dict[str, str],
+                       b: Dict[str, Any]) -> Dict[str, Any]:
+        """GET /api/datasets/env — does `datasets` import in the training
+        interpreter? The Datasets page shows an install button when not."""
+        from ...core.datasetenv import preflight
+
+        return preflight(self.cfg)
+
+    def h_datasets_env_install(self, q: Dict[str, str],
+                               b: Dict[str, Any]) -> "ApiResponse":
+        """POST /api/datasets/env/install — one-click `datasets` install into
+        the training interpreter (explicit user action; subprocess pip on a
+        worker thread, poll GET /api/datasets/env). Deliberately without
+        bitsandbytes so it works even where setup.ps1 skipped [training]."""
+        from .base import ApiResponse
+
+        reg_state = _ENV_INSTALL
+        with reg_state["lock"]:
+            if reg_state["running"]:
+                return ApiResponse(409, {"ok": False,
+                                         "error": "install already running"})
+            reg_state["running"] = True
+
+        def _worker() -> None:
+            from ...core.datasetenv import install_datasets
+
+            try:
+                res = install_datasets()
+                reg_state["result"] = res
+            except Exception as e:  # noqa: BLE001 — surfaced via env GET
+                reg_state["result"] = {"ok": False, "error": str(e)}
+            finally:
+                reg_state["running"] = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return ApiResponse(202, {"ok": True, "state": "installing",
+                                 "note": "poll GET /api/datasets/env"})
 
 
 # ------------------------------------------- module-level helpers

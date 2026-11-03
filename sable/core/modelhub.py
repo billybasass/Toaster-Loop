@@ -42,9 +42,11 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import shutil
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -57,6 +59,59 @@ from .model_discovery import resolve_models_dir
 
 DEFAULT_ENDPOINT = "https://huggingface.co"
 REQUEST_TIMEOUT = 30.0
+
+# ------------------------------------------------------------- retry policy
+# WP3a: ONE httpx attempt meant any HTTP 429 (rate limit), 499 (nginx
+# client-closed) or 5xx failed a multi-GB job forever and the user had to
+# re-click download after every hub hiccup. Files resume via the existing
+# Range/.part mechanism, so retrying is nearly free — wrap each file download
+# in bounded exponential backoff with jitter. 401/403 stay FATAL (a token
+# problem never heals on its own; the HF_TOKEN guidance must surface at once).
+DOWNLOAD_ATTEMPTS = 5
+RETRY_BASE_S = 2.0
+RETRY_CAP_S = 60.0
+#: Statuses worth retrying: throttling (429), closed-by-server (499) and any
+#: 5xx. Connection drops are retryable by exception type, not status.
+RETRYABLE_STATUS = frozenset({429, 499} | set(range(500, 600)))
+
+#: WP3a: cap on concurrently running hub download jobs (process-wide). Files
+#: within one repo already download sequentially; without a job cap a user
+#: clicking several downloads at once trips the hub's per-IP rate limiter and
+#: every job starts burning 429 retries.
+MAX_CONCURRENT_JOBS = 2
+_JOB_SLOTS = threading.Semaphore(MAX_CONCURRENT_JOBS)
+
+
+def _retry_sleep(delay: float) -> None:
+    """Backoff sleep seam (tests monkeypatch to stay fast)."""
+    time.sleep(delay)
+
+
+def _acquire_slot(job: "DownloadJob") -> bool:
+    """Take a download slot, staying cancel-aware while waiting.
+
+    Polls with a short timeout so a job cancelled in the queue never wedges
+    behind active downloads. Returns False only when the job was cancelled;
+    on True the caller MUST release _JOB_SLOTS exactly once."""
+    while True:
+        if job._cancel.is_set():
+            return False
+        if _JOB_SLOTS.acquire(timeout=0.25):
+            if job._cancel.is_set():   # cancelled during the final wait
+                _JOB_SLOTS.release()
+                return False
+            return True
+
+
+def _retry_delay(attempt: int, retry_after: Optional[float]) -> float:
+    """Backoff for one retry: honor Retry-After when the hub sent one (capped),
+    else exponential base*2^(attempt-1) with +/-25% jitter, capped at
+    RETRY_CAP_S. Jitter matters: several files/jobs hitting a throttled hub
+    in lockstep re-trip it on exactly the same cadence."""
+    if retry_after is not None and retry_after >= 0:
+        return min(retry_after, RETRY_CAP_S)
+    d = min(RETRY_BASE_S * (2 ** max(0, attempt - 1)), RETRY_CAP_S)
+    return d * random.uniform(0.75, 1.25)
 
 #: Resource kinds the hub can browse/download. The plural doubles as the HF
 #: REST path segment (``/api/models``, ``/api/datasets``, ``/api/spaces``);
@@ -812,6 +867,10 @@ class DownloadJob:
     created_at: str = field(default_factory=_utcnow)
     finished_at: Optional[str] = None
     files_done: List[str] = field(default_factory=list)
+    # WP3a: current-file retry state surfaced for the hub UI ("retrying
+    # 2/5"); attempt stays at 0/1 while things are healthy.
+    attempt: int = 0
+    attempts_max: int = DOWNLOAD_ATTEMPTS
     _cancel: threading.Event = field(default_factory=threading.Event,
                                      repr=False)
 
@@ -824,7 +883,19 @@ class DownloadJob:
             "done_bytes": self.done_bytes, "error": self.error,
             "created_at": self.created_at, "finished_at": self.finished_at,
             "files_done": list(self.files_done),
+            "attempt": self.attempt, "attempts_max": self.attempts_max,
         }
+
+
+class _Retryable(Exception):
+    """Internal: this file download hit a retryable condition (429/499/5xx or
+    a connection drop). Carries the server's Retry-After hint when present;
+    _download_file's retry loop consumes it, callers never see it."""
+
+    def __init__(self, reason: str, retry_after: Optional[float] = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.retry_after = retry_after
 
 
 class ModelHub:
@@ -1017,6 +1088,19 @@ class ModelHub:
     # -------------------------------------------------------------- worker
 
     def _run_job(self, job: DownloadJob) -> None:
+        # WP3a concurrency cap: at most MAX_CONCURRENT_JOBS hub jobs stream at
+        # once (process-wide). Queued jobs wait on the semaphore; cancel still
+        # works while waiting (the loop checks the event between acquires).
+        if not _acquire_slot(job):
+            job.state = "cancelled"
+            job.finished_at = _utcnow()
+            return
+        try:
+            self._run_job_inner(job)
+        finally:
+            _JOB_SLOTS.release()
+
+    def _run_job_inner(self, job: DownloadJob) -> None:
         try:
             sha, sibs = _files_for_variant(job.repo_id, job.variant, job.kind)
             if job._cancel.is_set():
@@ -1046,6 +1130,40 @@ class ModelHub:
 
     def _download_file(self, job: DownloadJob, sha: str,
                        sib: Dict[str, Any]) -> None:
+        """Download one repo file with bounded retry (WP3a).
+
+        Retryable per attempt: 429/499/5xx and connection drops — each retry
+        re-enters _download_file_once, which resumes from the .part via Range,
+        so a hiccup at 90% costs seconds, not the whole file. Fatal (raise
+        immediately): unsafe path, 401/403 (the HF_TOKEN guidance), cancel,
+        and anything exhausted of attempts (the last reason surfaces with an
+        attempt count). job.attempt surfaces "retrying n/max" to the hub UI."""
+        rel = sib["rfilename"]
+        last: Optional[_Retryable] = None
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            if job._cancel.is_set():
+                raise _Cancelled()
+            job.attempt = attempt
+            try:
+                self._download_file_once(job, sha, sib)
+                return
+            except _Retryable as e:
+                last = e
+                if attempt >= DOWNLOAD_ATTEMPTS:
+                    break
+                delay = _retry_delay(attempt, e.retry_after)
+                job.error = (f"{rel}: retrying ({attempt + 1}/"
+                             f"{DOWNLOAD_ATTEMPTS}) after {e.reason} "
+                             f"in {delay:.1f}s")
+                _retry_sleep(delay)
+        assert last is not None  # loop only exits via return or break above
+        job.attempt = DOWNLOAD_ATTEMPTS
+        raise HubError(
+            f"{rel}: download failed after {DOWNLOAD_ATTEMPTS} attempts "
+            f"({last.reason}) — the file resumes from its .part on retry")
+
+    def _download_file_once(self, job: DownloadJob, sha: str,
+                            sib: Dict[str, Any]) -> None:
         rel = sib["rfilename"]
         dest = (self.snapshot_dir(job.repo_id, sha, job.kind)
                 / rel).resolve()
@@ -1086,7 +1204,20 @@ class ModelHub:
                 job.files_done.append(rel)
                 return
             if r.status_code in (401, 403):
+                # Fatal: a token/permission problem never heals on retry —
+                # surface the HF_TOKEN guidance immediately (WP3a contract).
                 raise HubError(f"{rel}: authorization required — set HF_TOKEN")
+            if r.status_code in RETRYABLE_STATUS:
+                # WP3a: throttling / server-side hiccups are transient. Honor
+                # Retry-After on 429 so we wait exactly as long as asked.
+                ra: Optional[float] = None
+                raw_ra = r.headers.get("Retry-After")
+                if raw_ra:
+                    try:
+                        ra = float(raw_ra)
+                    except ValueError:
+                        ra = None
+                raise _Retryable(f"HTTP {r.status_code}", retry_after=ra)
             if r.status_code not in (200, 206):
                 raise HubError(f"{rel}: download failed (HTTP {r.status_code})")
             if resume_from and r.status_code == 200:
@@ -1104,21 +1235,30 @@ class ModelHub:
                         fh.write(chunk)
                         job.done_bytes += len(chunk)
             except httpx.HTTPError as e:
-                raise HubError(
-                    f"{rel}: connection dropped after "
-                    f"{part.stat().st_size if part.exists() else 0} bytes — "
-                    "retry the download to resume") from e
+                # WP3a: a dropped connection is the classic transient failure
+                # the .part/Range resume was built for — retry in place rather
+                # than failing the whole job on one flaky network moment.
+                got = part.stat().st_size if part.exists() else 0
+                raise _Retryable(
+                    f"connection dropped after {got} bytes") from e
         # Size check (when the hub reported one) then promote .part -> final.
         if sib["size"] and part.stat().st_size != sib["size"]:
-            raise HubError(
-                f"{rel}: incomplete download "
-                f"({part.stat().st_size}/{sib['size']} bytes) — retry resumes it")
+            # A short body with a clean stream end is still transient (CDN
+            # truncation): retry resumes from the partial .part.
+            raise _Retryable(
+                f"incomplete download "
+                f"({part.stat().st_size}/{sib['size']} bytes)")
         if _gzip_poisoned(part, rel):
             raise HubError(
                 f"{rel}: hub returned a gzip-encoded body for a small file — "
                 "server or proxy ignores Accept-Encoding: identity")
         os.replace(part, dest)
         job.files_done.append(rel)
+        # Healthy completion: clear any retry bookkeeping from earlier files
+        # so the hub UI only shows "retrying" while it is actually happening.
+        job.attempt = 0
+        if job.error and "retrying (" in job.error:
+            job.error = None
 
     def _write_manifest(self, job: DownloadJob, sha: str,
                         sibs: List[Dict[str, Any]]) -> None:

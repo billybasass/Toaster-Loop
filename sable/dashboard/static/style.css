@@ -367,6 +367,16 @@ pre.log.json { max-height: 260px; overflow: auto; }
    synthetic wake turns, thread-list pending-inbox badge, busy-poll note. */
 .chip.deleg-status.inbox-wake { color: var(--purple); border-color: var(--purple); }
 .thread-item .chip.thread-inbox { margin-left: 4px; font-size: 10px; padding: 0 6px; }
+/* WP2 (delegated sub-threads): child rows nest one level under their parent,
+   carry an agent chip + a live status badge (palette above), and dim slightly
+   so they read as belonging to the parent thread. */
+.thread-item.thread-child { margin-left: 34px; }
+.thread-item .chip.thread-child-agent { color: var(--purple); border: 1px solid var(--purple);
+  font-size: 10px; padding: 0 6px; }
+.thread-item .chip.thread-child-status { font-size: 10px; padding: 0 6px; }
+.chip.deleg-status.queued, .chip.deleg-status.cancelling { color: var(--dim); border-color: var(--line); }
+.chip.deleg-status.cancelled { color: var(--warn); border-color: var(--warn); }
+.chip.deleg-status.interrupted { color: var(--err); border-color: var(--err); }
 .hint.poll-guard { color: var(--warn); margin: 2px 0; }
 pre.log.bad { color: var(--err); }
 /* Phase 4 (post-write checks): syntax/LSP verdict block inside a write_file/patch tool card */

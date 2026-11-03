@@ -1173,8 +1173,8 @@ class Scheduler:
         just re-hit the same gate, so it stays queued for the next tick."""
         results: List[JobRow] = []
         while len(self.registry.running_jobs()) < self.max_parallel:
-            job = self.registry.claim_next_queued(os.getpid(),
-                                                  skip_kinds=("curate",))
+            job = self.registry.claim_next_queued(
+                os.getpid(), skip_kinds=("curate", "curate_source"))
             if job is None:
                 break
             try:

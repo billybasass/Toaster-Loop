@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import threading
 import time
@@ -650,10 +649,14 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                                 prof.get("name") if prof else None,
                                 inbox=bool(inbox_wake or drained),
                                 run_entry=entry)
-                        except Exception:  # persistence must never eat the run
-                            logging.getLogger("sable.dashboard").debug(
-                                "chat transcript persist failed for thread %s",
-                                thread_id, exc_info=True)
+                        except Exception as e:  # persist must never eat the run
+                            # WP1c: WARNING (not debug) with the path — a lost
+                            # transcript must be diagnosable from logs alone.
+                            logging.getLogger("sable.dashboard").warning(
+                                "chat transcript persist failed for thread %s "
+                                "(%s/%s/%s.json): %s",
+                                thread_id, self.home, CHAT_DIRNAME, thread_id,
+                                e, exc_info=True)
                     # Training flow-back: when the run used a REMOTE agent's
                     # model, that model's owner trains on it — push the
                     # transcript to the peer gateway's trace import (best
@@ -1168,12 +1171,12 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         # during the run must stay deleted.
         if run_entry is not None and run_entry.get("thread_deleted"):
             return
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(t, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, p)
+        # WP1: unique-tmp + retried replace (Windows AV/indexer handles and
+        # interleaved delegation-wake saves made the old fixed ".json.tmp"
+        # collide with PermissionError [WinError 32] — silent thread loss).
+        from ...store.atomic import atomic_write_json
+
+        atomic_write_json(p, t)
 
     _THREAD_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
@@ -1250,6 +1253,15 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                     # the chat UI renders this as a small "N waiting" badge.
                     "pending_inbox": pending.get(
                         t.get("id", f.stem), 0),
+                    # WP2: delegated child threads carry parent_thread /
+                    # delegation_id / agent (additive keys; legacy files read
+                    # as None and list exactly like before). The explorer
+                    # nests rows with a parent_thread under their parent and
+                    # hides them from the top-level count via these keys.
+                    "parent_thread": t.get("parent_thread"),
+                    "delegation_id": t.get("delegation_id"),
+                    "agent": t.get("agent"),
+                    "delegation_status": t.get("delegation_status"),
                 })
         return {"threads": threads}
 
@@ -1328,20 +1340,30 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                 thread["task"] = str(b["task"])
         elif existing.get("task"):
             thread["task"] = existing["task"]
+        # WP2 additive keys survive client round-trips exactly like "task":
+        # a save against a child thread must never orphan it (the bridge and
+        # delegation writers own these keys; clients never send them).
+        for _k in ("parent_thread", "delegation_id", "agent",
+                   "delegation_status"):
+            if existing.get(_k) is not None:
+                thread[_k] = existing[_k]
         if thread["project"] and self._load_project(thread["project"]) is None:
             raise HttpError(400, f"no project {thread['project']}",
                             code="unknown_project")
-        p.parent.mkdir(parents=True, exist_ok=True)
-        # Atomic durable write (tmp + os.replace), matching every other
-        # persisted JSON in the codebase — a crash mid-write must never leave
-        # a partial file that the read path would treat as an empty thread.
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(thread, ensure_ascii=False, indent=2),
-                       encoding="utf-8")
-        # Transcripts can quote secrets the user pasted into a prompt —
-        # owner-only on disk (same hardening as the serve-state writers).
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, p)
+        # Atomic durable write (unique tmp + retried os.replace), matching
+        # every other persisted JSON in the codebase — a crash mid-write must
+        # never leave a partial file that the read path would treat as an
+        # empty thread. WP1: the tmp name is per-write unique and the replace
+        # retries transient Windows sharing violations (WinError 32) instead
+        # of losing the save silently. WARNING on failure with the path so a
+        # lost thread is diagnosable from logs alone (WP1c).
+        from ...store.atomic import atomic_write_json
+
+        try:
+            atomic_write_json(p, thread)
+        except OSError as e:
+            logger.warning("thread save failed for %s: %s", p, e)
+            raise
 
         # Stage 2 (off the critical path): a freshly derived title on a thread
         # that has an assistant reply gets one bounded LLM upgrade attempt.
@@ -1406,10 +1428,11 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
                     return
                 t2["title"] = title
                 t2["title_source"] = LLM
-                tmp = p.with_suffix(".json.tmp")
-                tmp.write_text(json.dumps(t2, ensure_ascii=False, indent=2),
-                               encoding="utf-8")
-                os.replace(tmp, p)
+                # WP1: same unique-tmp retried write as the main save path;
+                # a concurrent client save used to collide on the fixed tmp.
+                from ...store.atomic import atomic_write_json
+
+                atomic_write_json(p, t2)
             except Exception:  # a title upgrade must never surface anywhere
                 import logging
                 logging.getLogger("sable.dashboard").debug(
@@ -1439,7 +1462,177 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         except Exception:  # noqa: BLE001 — cleanup never blocks the delete
             pass
         p.unlink()
+        # WP2 lifecycle: deleting a parent deletes its child threads (the
+        # explorer would otherwise show orphans pointing at a dead parent).
+        # Children are found by their additive parent_thread key; each delete
+        # is best-effort. ?keep_children=1 opts out (future UI confirmation).
+        if not str(q.get("keep_children") or "").strip():
+            deleted = [thread_id]
+            d = self.home / CHAT_DIRNAME
+            try:
+                for f in d.glob("*.json"):
+                    try:
+                        t = json.loads(f.read_text())
+                    except (OSError, json.JSONDecodeError):
+                        continue
+                    if isinstance(t, dict) and t.get("parent_thread") in deleted:
+                        cid = str(t.get("id") or f.stem)
+                        with self._chat_runs_lock:
+                            for r in self._chat_runs.values():
+                                if (r.get("thread") == cid
+                                        and not r.get("done")):
+                                    r["cancel"].set()
+                                    r["status"] = "cancelling"
+                                    r["thread_deleted"] = True
+                        try:
+                            f.unlink()
+                            deleted.append(cid)
+                        except OSError:  # already gone / locked: skip
+                            pass
+            except OSError:  # noqa: BLE001 — chat dir vanished mid-delete
+                pass
         return {"ok": True}
+
+    # ------------------------------------------------- WP2 child-run bridge
+
+    def register_child_bridge(self) -> None:
+        """Wire delegated child runs into this app's chat-run machinery.
+
+        Called once from DashboardApp.__init__ (and re-safely on each new
+        app so the most recent instance owns the bridge). The core dispatcher
+        calls these hooks around a child run that has a parent chat thread:
+
+          started(info) -> child run id   (registers a run entry exactly like
+                                           _spawn_chat_run's _new_run, keyed
+                                           to the CHILD thread so single-flight
+                                           and adopt/re-attach work unchanged)
+          frame(rid, kind, data)          (publishes into the run's frame
+                                           buffer -> live SSE for readers)
+          finished(rid, payload)          (persists the transcript to the
+                                           child thread file via the WP1
+                                           atomic writer + closes the stream)
+
+        Threadless/CLI dispatches never reach the bridge; every hook is
+        best-effort (core swallows exceptions here regardless)."""
+        from ...core import delegation as _delegation
+
+        def _started(info: Dict[str, Any]) -> Optional[str]:
+            child_thread = str(info.get("child_thread") or "")
+            if not child_thread or not self._THREAD_ID_RE.match(child_thread):
+                return None
+            run_id = "dlg-" + str(info.get("delegation_id") or "")[:16]
+            cancel = threading.Event()
+            entry: Dict[str, Any] = {
+                "cancel": cancel, "done": False, "thread": child_thread,
+                "model": None, "profile": info.get("agent"),
+                "prompt": info.get("task") or "",
+                "status": "running",
+                "frames": [], "dropped": 0, "cond": threading.Condition(),
+                "admitted": True, "registered_at": time.monotonic(),
+                # WP2 markers: the bridge owns this entry's lifecycle (no SSE
+                # POST ever created it), and readers may attach at any time.
+                "child_delegation": info.get("delegation_id"),
+            }
+            with self._chat_runs_lock:
+                # Adopt-race guard: a previous run for the same child thread
+                # that is somehow still present wins (one run per thread).
+                for _rid, r in self._chat_runs.items():
+                    if (not r.get("done")
+                            and r.get("thread") == child_thread):
+                        return None
+                self._chat_runs[run_id] = entry
+
+            def _emit(frame: str) -> None:
+                with entry["cond"]:
+                    frames = entry["frames"]
+                    frames.append(frame)
+                    if len(frames) > MAX_CHAT_RUN_FRAMES:
+                        frames.pop(0)
+                        entry["dropped"] += 1
+                    entry["cond"].notify_all()
+
+            entry["_emit"] = _emit
+            _emit(sse_frame("run.started", {
+                "run_id": run_id, "model": None,
+                "profile": info.get("agent"),
+                "prompt": info.get("task") or "",
+                "child_thread": child_thread,
+                "parent_thread": info.get("parent_thread"),
+                "delegation_id": info.get("delegation_id")}))
+            return run_id
+
+        def _frame(run_id: str, kind: str, data: Dict[str, Any]) -> None:
+            entry = self._chat_runs.get(str(run_id))
+            emit = entry.get("_emit") if entry else None
+            if callable(emit):
+                emit(sse_frame(kind, data))
+
+        def _finished(run_id: str, payload: Dict[str, Any]) -> None:
+            entry = self._chat_runs.get(str(run_id))
+            if entry is None:
+                return
+            acc = payload.get("acc") or {}
+            text = str(acc.get("text") or "") or \
+                str(payload.get("result") or "")
+            child_thread = str(entry.get("thread") or "")
+            # Persist the final transcript to the child thread file (WP1
+            # atomic path) so a finished sub-thread opens from disk exactly
+            # like a main thread. Merge rules mirror _persist_run_turn: drop
+            # anything after the seeded task turn, then append the reply.
+            if child_thread and self._THREAD_ID_RE.match(child_thread):
+                try:
+                    p = self._thread_path(child_thread)
+                    t: Dict[str, Any] = {}
+                    if p.is_file():
+                        try:
+                            t = json.loads(p.read_text())
+                        except (OSError, json.JSONDecodeError):
+                            t = {}
+                    msgs = [m for m in (t.get("messages") or [])
+                            if isinstance(m, dict)]
+                    last_user = next(
+                        (i for i in range(len(msgs) - 1, -1, -1)
+                         if msgs[i].get("role") == "user"), None)
+                    if last_user is not None:
+                        del msgs[last_user + 1:]
+                    assistant: Dict[str, Any] = {"role": "assistant",
+                                                 "content": text}
+                    reasoning = str(acc.get("reasoning") or "")
+                    if reasoning:
+                        assistant["reasoning"] = reasoning
+                    if acc.get("tools"):
+                        assistant["tools"] = list(acc["tools"])
+                    footer = {k: v for k, v in {
+                        "trace_id": payload.get("child_trace_id"),
+                        "delegation_status": payload.get("status")}.items()
+                        if v is not None}
+                    if footer:
+                        assistant["footer"] = footer
+                    msgs.append(assistant)
+                    t["messages"] = msgs
+                    t["updated"] = _utcnow()
+                    tid = payload.get("child_trace_id")
+                    if tid:
+                        t["trace_ids"] = sorted(set(
+                            (t.get("trace_ids") or []) + [str(tid)]))
+                    from ...store.atomic import atomic_write_json
+                    atomic_write_json(p, t)
+                except OSError as e:
+                    logger.warning("child thread persist failed for %s: %s",
+                                   child_thread, e)
+            emit = entry.get("_emit")
+            if callable(emit):
+                emit(sse_frame("run.done", {
+                    "trace_id": payload.get("child_trace_id"),
+                    "delegation_status": payload.get("status")}))
+            with entry["cond"]:
+                if entry.get("status") != "cancelling":
+                    entry["status"] = str(payload.get("status") or "completed")
+                entry["done"] = True
+                entry["cond"].notify_all()
+
+        _delegation.register_child_run_bridge(
+            {"started": _started, "frame": _frame, "finished": _finished})
 
 
 # ------------------------------------------- module-level helpers

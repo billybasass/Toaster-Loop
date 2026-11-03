@@ -6878,7 +6878,6 @@ def test_resolve_upstream_unset_instance_old_flow(home__rgw):
     """instance=None keeps today's flow byte-identical (model-name match)."""
     from fake_server import FakeOpenAIServer
     from sable.dashboard import remote_gateway as rg
-    from sable.serving import instances as srv_inst
 
     home = home__rgw
     with FakeOpenAIServer() as fs:

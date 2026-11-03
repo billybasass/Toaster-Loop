@@ -62,7 +62,7 @@ MODEL_STATUSES = ("candidate", "validated", "promoted", "rolled_back", "failed",
 # pre-promotion statuses are never archivable — supersede first.
 ARCHIVABLE_STATUSES = ("superseded", "failed", "rolled_back")
 JOB_KINDS = ("sft", "dpo", "grpo", "export", "validate", "curate",
-             "shadow_eval", "evolve", "rft", "mine_goldens")
+             "shadow_eval", "evolve", "rft", "mine_goldens", "curate_source")
 JOB_STATES = ("queued", "running", "done", "error", "cancelled")
 # Job kinds executed in-process (no worker subprocess): curate by the dashboard
 # thread, shadow_eval by the scheduler itself (pass 4 #32 — pure stdlib+httpx
@@ -73,7 +73,8 @@ JOB_STATES = ("queued", "running", "done", "error", "cancelled")
 # mine_goldens likewise (distilling 👍 traces into golden tasks: stdlib JSONL
 # + SQLite only; the optional judge call is httpx I/O like rft's).
 # The stale-worker reaper must never touch these.
-INPROCESS_JOB_KINDS = ("curate", "shadow_eval", "evolve", "rft", "mine_goldens")
+INPROCESS_JOB_KINDS = ("curate", "shadow_eval", "evolve", "rft",
+                       "mine_goldens", "curate_source")
 
 _MODELS_TABLE_DDL = """
 CREATE TABLE models (
@@ -104,7 +105,7 @@ CREATE TABLE models (
 _JOBS_TABLE_DDL = """
 CREATE TABLE jobs (
     job_id       TEXT PRIMARY KEY,
-    kind         TEXT NOT NULL CHECK (kind IN ('sft','dpo','grpo','export','validate','curate','shadow_eval','evolve','rft','mine_goldens')),
+    kind         TEXT NOT NULL CHECK (kind IN ('sft','dpo','grpo','export','validate','curate','shadow_eval','evolve','rft','mine_goldens','curate_source')),
     dataset_id   TEXT,
     model_id     TEXT,
     state        TEXT NOT NULL CHECK (state IN ('queued','running','done','error','cancelled')),
@@ -154,7 +155,7 @@ CREATE TABLE IF NOT EXISTS models (
 
 CREATE TABLE IF NOT EXISTS jobs (
     job_id       TEXT PRIMARY KEY,
-    kind         TEXT NOT NULL CHECK (kind IN ('sft','dpo','grpo','export','validate','curate','shadow_eval','evolve','rft','mine_goldens')),
+    kind         TEXT NOT NULL CHECK (kind IN ('sft','dpo','grpo','export','validate','curate','shadow_eval','evolve','rft','mine_goldens','curate_source')),
     dataset_id   TEXT,
     model_id     TEXT,
     state        TEXT NOT NULL CHECK (state IN ('queued','running','done','error','cancelled')),
@@ -309,6 +310,7 @@ class ModelRegistry:
             self._migrate_job_kinds_evolve()
             self._migrate_job_kinds_rft()
             self._migrate_job_kinds_mine_goldens()
+            self._migrate_job_kinds_curate_source()
             self._migrate_models_status_check()
             self._conn.commit()
 
@@ -358,6 +360,28 @@ class ModelRegistry:
             return
         if "shadow_json" not in cols:
             self._conn.execute("ALTER TABLE models ADD COLUMN shadow_json TEXT")
+
+    def _migrate_job_kinds_curate_source(self) -> None:
+        """Rebuild the jobs table when its kind CHECK predates 'curate_source'
+        (WP3d folder/website curation jobs).
+
+        Same family as _migrate_job_kinds_mine_goldens (SQLite bakes CHECK
+        constraints into the stored DDL). Idempotent: runs only when the
+        stored DDL lacks 'curate_source'.
+        """
+        row = self._conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='jobs'"
+        ).fetchone()
+        if row is None or "'curate_source'" in (row[0] or ""):
+            return
+        self._conn.executescript(
+            "ALTER TABLE jobs RENAME TO jobs_old_cs;"
+            + _JOBS_TABLE_DDL
+            + "INSERT INTO jobs SELECT * FROM jobs_old_cs;"
+            "DROP TABLE jobs_old_cs;"
+            "CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);"
+            "CREATE INDEX IF NOT EXISTS idx_jobs_queued ON jobs(queued_at);"
+        )
 
     def _migrate_job_kinds_mine_goldens(self) -> None:
         """Rebuild the jobs table when its kind CHECK predates 'mine_goldens'.
