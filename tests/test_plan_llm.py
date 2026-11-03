@@ -8,17 +8,17 @@ from __future__ import annotations
 
 import pytest
 
-from sable.core.plan_llm import (PlanImportError, clean_text_input,
+from toaster_loop.core.plan_llm import (PlanImportError, clean_text_input,
                                  parse_task_array, parse_task_lines,
                                  plan_expand, plan_import)
-from sable.core.plans import add_task, get_task, load_plan, save_plan
+from toaster_loop.core.plans import add_task, get_task, load_plan, save_plan
 
 
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
@@ -175,7 +175,7 @@ def test_ai_transport_failure_never_crashes(home):
 def test_expand_attaches_subtasks_parent_kept(home):
     store = load_plan(None)
     add_task(store, {"title": "big thing", "description": "huge"})
-    from sable.core.plans import set_status as _ss
+    from toaster_loop.core.plans import set_status as _ss
     _ss(store, "t1", "in_progress")
     save_plan(store)
 

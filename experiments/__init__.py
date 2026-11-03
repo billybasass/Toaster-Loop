@@ -1,7 +1,7 @@
-"""Non-production experiment code for sable work packages.
+"""Non-production experiment code for toaster_loop work packages.
 
 Everything under this directory is a RESEARCH SPIKE: never imported by the
-``sable`` package, never packaged (setuptools only includes ``sable*``),
+``toaster_loop`` package, never packaged (setuptools only includes ``toaster_loop*``),
 never wired into the CLI, worker, or dashboard. The deliverable of each spike
 is its findings doc under ``docs/`` plus the measurements reproducible from
 here. Heavy dependencies (torch) stay lazily imported inside functions,

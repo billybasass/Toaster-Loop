@@ -1,6 +1,6 @@
-# ARCHITECTURE — sable
+# ARCHITECTURE — toaster-loop
 
-**sable** is a local, self-improving agent system: a built-in agent runtime runs
+**toaster-loop** is a local, self-improving agent system: a built-in agent runtime runs
 against locally served models; its task traces flow into an experience buffer; a curater
 turns high-value traces into SFT/DPO datasets; LoRA fine-tuning (transformers + peft +
 TRL) trains on that data; the new weights are exported to GGUF and hot-swapped back into
@@ -8,7 +8,7 @@ the agent runtime. Everything runs on one Linux machine (Omarchy/Hyprland), no c
 zero API keys.
 
 > **Status note.** This document describes the system as it exists today. Everything is
-> built into sable: no external agent framework, trainer library, or model-hub SDK is
+> built into toaster-loop: no external agent framework, trainer library, or model-hub SDK is
 > imported at runtime. Where prior art existed, designs were adapted in spirit and
 > re-implemented (see [`DECISIONS.md`](DECISIONS.md) D-12); the import allowlist is
 > enforced by `tests/test_hygiene.py`.
@@ -17,8 +17,8 @@ zero API keys.
 
 ```mermaid
 flowchart TB
-    subgraph sable [sable - one Python package]
-        CLI[CLI<br/>sable/cli.py]
+    subgraph toaster-loop [toaster-loop - one Python package]
+        CLI[CLI<br/>toaster-loop/cli.py]
         RUN[Agent runtime<br/>core/agent_runner.py + core/tools.py]
         BUF[Experience Buffer<br/>SQLite index + JSONL traces, store/]
         CUR[Dataset Curater<br/>curate/ scoring, dedup, ShareGPT + DPO pairs]
@@ -34,7 +34,7 @@ flowchart TB
     subgraph external [External processes - process boundary only]
         LLAMA[llama-server GGUF<br/>OpenAI-compatible /v1 - MIT]
         USTUDIO[external OpenAI-compatible server<br/>optional attach target, HTTP only]
-        TRAINW[Training Worker subprocess<br/>python -m sable.training.worker<br/>torch/transformers/peft/trl]
+        TRAINW[Training Worker subprocess<br/>python -m toaster_loop.training.worker<br/>torch/transformers/peft/trl]
     end
 
     CLI --> RUN & BUF & CUR & TSCHED & REG & SRV & DASH
@@ -72,7 +72,7 @@ flowchart TB
    disk behind stubs (`core/spill.py`).
 2. **Record.** Every run is captured post-completion at one canonical point into the
    experience buffer: append-only JSONL (header/messages/footer, `buffer/YYYY/MM/`) plus a
-   SQLite index row (`buffer/sable.db`, WAL), with model alias, endpoint label, token
+   SQLite index row (`buffer/toaster_loop.db`, WAL), with model alias, endpoint label, token
    counts, duration, heuristic outcome score, and profile/project tags. Secrets are
    redacted before the durable copy (`core/redact.py`). Recording is best-effort: a trace
    failure can never break a conversation.
@@ -84,7 +84,7 @@ flowchart TB
    borderline traces; external datasets import via `curate/importer.py`; the ingestion
    quality gate (`curate/ingest_gate.py`) flags duplicates/conflicts.
 4. **Train.** The scheduler (`training/scheduler.py`) is a FIFO single-GPU arbiter: it
-   resource-gates (free VRAM, disk), spawns `python -m sable.training.worker` per job
+   resource-gates (free VRAM, disk), spawns `python -m toaster_loop.training.worker` per job
    (SFT via transformers `SFTTrainer` + peft LoRA; DPO and GRPO via TRL), tails the worker
    log, reaps crashed workers, and supports cancel (SIGTERM), resume-from-checkpoint, and
    job dependencies. `training/easy.py` layers a one-profile turnkey preset on top.
@@ -100,8 +100,8 @@ flowchart TB
 6. **Swap.** The golden-task validation gate (substring checks + tool-call grammar
    checks, `training/validate.py`) replays before promotion; passing candidates are
    promoted (previous superseded), failures keep the previous model live, and
-   `sable models rollback` reverts one step anytime. Serving stops/starts the
-   sable-owned llama-server on the new GGUF (`serving/deploy.py`); post-train shadow
+   `toaster-loop models rollback` reverts one step anytime. Serving stops/starts the
+   toaster-loop-owned llama-server on the new GGUF (`serving/deploy.py`); post-train shadow
    comparison (`evaluation/shadow.py`) and cross-profile transfer probes
    (`evaluation/evolve.py`-adjacent) watch for regressions warn-only.
 
@@ -109,8 +109,8 @@ flowchart TB
 
 | Process | Contents | Lifetime |
 |---|---|---|
-| **sable CLI / dashboard** (Python) | runner, buffer, curater, scheduler, registry, serving supervisor; the dashboard runs long actions on daemon threads. The opt-in engine watchdog (`serving/watchdog.py`, `serve.watchdog_enabled`) adds one daemon loop: samples `/proc/<pid>/stat` + `/proc/<pid>/io` of managed llama-server children, flags a freeze only when a request is in flight with zero CPU-time AND zero IO growth over the window, re-verifies pid ownership before SIGTERM/SIGKILL, and restarts with exponential backoff under a per-window cap (`serve.watchdog` events on the bus). Off by default; non-Linux: never kills. The opt-in coexistence engine (WP5, `serving/coexist.py`) adds a second loop when `serve.idle_unload_seconds > 0`: gracefully unloads instances idle past the window (never mid-request; owned-stop paths only) and records `unloaded` state; `serve.lazy_load: true` reloads transparently on the next request, and with `serve.min_free_vram_mib > 0` the scheduler's VRAM gate consults it for the train+serve handshake (`serve.coexist` events). All keys off by default — no loop, no behavior change | per invocation; dashboard long-running |
-| **llama-server** (per instance) | GGUF inference, OpenAI-compatible `/v1` on `127.0.0.1:<port>`; N named instances concurrently (Phase 6), optional tier-aware routing (`serving/router.py`) | supervised; only processes sable spawned are ever terminated (watchdog kills and WP5 idle-unloads go through the same ownership-verified paths); WP5 may stop an idle instance to free VRAM for training and re-spawn it on demand or on explicit `sable instances load <id>` |
+| **toaster-loop CLI / dashboard** (Python) | runner, buffer, curater, scheduler, registry, serving supervisor; the dashboard runs long actions on daemon threads. The opt-in engine watchdog (`serving/watchdog.py`, `serve.watchdog_enabled`) adds one daemon loop: samples `/proc/<pid>/stat` + `/proc/<pid>/io` of managed llama-server children, flags a freeze only when a request is in flight with zero CPU-time AND zero IO growth over the window, re-verifies pid ownership before SIGTERM/SIGKILL, and restarts with exponential backoff under a per-window cap (`serve.watchdog` events on the bus). Off by default; non-Linux: never kills. The opt-in coexistence engine (WP5, `serving/coexist.py`) adds a second loop when `serve.idle_unload_seconds > 0`: gracefully unloads instances idle past the window (never mid-request; owned-stop paths only) and records `unloaded` state; `serve.lazy_load: true` reloads transparently on the next request, and with `serve.min_free_vram_mib > 0` the scheduler's VRAM gate consults it for the train+serve handshake (`serve.coexist` events). All keys off by default — no loop, no behavior change | per invocation; dashboard long-running |
+| **llama-server** (per instance) | GGUF inference, OpenAI-compatible `/v1` on `127.0.0.1:<port>`; N named instances concurrently (Phase 6), optional tier-aware routing (`serving/router.py`) | supervised; only processes toaster-loop spawned are ever terminated (watchdog kills and WP5 idle-unloads go through the same ownership-verified paths); WP5 may stop an idle instance to free VRAM for training and re-spawn it on demand or on explicit `toaster-loop instances load <id>` |
 | **training-worker** (Python subprocess) | torch/transformers/peft/trl; SFT/DPO/GRPO; merge + GGUF export; writes adapter + loss metrics. Backend selection (`training.backend`): `peft` (default, established path) or `streamed` (layer-streaming LoRA trainer + inline GGUF-LoRA writer, torch-free converter) | spawned per training job by scheduler |
 | **embedding llama-server** | `llama-server --embedding` for codebase indexing (`core/indexer.py`) | spawned/stopped on demand by the indexer |
 | **external OpenAI-compatible server** *(optional)* | attach target only, over HTTP `/v1` — never probed automatically, never depended on | user-managed |
@@ -119,18 +119,18 @@ Key rules:
 - **One GPU arbiter** (the scheduler): training dispatches only when the resource gate
   passes; multi-GPU runs parallelize by pinning workers to device ids.
 - Everything binds to loopback only. The only network uses are explicit Hugging Face
-  downloads (`sable hub`, training base models) and explicitly granted `web_fetch`.
+  downloads (`toaster-loop hub`, training base models) and explicitly granted `web_fetch`.
 
 ## 4. Storage layout
 
-Root = `SABLE_HOME` env > config `home:` > `~/.sable` (config file:
-`--config`/`SABLE_CONFIG`, else `<home>/sable.yaml` — the file the dashboard writes):
+Root = `TOASTER_LOOP_HOME` env > config `home:` > `~/.toaster-loop` (config file:
+`--config`/`TOASTER_LOOP_CONFIG`, else `<home>/toaster_loop.yaml` — the file the dashboard writes):
 
 ```
-~/.sable/
-  sable.yaml              # config (dashboard Settings writes here)
+~/.toaster-loop/
+  toaster_loop.yaml              # config (dashboard Settings writes here)
   buffer/
-    sable.db              # SQLite: traces + feedback + registry + jobs (WAL)
+    toaster_loop.db              # SQLite: traces + feedback + registry + jobs (WAL)
     YYYY/MM/<trace_id>.jsonl# append-only trace (header/message*/footer, schema v1)
   datasets/<dataset_id>/    # sft.jsonl dpo.jsonl manifest.json train.yaml
   analytics/                # WP9 append-only JSONL: curation_funnels.jsonl,
@@ -150,7 +150,7 @@ Root = `SABLE_HOME` env > config `home:` > `~/.sable` (config file:
   serving/instances/<id>.json + serving/state/<id>.json  # Phase 6 instances
   serve_state.json          # reserved "default" instance state
   janitor_state.json        # disk-janitor runs
-  llama.cpp/                # managed llama.cpp build (sable setup)
+  llama.cpp/                # managed llama.cpp build (toaster-loop setup)
 ```
 
 ## 5. Tech choices (as built)
@@ -161,13 +161,13 @@ Root = `SABLE_HOME` env > config `home:` > `~/.sable` (config file:
 - **Agent runtime**: built in (`core/agent_runner.py`) — no external agent framework.
   No external agent framework is used or vendored.
 - **Serving**: llama.cpp `llama-server` for GGUF, auto-built per-GPU by
-  `sable setup` (CUDA/ROCm/Metal/Vulkan/CPU), supervised with health checks and
+  `toaster-loop setup` (CUDA/ROCm/Metal/Vulkan/CPU), supervised with health checks and
   dynamic ports; any other OpenAI-compatible server is an optional explicit attach target.
 - **Training**: LoRA via transformers `SFTTrainer` + peft; DPO/GRPO via TRL; GGUF export
   via llama.cpp subprocesses. No trainer library is imported — training runs on the
   open ML stack directly (enforced by the import-allowlist hygiene test).
 - **Buffer/registry**: single-writer SQLite + JSONL append-only traces; no server-grade
-  infra. Deleting `~/.sable` fully resets sable.
+  infra. Deleting `~/.toaster-loop` fully resets toaster_loop.
 - **UI (shipped)**: loopback-only stdlib `ThreadingHTTPServer` + transport-agnostic
   `DashboardApp` JSON API + zero-build vanilla-JS SPA, live updates over one SSE channel;
   no external assets, optional token auth. See
@@ -181,9 +181,9 @@ Root = `SABLE_HOME` env > config `home:` > `~/.sable` (config file:
   tested).
 - Training crash → job reaped to `error`, adapter kept, serving untouched; cancel
   SIGTERMs the worker.
-- sable only ever terminates processes it spawned (pid-ownership verified via state
+- toaster-loop only ever terminates processes it spawned (pid-ownership verified via state
   files); foreign llama-servers and attach targets are never killed.
 - Destructive lifecycle is archive-don't-delete (`models archive/restore`, janitor);
   pinned models bypass all automation; disk pruning touches an explicit allow-list only.
-- All state under `~/.sable/`; deleting it fully resets sable without touching
+- All state under `~/.toaster-loop/`; deleting it fully resets toaster-loop without touching
   anything else on the machine.

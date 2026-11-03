@@ -24,30 +24,30 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sable.core.config import SableConfig  # noqa: E402
-from sable.dashboard.app import DashboardApp  # noqa: E402
-from sable.store.db import TraceRow, TraceStore  # noqa: E402
-from sable.store.recorder import TraceRecorder  # noqa: E402
-from sable.training.easy import EasyTrainingConfig, evaluate_readiness, load_state, optimal_config_patches, save_state, validate_profile  # noqa: E402
-from sable.training.scheduler import should_auto_train  # noqa: E402
+from toaster_loop.core.config import ToasterLoopConfig  # noqa: E402
+from toaster_loop.dashboard.app import DashboardApp  # noqa: E402
+from toaster_loop.store.db import TraceRow, TraceStore  # noqa: E402
+from toaster_loop.store.recorder import TraceRecorder  # noqa: E402
+from toaster_loop.training.easy import EasyTrainingConfig, evaluate_readiness, load_state, optimal_config_patches, save_state, validate_profile  # noqa: E402
+from toaster_loop.training.scheduler import should_auto_train  # noqa: E402
 from fake_server import FakeOpenAIServer, make_message_handler  # noqa: E402
-from sable.core.config import RFTConfig, load_config  # noqa: E402
-from sable.registry import ModelRegistry  # noqa: E402
-from sable.training.rejection import RftError, context_prefix, make_rft_job_runner, make_sampler, prompt_key, run_rft, verify_judged  # noqa: E402
-from sable.training.scheduler import JobDispatcher, Scheduler, TrainingConfig  # noqa: E402
-from sable.training.worker import grpo_rows_from_dataset, main as worker_main, reward_format, reward_length, reward_solution_overlap  # noqa: E402
+from toaster_loop.core.config import RFTConfig, load_config  # noqa: E402
+from toaster_loop.registry import ModelRegistry  # noqa: E402
+from toaster_loop.training.rejection import RftError, context_prefix, make_rft_job_runner, make_sampler, prompt_key, run_rft, verify_judged  # noqa: E402
+from toaster_loop.training.scheduler import JobDispatcher, Scheduler, TrainingConfig  # noqa: E402
+from toaster_loop.training.worker import grpo_rows_from_dataset, main as worker_main, reward_format, reward_length, reward_solution_overlap  # noqa: E402
 from fake_server import FakeOpenAIServer  # noqa: E402
-import sable.cli as cli  # noqa: E402
-from sable.core.agent_runner import SableAgentClient  # noqa: E402
-from sable.core.config import load_config  # noqa: E402
-from sable.store import TraceRecorder, TraceStore, heuristic_score  # noqa: E402
-from sable.store.db import SCHEMA_VERSION  # noqa: E402
-from sable.store.paths import resolve_sable_home  # noqa: E402
-from sable.core.vram import ModelDims, estimate_from_train_yaml, resolve_load_in_4bit  # noqa: E402
-from sable.training.worker import adapter_is_full_finetune, muon_optimizer_factory  # noqa: E402
-from sable.training.streamed import chunked_ce  # noqa: E402
-from sable.training.streamed.streaming import LayerStreamer, Loader  # noqa: E402
-from sable.core.compression import SUMMARY_PREFIX, _PRUNE_MIN_CHARS, compress_messages, estimate_tokens, prune_old_tool_results, summary_from_messages  # noqa: E402
+import toaster_loop.cli as cli  # noqa: E402
+from toaster_loop.core.agent_runner import ToasterLoopAgentClient  # noqa: E402
+from toaster_loop.core.config import load_config  # noqa: E402
+from toaster_loop.store import TraceRecorder, TraceStore, heuristic_score  # noqa: E402
+from toaster_loop.store.db import SCHEMA_VERSION  # noqa: E402
+from toaster_loop.store.paths import resolve_toaster_loop_home  # noqa: E402
+from toaster_loop.core.vram import ModelDims, estimate_from_train_yaml, resolve_load_in_4bit  # noqa: E402
+from toaster_loop.training.worker import adapter_is_full_finetune, muon_optimizer_factory  # noqa: E402
+from toaster_loop.training.streamed import chunked_ce  # noqa: E402
+from toaster_loop.training.streamed.streaming import LayerStreamer, Loader  # noqa: E402
+from toaster_loop.core.compression import SUMMARY_PREFIX, _PRUNE_MIN_CHARS, compress_messages, estimate_tokens, prune_old_tool_results, summary_from_messages  # noqa: E402
 
 # ------------------------------------------------------------------------
 # from tests/test_easy.py
@@ -56,13 +56,13 @@ from sable.core.compression import SUMMARY_PREFIX, _PRUNE_MIN_CHARS, compress_me
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "uf-easy"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 @pytest.fixture()
 def app(home):
-    a = DashboardApp(SableConfig(), home=home)
+    a = DashboardApp(ToasterLoopConfig(), home=home)
     yield a
 
 
@@ -93,7 +93,7 @@ def seed_trace(store, tid, score=0.9, profile="fallback"):
 # ------------------------------------------------------------ scoped check
 
 def test_should_auto_train_scopes_to_profile(home):
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     for i in range(3):
         seed_trace(store, f"a{i}", score=0.9, profile="coder")
     seed_trace(store, "b0", score=0.1, profile="other")
@@ -109,19 +109,19 @@ def test_should_auto_train_scopes_to_profile(home):
 
 
 def test_recorder_stamps_profile(home):
-    rec = TraceRecorder(SableConfig(), home=home, profile="coder")
+    rec = TraceRecorder(ToasterLoopConfig(), home=home, profile="coder")
     row = rec.record(task="t", messages=[{"role": "user", "content": "hi"},
                                          {"role": "assistant",
                                           "content": "yo"}],
-                     backend="sable", model_alias="m", base_url="",
+                     backend="toaster_loop", model_alias="m", base_url="",
                      completed=True)
     assert row is not None and row.agent_profile == "coder"
     rec.close()
     # Without the profile kwarg the legacy backend name is kept.
-    rec2 = TraceRecorder(SableConfig(), home=home)
-    row2 = rec2.record(task="t", messages=[], backend="sable",
+    rec2 = TraceRecorder(ToasterLoopConfig(), home=home)
+    row2 = rec2.record(task="t", messages=[], backend="toaster_loop",
                        model_alias="m", base_url="", completed=True)
-    assert row2 is not None and row2.agent_profile == "sable"
+    assert row2 is not None and row2.agent_profile == "toaster_loop"
     rec2.close()
 
 
@@ -166,7 +166,7 @@ def test_state_roundtrip(home):
 
 
 def test_evaluate_readiness_shape(home):
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     for i in range(2):
         seed_trace(store, f"a{i}", score=0.9, profile="coder")
     ec = EasyTrainingConfig(enabled=True, profile="coder", min_traces=5)
@@ -249,7 +249,7 @@ def test_easy_run_scopes_curation_and_names_run(app, home, monkeypatch):
     _put_profile(app, "coder", server="srv-1")
     app.handle("POST", "/api/easy/enable", body={"profile": "coder"})
     # Make readiness pass cheaply: threshold 1 trace.
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     seed_trace(store, "a0", score=0.9, profile="coder")
     store.close()
     r = app.handle("PUT", "/api/config", body={
@@ -321,21 +321,21 @@ def test_from_yaml_numeric_strings_still_parse():
 # ------------------------------------------------------- golden-mining pass
 
 def test_mine_goldens_pass_skips_when_disabled(home):
-    from sable.core.config import SableConfig
-    from sable.training.easy import mine_goldens_pass
+    from toaster_loop.core.config import ToasterLoopConfig
+    from toaster_loop.training.easy import mine_goldens_pass
 
-    rep = mine_goldens_pass(SableConfig(), home)  # goldens_mine: {} => off
+    rep = mine_goldens_pass(ToasterLoopConfig(), home)  # goldens_mine: {} => off
     assert rep["ok"] is False and "false" in rep["skipped"]
     # Nothing was created by a skipped pass.
     assert not (home / "goldens" / "mined.jsonl").exists()
 
 
 def test_mine_goldens_pass_runs_and_never_raises(home):
-    from sable.core.config import SableConfig
-    from sable.training.easy import mine_goldens_pass
+    from toaster_loop.core.config import ToasterLoopConfig
+    from toaster_loop.training.easy import mine_goldens_pass
 
-    cfg = SableConfig(goldens_mine={"enabled": True})
-    store = TraceStore(home / "buffer" / "sable.db")
+    cfg = ToasterLoopConfig(goldens_mine={"enabled": True})
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     seed_trace(store, "g0", score=0.9, profile="coder")
     store.add_feedback("g0", 1.0, "nice", source="user", timestamp="")
     store.close()
@@ -348,10 +348,10 @@ def test_mine_goldens_pass_runs_and_never_raises(home):
 
 def test_mine_goldens_pass_broken_store_degrades(home):
     """A garbage goldens_mine section or unreadable store must not raise."""
-    from sable.core.config import SableConfig
-    from sable.training.easy import mine_goldens_pass
+    from toaster_loop.core.config import ToasterLoopConfig
+    from toaster_loop.training.easy import mine_goldens_pass
 
-    cfg = SableConfig(goldens_mine={"enabled": True, "max_per_run": "oops"})
+    cfg = ToasterLoopConfig(goldens_mine={"enabled": True, "max_per_run": "oops"})
     rep = mine_goldens_pass(cfg, home)  # no buffer DB at all
     assert rep["ok"] is False and "skipped" in rep
 
@@ -359,14 +359,14 @@ def test_mine_goldens_pass_broken_store_degrades(home):
 def test_easy_run_fires_mining_pass(app, home, monkeypatch):
     _put_profile(app, "coder", server="srv-1")
     app.handle("POST", "/api/easy/enable", body={"profile": "coder"})
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     seed_trace(store, "a0", score=0.9, profile="coder")
     store.close()
     app.handle("PUT", "/api/config", body={
         "section": "easy_training", "patch": {"min_traces": 1}})
 
     calls = []
-    import sable.dashboard.api.easy as easy_mod
+    import toaster_loop.dashboard.api.easy as easy_mod
 
     def fake_pass(cfg, home_):
         calls.append(home_)
@@ -388,7 +388,7 @@ def test_easy_run_fires_mining_pass(app, home, monkeypatch):
 # ---------------------------------------------------------- loop lock
 
 def test_loop_lock_excludes_second_holder(home):
-    from sable.training.easy import (acquire_loop_lock, release_loop_lock)
+    from toaster_loop.training.easy import (acquire_loop_lock, release_loop_lock)
 
     h1 = acquire_loop_lock(home)
     assert h1 is not None
@@ -401,7 +401,7 @@ def test_loop_lock_excludes_second_holder(home):
 
 
 def test_submit_iterate_rejects_when_loop_busy(app, home):
-    from sable.training.easy import acquire_loop_lock, release_loop_lock
+    from toaster_loop.training.easy import acquire_loop_lock, release_loop_lock
 
     handle = acquire_loop_lock(home)
     try:
@@ -451,7 +451,7 @@ def test_easy_enable_rolls_back_on_partial_failure(app, monkeypatch):
     def flaky(method, path, query=None, body=None):
         if path == "/api/config" and body and body.get("section") == "training":
             calls["n"] += 1
-            from sable.dashboard.app import ApiResponse
+            from toaster_loop.dashboard.app import ApiResponse
             return ApiResponse(500, {"error": {"message": "boom",
                                                "code": "internal_error"}})
         return real_handle(method, path, query=query, body=body)
@@ -472,8 +472,8 @@ def test_easy_enable_rolls_back_on_partial_failure(app, monkeypatch):
 def _deploy_setup(app, monkeypatch, start_status=200):
     """Fake registry/instances so _easy_deploy reaches the restart step."""
     from types import SimpleNamespace
-    import sable.dashboard.app as appmod
-    from sable.dashboard.app import ApiResponse
+    import toaster_loop.dashboard.app as appmod
+    from toaster_loop.dashboard.app import ApiResponse
 
     saved = {}
     monkeypatch.setattr(app, "_registry", lambda: SimpleNamespace(
@@ -519,10 +519,10 @@ def test_easy_get_reports_stale_stamps(app, home):
     """Unclaimed traces under a vanished profile name surface as a nudge."""
     _put_profile(app, "coder", server="srv-1")
     app.handle("POST", "/api/easy/enable", body={"profile": "coder"})
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     seed_trace(store, "a0", score=0.9, profile="coder")
     seed_trace(store, "b0", score=0.9, profile="renamed-away")
-    seed_trace(store, "b1", score=0.9, profile="sable")  # legacy: never stale
+    seed_trace(store, "b1", score=0.9, profile="toaster_loop")  # legacy: never stale
     store.close()
     g = app.handle("GET", "/api/easy").body
     stamps = {s["profile"]: s["traces"] for s in g["stale_stamps"]}
@@ -666,7 +666,7 @@ def test_easy_run_targets_selected_agent(app, home, monkeypatch):
     _put_profile(app, "writer", server="srv-2")
     app.handle("POST", "/api/easy/enable",
                body={"profile": "coder", "profiles": ["writer"]})
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     seed_trace(store, "w0", score=0.9, profile="writer")
     store.close()
     app.handle("PUT", "/api/config", body={
@@ -694,7 +694,7 @@ def test_easy_run_defaults_to_primary(app, home, monkeypatch):
     _put_profile(app, "writer", server="srv-2")
     app.handle("POST", "/api/easy/enable",
                body={"profile": "coder", "profiles": ["writer"]})
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     seed_trace(store, "c0", score=0.9, profile="coder")
     store.close()
     app.handle("PUT", "/api/config", body={
@@ -723,7 +723,7 @@ def test_easy_get_per_agent_readiness(app, home):
     _put_profile(app, "writer", server="srv-2")
     app.handle("POST", "/api/easy/enable",
                body={"profile": "coder", "profiles": ["writer"]})
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     for i in range(3):
         seed_trace(store, f"w{i}", score=0.9, profile="writer")
     store.close()
@@ -738,10 +738,10 @@ def test_easy_auto_check_multi_trains_each_due_agent(tmp_path, monkeypatch,
                                                      capsys):
     """Cron path with two agents: one due, one not => exactly one iterate run,
     scoped to the due profile."""
-    import sable.cli as cli
+    import toaster_loop.cli as cli
 
     home = tmp_path / "uf-easy-cli"
-    monkeypatch.setenv("SABLE_HOME", str(home))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
     cfg_text = (
         "easy_training:\n"
         "  enabled: true\n"
@@ -750,11 +750,11 @@ def test_easy_auto_check_multi_trains_each_due_agent(tmp_path, monkeypatch,
         "  min_traces: 1\n"
         "training:\n"
         "  auto_min_score: 0.5\n")
-    cfg_path = tmp_path / "sable.yaml"
+    cfg_path = tmp_path / "toaster_loop.yaml"
     cfg_path.write_text(cfg_text)
-    monkeypatch.setenv("SABLE_CONFIG", str(cfg_path))
+    monkeypatch.setenv("TOASTER_LOOP_CONFIG", str(cfg_path))
 
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     seed_trace(store, "w0", score=0.9, profile="writer")
     store.close()
 
@@ -784,13 +784,13 @@ def _ns(**kw):
 @pytest.fixture()
 def home__test_rejection(tmp_path, monkeypatch):
     h = tmp_path / "ufrft"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 @pytest.fixture()
 def store(home__test_rejection):
-    st = TraceStore(home__test_rejection / "buffer" / "sable.db")
+    st = TraceStore(home__test_rejection / "buffer" / "toaster_loop.db")
     yield st
     st.close()
 
@@ -1060,7 +1060,7 @@ def test_rft_job_flows_through_dispatcher(home__test_rejection, monkeypatch):
     handler = make_message_handler({
         "capital": {"role": "assistant", "content": "It is Paris."},
     })
-    reg = ModelRegistry(home__test_rejection / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_rejection / "buffer" / "toaster_loop.db")
     try:
         with FakeOpenAIServer(handler_cls=handler) as srv:
             runner = make_rft_job_runner(
@@ -1068,7 +1068,7 @@ def test_rft_job_flows_through_dispatcher(home__test_rejection, monkeypatch):
                 endpoint_for=lambda: _ctx((srv.base_url, "fake-model")))
             tc = TrainingConfig()
             factory = lambda: Scheduler(registry=ModelRegistry(
-                home__test_rejection / "buffer" / "sable.db"), cfg=tc,
+                home__test_rejection / "buffer" / "toaster_loop.db"), cfg=tc,
                 inprocess_runners={"rft": runner})
             sched = factory()
             job = sched.submit("rft", log_dir=home__test_rejection / "train_runs",
@@ -1118,7 +1118,7 @@ class _ctx:
 
 
 def test_runner_refuses_when_master_switch_off(home__test_rejection):
-    reg = ModelRegistry(home__test_rejection / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_rejection / "buffer" / "toaster_loop.db")
     try:
         runner = make_rft_job_runner(
             reg, home=home__test_rejection, defaults=RFTConfig(),  # enabled=False default
@@ -1209,7 +1209,7 @@ def test_dpo_pairs_emitted_from_failed_candidates(home__test_rejection, store):
 
     # Consumable by the pipeline's DPO loader (worker dry-run: schema check,
     # no torch needed).
-    from sable.training.worker import run_dpo
+    from toaster_loop.training.worker import run_dpo
     out = run_dpo({"_dataset_dir": str(res.dataset_dir)}, None, True)
     assert out["dry_run"] is True and out["rows"] == 3
 
@@ -1339,12 +1339,12 @@ def test_cli_rft_subcommand_parses_and_refuses_when_disabled(tmp_path,
                                                              monkeypatch):
     import argparse
 
-    from sable.cli import build_parser, cmd_rft
+    from toaster_loop.cli import build_parser, cmd_rft
 
     args = build_parser().parse_args(["rft", "--k", "8", "--seeds", "hi"])
     assert args.command == "rft" and args.k == 8 and args.seeds == ["hi"]
 
-    monkeypatch.setenv("SABLE_HOME", str(tmp_path / "h"))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(tmp_path / "h"))
     c = tmp_path / "c.yaml"
     c.write_text("rft:\n  enabled: false\n")
     ns = argparse.Namespace(config=str(c), verbose=False, seeds=None,
@@ -1460,7 +1460,7 @@ def test_worker_grpo_dry_run(tmp_path):
 
 
 def test_registry_accepts_grpo_kind(tmp_path):
-    from sable.registry import ModelRegistry
+    from toaster_loop.registry import ModelRegistry
 
     reg = ModelRegistry(tmp_path / "r.db")
     try:
@@ -1471,7 +1471,7 @@ def test_registry_accepts_grpo_kind(tmp_path):
 
 
 def test_registry_set_job_param_merges(tmp_path):
-    from sable.registry import ModelRegistry
+    from toaster_loop.registry import ModelRegistry
 
     reg = ModelRegistry(tmp_path / "r.db")
     try:
@@ -1488,15 +1488,15 @@ def test_registry_set_job_param_merges(tmp_path):
 # ------------------------------------------------------------------------
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
-    from sable.core.config import SableConfig
+    from toaster_loop.core.config import ToasterLoopConfig
 
 
 @pytest.fixture()
-def sable_home(tmp_path, monkeypatch):
+def toaster_loop_home(tmp_path, monkeypatch):
     """Redirect the state root into a tmp dir for every test in this module."""
     home = tmp_path / "uf-home"
-    monkeypatch.setenv("SABLE_HOME", str(home))
-    monkeypatch.delenv("SABLE_CONFIG", raising=False)
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
+    monkeypatch.delenv("TOASTER_LOOP_CONFIG", raising=False)
     return home
 
 
@@ -1509,39 +1509,39 @@ def fake_server():
 # ------------------------------------------------------------------ paths/config
 
 def test_home_resolution_precedence(tmp_path, monkeypatch):
-    monkeypatch.delenv("SABLE_HOME", raising=False)
+    monkeypatch.delenv("TOASTER_LOOP_HOME", raising=False)
 
     class Cfg:
         home = str(tmp_path / "from-config")
 
-    cfg = cast("SableConfig", Cfg())
-    assert resolve_sable_home(cfg) == tmp_path / "from-config"
-    monkeypatch.setenv("SABLE_HOME", str(tmp_path / "from-env"))
-    assert resolve_sable_home(cfg) == tmp_path / "from-env"  # env wins
-    assert resolve_sable_home(None) == tmp_path / "from-env"
+    cfg = cast("ToasterLoopConfig", Cfg())
+    assert resolve_toaster_loop_home(cfg) == tmp_path / "from-config"
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(tmp_path / "from-env"))
+    assert resolve_toaster_loop_home(cfg) == tmp_path / "from-env"  # env wins
+    assert resolve_toaster_loop_home(None) == tmp_path / "from-env"
 
 
 def test_config_recording_yaml_and_env(tmp_path, monkeypatch):
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text("recording:\n  enabled: false\n")
-    monkeypatch.delenv("SABLE_RECORDING", raising=False)
+    monkeypatch.delenv("TOASTER_LOOP_RECORDING", raising=False)
     assert load_config(str(cfg_file)).recording_enabled is False
 
-    monkeypatch.setenv("SABLE_RECORDING", "true")  # env wins over file
+    monkeypatch.setenv("TOASTER_LOOP_RECORDING", "true")  # env wins over file
     assert load_config(str(cfg_file)).recording_enabled is True
 
     cfg_file2 = tmp_path / "cfg2.yaml"
     cfg_file2.write_text("home: ~/somewhere\n")
-    monkeypatch.delenv("SABLE_HOME", raising=False)  # exercise the file value
+    monkeypatch.delenv("TOASTER_LOOP_HOME", raising=False)  # exercise the file value
     assert load_config(str(cfg_file2)).home == "~/somewhere"
 
 
 # -------------------------------------------------------------------- recorder
 
-def test_fallback_run_writes_jsonl_and_index(sable_home, fake_server):
-    """Full task via fallback client => JSONL trace + SQLite row under SABLE_HOME."""
-    rec = TraceRecorder(home=sable_home)
-    client = SableAgentClient(
+def test_fallback_run_writes_jsonl_and_index(toaster_loop_home, fake_server):
+    """Full task via fallback client => JSONL trace + SQLite row under TOASTER_LOOP_HOME."""
+    rec = TraceRecorder(home=toaster_loop_home)
+    client = ToasterLoopAgentClient(
         base_url=fake_server.base_url, model="fake-model", recorder=rec
     )
     result = client.run("read the fake server source")
@@ -1549,7 +1549,7 @@ def test_fallback_run_writes_jsonl_and_index(sable_home, fake_server):
     assert result.trace_id, "run must return the buffer trace id"
 
     # JSONL under buffer/YYYY/MM/<trace_id>.jsonl
-    matches = list((sable_home / "buffer").rglob(f"{result.trace_id}.jsonl"))
+    matches = list((toaster_loop_home / "buffer").rglob(f"{result.trace_id}.jsonl"))
     assert len(matches) == 1
     lines = [json.loads(l) for l in matches[0].read_text().splitlines()]
     kinds = [l["kind"] for l in lines]
@@ -1568,7 +1568,7 @@ def test_fallback_run_writes_jsonl_and_index(sable_home, fake_server):
     assert footer["num_tool_calls"] == 1
 
     # SQLite index row
-    store = TraceStore(sable_home / "buffer" / "sable.db")
+    store = TraceStore(toaster_loop_home / "buffer" / "toaster_loop.db")
     try:
         row = store.get_trace(result.trace_id)
         assert row is not None
@@ -1583,10 +1583,10 @@ def test_fallback_run_writes_jsonl_and_index(sable_home, fake_server):
         store.close()
 
 
-def test_recording_failure_does_not_break_run(sable_home, fake_server, monkeypatch):
+def test_recording_failure_does_not_break_run(toaster_loop_home, fake_server, monkeypatch):
     """ROADMAP acceptance: a trace write failure cannot break a conversation."""
-    rec = TraceRecorder(home=sable_home / "\0invalid")  # unrepresentable path
-    client = SableAgentClient(
+    rec = TraceRecorder(home=toaster_loop_home / "\0invalid")  # unrepresentable path
+    client = ToasterLoopAgentClient(
         base_url=fake_server.base_url, model="fake-model", recorder=rec
     )
     result = client.run("read the fake server source")
@@ -1595,21 +1595,21 @@ def test_recording_failure_does_not_break_run(sable_home, fake_server, monkeypat
     assert result.trace_id is None
 
 
-def test_recording_disabled_writes_nothing(sable_home, fake_server):
-    from sable.store.recorder import NullRecorder, make_recorder
+def test_recording_disabled_writes_nothing(toaster_loop_home, fake_server):
+    from toaster_loop.store.recorder import NullRecorder, make_recorder
 
     cfg = load_config(None)
     object.__setattr__(cfg, "recording_enabled", False)
     rec = make_recorder(cfg)
     assert isinstance(rec, NullRecorder)
 
-    client = SableAgentClient(
+    client = ToasterLoopAgentClient(
         base_url=fake_server.base_url, model="fake-model", recorder=rec
     )
     result = client.run("read the fake server source")
     assert result.completed is True
     assert result.trace_id is None
-    assert not (sable_home / "buffer").exists()
+    assert not (toaster_loop_home / "buffer").exists()
 
 
 # ---------------------------------------------------------------- v2 migration
@@ -1635,7 +1635,7 @@ VALUES ('old1','2026-01-01T00:00:00+00:00','success',0,'/dev/null');
     con.commit()
     con.close()
 
-    from sable.store.db import TraceRow as _TR
+    from toaster_loop.store.db import TraceRow as _TR
     store = TraceStore(db)
     try:
         old = store.get_trace("old1")           # tolerant read of v1 row
@@ -1669,7 +1669,7 @@ def test_insert_trace_duplicate_skipped_preserves_curation_state(tmp_path):
     """ON CONFLICT(trace_id) DO NOTHING: a colliding insert must never clobber
     load-bearing curation state (curated/dataset_id/outcome_score). Returns
     False on skip, True on insert."""
-    from sable.store.db import TraceRow as _TR
+    from toaster_loop.store.db import TraceRow as _TR
 
     def row(summary):
         return _TR(
@@ -1791,7 +1791,7 @@ def test_heuristic_score_rules():
 def _seed_row(store, tid, *, status="failure", score=None, failure_reason=None):
     from datetime import datetime, timedelta, timezone
 
-    from sable.store.db import TraceRow as _TR
+    from toaster_loop.store.db import TraceRow as _TR
     p = store.db_path.parent / f"{tid}.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("")
@@ -1810,9 +1810,9 @@ def _seed_row(store, tid, *, status="failure", score=None, failure_reason=None):
     ))
 
 
-def test_cancelled_run_recorded_score_neutral(sable_home):
+def test_cancelled_run_recorded_score_neutral(toaster_loop_home):
     """Recorder NULLs outcome_score for cancelled runs (HIGH #4)."""
-    rec = TraceRecorder(home=sable_home)
+    rec = TraceRecorder(home=toaster_loop_home)
     row = rec.record(task="t", messages=[{"role": "user", "content": "hi"}],
                      backend="b", model_alias="m", base_url="http://x",
                      completed=False, failure_reason="cancelled")
@@ -1827,7 +1827,7 @@ def test_cancelled_run_recorded_score_neutral(sable_home):
     rec.close()
 
     # composed runner form behaves identically
-    rec2 = TraceRecorder(home=sable_home)
+    rec2 = TraceRecorder(home=toaster_loop_home)
     row2 = rec2.record(task="t", messages=[], backend="b", model_alias="m",
                        base_url="http://x", completed=False,
                        failure_reason="backend_error:cancelled")
@@ -1835,9 +1835,9 @@ def test_cancelled_run_recorded_score_neutral(sable_home):
     rec2.close()
 
 
-def test_non_cancelled_scoring_unchanged(sable_home):
+def test_non_cancelled_scoring_unchanged(toaster_loop_home):
     """Non-cancelled runs keep the exact pre-fix heuristic scores."""
-    rec = TraceRecorder(home=sable_home)
+    rec = TraceRecorder(home=toaster_loop_home)
     done = rec.record(task="t", messages=[{"role": "user", "content": "hi"}],
                       backend="b", model_alias="m", base_url="http://x",
                       completed=True)
@@ -1899,9 +1899,9 @@ def test_stats_and_daily_means_exclude_cancelled(tmp_path):
 
 # ------------------------------------------------------------------- feedback CLI
 
-def _record_one(sable_home, fake_server) -> str:
-    rec = TraceRecorder(home=sable_home)
-    client = SableAgentClient(
+def _record_one(toaster_loop_home, fake_server) -> str:
+    rec = TraceRecorder(home=toaster_loop_home)
+    client = ToasterLoopAgentClient(
         base_url=fake_server.base_url, model="fake-model", recorder=rec
     )
     result = client.run("read the fake server source")
@@ -1909,11 +1909,11 @@ def _record_one(sable_home, fake_server) -> str:
     return result.trace_id
 
 
-def test_feedback_cli_by_id_and_last(sable_home, fake_server, capsys):
-    trace_id = _record_one(sable_home, fake_server)
+def test_feedback_cli_by_id_and_last(toaster_loop_home, fake_server, capsys):
+    trace_id = _record_one(toaster_loop_home, fake_server)
 
     assert cli.main(["feedback", trace_id, "--score", "0.8", "--note", "nice"]) == 0
-    store = TraceStore(sable_home / "buffer" / "sable.db")
+    store = TraceStore(toaster_loop_home / "buffer" / "toaster_loop.db")
     try:
         fb = store.get_feedback(trace_id)
         user_rows = [f for f in fb if f["source"] == "user"]
@@ -1929,7 +1929,7 @@ def test_feedback_cli_by_id_and_last(sable_home, fake_server, capsys):
 
     # --last targets most recent; --fail shorthand => -1
     assert cli.main(["feedback", "--last", "--fail"]) == 0
-    store = TraceStore(sable_home / "buffer" / "sable.db")
+    store = TraceStore(toaster_loop_home / "buffer" / "toaster_loop.db")
     try:
         row = store.get_trace(trace_id)
         assert row is not None
@@ -1942,7 +1942,7 @@ def test_feedback_cli_by_id_and_last(sable_home, fake_server, capsys):
 
     # --ok shorthand => +1
     assert cli.main(["feedback", "--last", "--ok"]) == 0
-    store = TraceStore(sable_home / "buffer" / "sable.db")
+    store = TraceStore(toaster_loop_home / "buffer" / "toaster_loop.db")
     try:
         row = store.get_trace(trace_id)
         assert row is not None
@@ -1951,8 +1951,8 @@ def test_feedback_cli_by_id_and_last(sable_home, fake_server, capsys):
         store.close()
 
 
-def test_feedback_cli_validation(sable_home, fake_server, capsys):
-    trace_id = _record_one(sable_home, fake_server)
+def test_feedback_cli_validation(toaster_loop_home, fake_server, capsys):
+    trace_id = _record_one(toaster_loop_home, fake_server)
     assert cli.main(["feedback", trace_id, "--score", "5"]) != 0   # out of range
     assert cli.main(["feedback", trace_id]) != 0                    # nothing to record
     assert cli.main(["feedback", "deadbeefcafe"]) != 0              # unknown id
@@ -1960,8 +1960,8 @@ def test_feedback_cli_validation(sable_home, fake_server, capsys):
 
 # ------------------------------------------------------------------- traces CLI
 
-def test_traces_list_show_stats(sable_home, fake_server, capsys):
-    trace_id = _record_one(sable_home, fake_server)
+def test_traces_list_show_stats(toaster_loop_home, fake_server, capsys):
+    trace_id = _record_one(toaster_loop_home, fake_server)
 
     assert cli.main(["traces", "list"]) == 0
     out = capsys.readouterr().out
@@ -1989,10 +1989,10 @@ def test_traces_list_show_stats(sable_home, fake_server, capsys):
 
 # ------------------------------------------------------- built-in capture path
 
-def test_builtin_capture_equivalent_jsonl(sable_home, fake_server):
+def test_builtin_capture_equivalent_jsonl(toaster_loop_home, fake_server):
     """Built-in runtime: post-run capture produces a complete trace."""
-    rec = TraceRecorder(home=sable_home)
-    runner = SableAgentClient(
+    rec = TraceRecorder(home=toaster_loop_home)
+    runner = ToasterLoopAgentClient(
         base_url=fake_server.base_url, model="fake-model", recorder=rec
     )
 
@@ -2000,7 +2000,7 @@ def test_builtin_capture_equivalent_jsonl(sable_home, fake_server):
     assert result.completed is True
     assert result.trace_id, "built-in runtime must record a trace"
 
-    matches = list((sable_home / "buffer").rglob(f"{result.trace_id}.jsonl"))
+    matches = list((toaster_loop_home / "buffer").rglob(f"{result.trace_id}.jsonl"))
     assert len(matches) == 1
     lines = [json.loads(l) for l in matches[0].read_text().splitlines()]
     kinds = [l["kind"] for l in lines]
@@ -2008,13 +2008,13 @@ def test_builtin_capture_equivalent_jsonl(sable_home, fake_server):
     # Equivalent capture: one JSONL message line per captured conversation message.
     assert kinds.count("message") == len(result.messages)
     header = lines[0]
-    assert header["agent_profile"] == "sable"
+    assert header["agent_profile"] == "toaster_loop"
 
-    store = TraceStore(sable_home / "buffer" / "sable.db")
+    store = TraceStore(toaster_loop_home / "buffer" / "toaster_loop.db")
     try:
         row = store.get_trace(result.trace_id)
         assert row is not None
-        assert row.agent_profile == "sable"
+        assert row.agent_profile == "toaster_loop"
         assert row.num_tool_calls >= 1  # fake server forces one tool call
     finally:
         store.close()
@@ -2024,7 +2024,7 @@ def test_stats_daily_respects_calendar_window(tmp_path):
     """stats_daily(days=N) must exclude days older than N real days ago."""
     from datetime import datetime, timedelta, timezone
 
-    from sable.store.db import TraceRow
+    from toaster_loop.store.db import TraceRow
 
     store = TraceStore(tmp_path / "idx.db")
     try:
@@ -2158,7 +2158,7 @@ def test_full_ft_marker_roundtrip(tmp_path):
 
 def test_dry_run_reports_training_type(tmp_path):
     """Dry-run must surface training_type (and reject bogus values)."""
-    from sable.training.worker import run_sft
+    from toaster_loop.training.worker import run_sft
 
     cfg = {"model": "X/Y",
            "data": {"local_dataset": [], "format_type": "sharegpt"},
@@ -2180,7 +2180,7 @@ def test_dry_run_reports_training_type(tmp_path):
 
 
 def test_dpo_grpo_reject_full(tmp_path):
-    from sable.training.worker import run_dpo, run_grpo
+    from toaster_loop.training.worker import run_dpo, run_grpo
 
     dpo_file = tmp_path / "dpo.jsonl"
     dpo_file.write_text(json.dumps(
@@ -2271,7 +2271,7 @@ def test_muon_factory_rejects_no_2d():
 
 # ------------------------------------------------------------- backend select
 def test_parse_backend_defaults_and_lenient_fallback():
-    from sable.training.streamed.runner import parse_backend
+    from toaster_loop.training.streamed.runner import parse_backend
 
     assert parse_backend(None) == "peft"          # absent => today's path
     assert parse_backend("") == "peft"
@@ -2289,7 +2289,7 @@ def test_parse_backend_defaults_and_lenient_fallback():
 
 
 def test_training_config_carries_backend():
-    from sable.training.scheduler import TrainingConfig
+    from toaster_loop.training.scheduler import TrainingConfig
 
     assert TrainingConfig().backend is None       # default: inject nothing
     tc = TrainingConfig.from_yaml({"training": {"backend": "streamed"}})
@@ -2297,7 +2297,7 @@ def test_training_config_carries_backend():
 
 
 def test_run_sft_routes_streamed_without_touching_peft_path(tmp_path, monkeypatch):
-    from sable.training import worker
+    from toaster_loop.training import worker
 
     calls = []
 
@@ -2314,7 +2314,7 @@ def test_run_sft_routes_streamed_without_touching_peft_path(tmp_path, monkeypatc
 
 
 def test_run_sft_default_never_calls_streamed(tmp_path, monkeypatch):
-    from sable.training import worker
+    from toaster_loop.training import worker
 
     def boom(*a, **k):  # pragma: no cover - must never run
         raise AssertionError("streamed backend invoked for default config")
@@ -2327,7 +2327,7 @@ def test_run_sft_default_never_calls_streamed(tmp_path, monkeypatch):
 
 
 def test_resolved_train_yaml_backend_plumbing(tmp_path):
-    from sable.training.pipeline import _resolved_train_yaml
+    from toaster_loop.training.pipeline import _resolved_train_yaml
 
     dataset = tmp_path / "ds"
     dataset.mkdir()
@@ -2349,7 +2349,7 @@ def test_resolved_train_yaml_backend_plumbing(tmp_path):
 
 
 def test_parse_worker_backend_lineage(tmp_path):
-    from sable.training.pipeline import parse_worker_backend
+    from toaster_loop.training.pipeline import parse_worker_backend
 
     log = tmp_path / "job.log"
     log.write_text(
@@ -2406,7 +2406,7 @@ def _trainable_strings(tok, enc):
 
 def test_mask_multi_turn_system_tool(tmp_path):
     pytest.importorskip("transformers")
-    from sable.training.streamed.masking import mask_conversation
+    from toaster_loop.training.streamed.masking import mask_conversation
 
     tok = _tiny_chat_tokenizer(tmp_path)
     msgs = [
@@ -2427,7 +2427,7 @@ def test_mask_multi_turn_system_tool(tmp_path):
 
 def test_mask_consecutive_assistant_turns(tmp_path):
     pytest.importorskip("transformers")
-    from sable.training.streamed.masking import mask_conversation
+    from toaster_loop.training.streamed.masking import mask_conversation
 
     tok = _tiny_chat_tokenizer(tmp_path)
     msgs = [
@@ -2451,7 +2451,7 @@ def test_mask_stricter_than_airllm(tmp_path):
     everything after earlier assistant turns (the follow-up user/tool spans)
     would be TRAINED. Ours must keep those spans masked."""
     pytest.importorskip("transformers")
-    from sable.training.streamed.masking import mask_conversation
+    from toaster_loop.training.streamed.masking import mask_conversation
 
     tok = _tiny_chat_tokenizer(tmp_path)
     msgs = [
@@ -2479,7 +2479,7 @@ def test_mask_stricter_than_airllm(tmp_path):
 
 def test_mask_requires_assistant_turn(tmp_path):
     pytest.importorskip("transformers")
-    from sable.training.streamed.masking import mask_conversation
+    from toaster_loop.training.streamed.masking import mask_conversation
 
     tok = _tiny_chat_tokenizer(tmp_path)
     enc = mask_conversation(tok, [{"role": "user", "content": "hello"}], 64)
@@ -2487,7 +2487,7 @@ def test_mask_requires_assistant_turn(tmp_path):
 
 
 def test_sharegpt_role_mapping():
-    from sable.training.streamed.masking import sharegpt_to_messages
+    from toaster_loop.training.streamed.masking import sharegpt_to_messages
 
     # Roles as emitted by curate/sharegpt.py, plus ShareGPT's raw
     # function_call; genuinely unknown roles are dropped.
@@ -2553,7 +2553,7 @@ def streamed_run(tmp_path_factory):
         "lora": {"lora_r": 4, "lora_alpha": 8},
     }))
 
-    from sable.training.worker import main as worker_main
+    from toaster_loop.training.worker import main as worker_main
 
     log = root / "job.log"
     rc = worker_main(["--job", "wp10", "--kind", "sft",
@@ -2605,7 +2605,7 @@ def test_streamed_e2e_adapter_artifacts(streamed_run):
     adapter = streamed_run["out"] / "adapter"
     cfg = json.loads((adapter / "adapter_config.json").read_text())
     assert cfg["backend"] == "streamed"
-    assert cfg["format"] == "sable-lora-state-dict"
+    assert cfg["format"] == "toaster_loop-lora-state-dict"
     assert (adapter / "lora_state.safetensors").is_file()
     gguf = streamed_run["out"] / "lora.gguf"
     assert gguf.is_file()
@@ -2687,7 +2687,7 @@ def test_gguf_lora_artifact_structure(streamed_run):
 
 
 def test_map_state_to_gguf_contract_rules():
-    from sable.training.streamed.gguf_lora import map_state_to_gguf
+    from toaster_loop.training.streamed.gguf_lora import map_state_to_gguf
 
     good_A = [[1.0, 2.0], [3.0, 4.0]]          # [r=2, in=2]
     good_B = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]  # [out=3, r=2]
@@ -2715,13 +2715,13 @@ def test_export_relocates_streamed_lora_without_llama_cpp(tmp_path):
     """The streamed GGUF-LoRA artifact flows through run_export's existing
     contract unchanged — and BEFORE the llama.cpp requirement check (no
     merge/quantize needed for an adapter-only artifact)."""
-    from sable.training import worker
+    from toaster_loop.training import worker
 
     out_dir = tmp_path / "out"
     adapter = out_dir / "adapter"
     adapter.mkdir(parents=True)
     (adapter / "adapter_config.json").write_text(json.dumps(
-        {"backend": "streamed", "format": "sable-lora-state-dict"}))
+        {"backend": "streamed", "format": "toaster_loop-lora-state-dict"}))
     payload = b"GGUF" + bytes(200)
     (out_dir / "lora.gguf").write_bytes(payload)
 
@@ -2744,7 +2744,7 @@ def test_export_relocates_streamed_lora_without_llama_cpp(tmp_path):
 
 
 def test_adapter_is_streamed():
-    from sable.training.worker import adapter_is_streamed
+    from toaster_loop.training.worker import adapter_is_streamed
 
     assert adapter_is_streamed(Path("/nonexistent")) is False
 
@@ -2793,7 +2793,7 @@ def test_package_imports_without_torch():
     """
     import ast
 
-    pkg = Path(__file__).resolve().parents[1] / "sable" / "training" / "streamed"
+    pkg = Path(__file__).resolve().parents[1] / "toaster_loop" / "training" / "streamed"
     for py in sorted(pkg.glob("*.py")):
         tree = ast.parse(py.read_text())
         for node in tree.body:  # module level only
@@ -2965,7 +2965,7 @@ def test_chunked_ce_reference_chunk_invariance():
 
 def test_dropout_guard_rejects_p_gt_zero():
     """Recompute needs deterministic forwards — enforced without torch."""
-    from sable.training.streamed.recompute import assert_no_stochastic_dropout
+    from toaster_loop.training.streamed.recompute import assert_no_stochastic_dropout
 
     class DropoutFake:  # duck-typed on purpose: name contains "dropout"
         p = 0.1
@@ -2996,7 +2996,7 @@ def test_lora_linear_numerics_and_frozen_base():
     torch = _torch()
     import torch.nn as nn
 
-    from sable.training.streamed.lora_linear import LoRALinear
+    from toaster_loop.training.streamed.lora_linear import LoRALinear
 
     torch.manual_seed(0)
     base = nn.Linear(12, 8, bias=True).double()
@@ -3048,7 +3048,7 @@ def test_lora_state_dict_layout():
     _torch()
     import torch.nn as nn
 
-    from sable.training.streamed.lora_linear import (inject_lora,
+    from toaster_loop.training.streamed.lora_linear import (inject_lora,
                                                        lora_state_dict)
 
     class Block(nn.Module):
@@ -3072,7 +3072,7 @@ def test_recompute_matches_dense_reference():
     torch = _torch()
     import torch.nn as nn
 
-    from sable.training.streamed.recompute import StreamedRecomputeTrainer
+    from toaster_loop.training.streamed.recompute import StreamedRecomputeTrainer
 
     torch.manual_seed(3)
     dims = [(8, 6), (6, 6), (6, 4)]
@@ -3132,7 +3132,7 @@ def test_streamed_training_loss_decreases():
     torch = _torch()
     import torch.nn as nn
 
-    from sable.training.streamed.recompute import StreamedRecomputeTrainer
+    from toaster_loop.training.streamed.recompute import StreamedRecomputeTrainer
 
     torch.manual_seed(5)
     dims = [(6, 6), (6, 6), (6, 3)]
@@ -3166,7 +3166,7 @@ def test_chunked_ce_matches_cross_entropy():
     torch = _torch()
     import torch.nn.functional as F
 
-    from sable.training.streamed.chunked_ce import \
+    from toaster_loop.training.streamed.chunked_ce import \
         chunked_linear_cross_entropy
 
     torch.manual_seed(9)
@@ -3208,7 +3208,7 @@ def test_layer_streaming_from_real_safetensors(tmp_path):
     torch = _torch()
     from safetensors.torch import save_file
 
-    from sable.training.streamed.streaming import (SafetensorsLayerLoader,
+    from toaster_loop.training.streamed.streaming import (SafetensorsLayerLoader,
                                                      load_layer_into,
                                                      meta_shell)
 
@@ -3330,7 +3330,7 @@ def test_buffer_roundtrip_through_real_recorder(tmp_path):
 
     # a foreign trace (not our task shape) must be skipped by the reader —
     # proves the spike tolerates a mixed real-world buffer.
-    from sable.store import TraceRecorder
+    from toaster_loop.store import TraceRecorder
     rec = TraceRecorder(home=tmp_path)
     try:
         row = rec.record(task="some unrelated user request",
@@ -3356,7 +3356,7 @@ def test_parse_prompt_shapes():
 
 def test_evalgate_mirrors_validate_gate(tmp_path, monkeypatch):
     """run_eval verdict shape == validate.py semantics (same _check_task)."""
-    from sable.training.validate import ValidationConfig, _check_task
+    from toaster_loop.training.validate import ValidationConfig, _check_task
 
     tasks = [tb.make_task(i, "A", 4) for i in range(4)]
     # scripted oracle: right on first three, wrong on the last (fresh
@@ -3394,7 +3394,7 @@ def test_evalgate_mirrors_validate_gate(tmp_path, monkeypatch):
 
 def test_evalgate_uses_production_check_function():
     """The oracle must be validate.py's own function object (no forked copy)."""
-    from sable.training import validate
+    from toaster_loop.training import validate
     assert eg._check_task is validate._check_task
 
 
@@ -3446,7 +3446,7 @@ def test_summarize_variant_paired_relative_delta():
 
 
 def test_persisted_floor_reader_tolerates_absence(tmp_path, monkeypatch):
-    monkeypatch.setenv("SABLE_BENCH_DIR", str(tmp_path / "no-bench"))
+    monkeypatch.setenv("TOASTER_LOOP_BENCH_DIR", str(tmp_path / "no-bench"))
     assert nf.persisted_floor() is None
 
 
@@ -3497,7 +3497,7 @@ def test_specialization_stats_and_masks():
 def test_run_experiment_mini_end_to_end(tmp_path, monkeypatch):
     """Driver smoke: 11 replicates in the FAST limited regime only (<~5 s)."""
     _torch__test_wp11_specialization()
-    monkeypatch.setenv("SABLE_HOME", str(tmp_path / "wp11-home"))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(tmp_path / "wp11-home"))
     from experiments.wp11_specialization import run_experiment as rx
 
     report = rx.run_experiment(replicates=11, regimes={"limited": 8},
@@ -3522,15 +3522,15 @@ def test_run_experiment_mini_end_to_end(tmp_path, monkeypatch):
 
 def test_license_boundary_spike_dir_stays_outside_package():
     """The spike must never become importable from the package itself: the
-    deliberate not-wired seam. experiments/ lives OUTSIDE sable/, so both
-    test_no_orphans.py (import graph over sable/) and
-    test_license_hygiene.py (AST scan over sable/) stay green by
+    deliberate not-wired seam. experiments/ lives OUTSIDE toaster_loop/, so both
+    test_no_orphans.py (import graph over toaster_loop/) and
+    test_license_hygiene.py (AST scan over toaster_loop/) stay green by
     construction — while the D-12 banned names must appear nowhere in the
     spike as imports."""
     import ast
 
     pkg_root = Path(tb.__file__).resolve().parents[2]
-    assert not (pkg_root / "sable" / "research").exists(), \
+    assert not (pkg_root / "toaster_loop" / "research").exists(), \
         "spike must live under experiments/, not wired into the package"
     banned = {"sparse_transformers", "airllm", "Strata", "kimi-k3-in-c"}
     spike_dir = Path(tb.__file__).resolve().parent
@@ -3703,7 +3703,7 @@ def test_summary_from_messages_roundtrip():
 # --------------------------------------------------------- runner threading
 
 def test_runner_forwards_summary_across_compactions(monkeypatch, tmp_path):
-    monkeypatch.setenv("SABLE_HOME", str(tmp_path / "uf"))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(tmp_path / "uf"))
     handler = make_message_handler({"*": {"role": "assistant",
                                           "content": "final answer"}})
     prompts: list[str] = []
@@ -3712,13 +3712,13 @@ def test_runner_forwards_summary_across_compactions(monkeypatch, tmp_path):
         prompts.append(prompt)
         return f"SUMMARY-v{len(prompts)}"
 
-    monkeypatch.setattr(SableAgentClient, "_summarize", fake_summarize)
+    monkeypatch.setattr(ToasterLoopAgentClient, "_summarize", fake_summarize)
     seed_history = []
     for i in range(6):
         seed_history.append(_msg("user", f"old question {i} " + "h" * 400))
         seed_history.append(_msg("assistant", f"old answer {i} " + "g" * 400))
     with FakeOpenAIServer(handler_cls=handler) as srv:
-        client = SableAgentClient(base_url=srv.base_url, model="m",
+        client = ToasterLoopAgentClient(base_url=srv.base_url, model="m",
                                     compress_threshold_tokens=400,
                                     keep_recent_tokens=256)
         r1 = client.run("first task", history=list(seed_history))
@@ -3739,11 +3739,11 @@ def test_runner_forwards_summary_across_compactions(monkeypatch, tmp_path):
 
 def test_runner_backward_compatible_call(monkeypatch, tmp_path):
     """Old call signature (no previous_summary) still valid; summary None."""
-    monkeypatch.setenv("SABLE_HOME", str(tmp_path / "uf"))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(tmp_path / "uf"))
     handler = make_message_handler({"*": {"role": "assistant",
                                           "content": "all good"}})
     with FakeOpenAIServer(handler_cls=handler) as srv:
-        client = SableAgentClient(base_url=srv.base_url, model="m")
+        client = ToasterLoopAgentClient(base_url=srv.base_url, model="m")
         res = client.run("hello there")  # compression off (threshold 0)
     assert res.completed
     assert res.summary is None

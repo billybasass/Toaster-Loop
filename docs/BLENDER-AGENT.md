@@ -1,7 +1,7 @@
-# Blender Agent — connecting sable to Blender
+# Blender Agent — connecting toaster-loop to Blender
 
 This is the worked example for per-agent capabilities + image support: an
-sable agent that drives **Blender** (a headless 3D program), looks at a
+toaster-loop agent that drives **Blender** (a headless 3D program), looks at a
 reference image the user uploads, and checks its own work by looking at
 renders/screenshots.
 
@@ -50,8 +50,8 @@ Keep scripts idempotent, prefer editing your previous script over
 rewriting from scratch, and never delete user files.
 ```
 
-Or via API (use the URL `sable dashboard` printed; if you want a fixed port
-set `dashboard.port` in the config or `SABLE_DASHBOARD_PORT`):
+Or via API (use the URL `toaster-loop dashboard` printed; if you want a fixed port
+set `dashboard.port` in the config or `TOASTER_LOOP_DASHBOARD_PORT`):
 
 ```bash
 curl -s -X PUT http://127.0.0.1:<port>/api/profiles/blender \
@@ -73,8 +73,8 @@ Image *analysis* only works when the served model is multimodal:
 
 1. Get a GGUF + its projector, e.g. Qwen2.5-VL / Qwen3-VL from Hugging Face.
 2. Settings → run settings → **mmproj_path** = `.../mmproj-*.gguf`
-   (sable passes `--mmproj` to llama-server).
-3. `agent.vision` can stay `auto` — with mmproj configured, sable knows
+   (toaster-loop passes `--mmproj` to llama-server).
+3. `agent.vision` can stay `auto` — with mmproj configured, toaster-loop knows
    the endpoint sees images and expands image attachments automatically.
 
 Without a vision model the profile still works headlessly: `view_image`

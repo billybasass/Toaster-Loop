@@ -3,14 +3,14 @@
 Two sources, tried in order (documented in the findings doc):
 
 1. ``serving.bench.load_noise_floor()`` — a persisted ``kind=noise_floor``
-   record from ``sable bench --noise-floor``. If present it is recorded for
+   record from ``toaster_loop bench --noise-floor``. If present it is recorded for
    reference, BUT it measures tokens/sec spread of the llama.cpp server, not
    this offline eval; it cannot bound an eval pass-rate delta, so…
 2. …the experiment ALWAYS also estimates the floor offline on the eval metric
    itself, per the WP11 spec: run the eval R >= 11 times at fixed config with
    seed variation (each replicate = a fresh model-init training run under the
    identical recipe), take the baseline pass-rate distribution, and reuse the
-   WP1 spread definition — ``sable.serving.bench.compute_stats``'s
+   WP1 spread definition — ``toaster_loop.serving.bench.compute_stats``'s
    ``spread_pct = (max - min) / median * 100`` — verbatim. That spread is the
    noise floor for adoption decisions in THIS experiment.
 
@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence
 
-from sable.serving.bench import compute_stats, load_noise_floor
+from toaster_loop.serving.bench import compute_stats, load_noise_floor
 
 #: The fixed 3% floor from the WP11 spec; the measured floor overrides when
 #: larger (adopts strictly: never a smaller bar than the program minimum).
@@ -42,7 +42,7 @@ def persisted_floor() -> Optional[Dict[str, Any]]:
     """The persisted bench noise-floor record if one exists (reference only).
 
     Returns the full record; callers extract generation/prompt spread_pct for
-    the findings doc. None when ``sable bench --noise-floor`` was never run
+    the findings doc. None when ``toaster_loop bench --noise-floor`` was never run
     (this experiment's box: none — documented in docs/SPECIALIZATION-WP11.md).
     """
     return load_noise_floor()

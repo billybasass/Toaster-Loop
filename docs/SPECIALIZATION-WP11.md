@@ -4,7 +4,7 @@
 > the improvement program). Nothing was integrated: no config keys, no worker
 > changes, no registry changes. Spike code lives in
 > [`experiments/wp11_specialization/`](../experiments/wp11_specialization/)
-> (outside the `sable` package by design — see "Not-wired seam" below) and
+> (outside the `toaster-loop` package by design — see "Not-wired seam" below) and
 > hermetic tests in
 > [`tests/test_training.py`](../tests/test_training.py).
 
@@ -12,7 +12,7 @@
 
 If a downstream-eval-judged specialization pass (activation-sparsity or
 expert-pruning style, methodology inspired by sparse_transformers — cited,
-never imported, D-12) uses **only Sable's own experience buffer** as
+never imported, D-12) uses **only Toaster Loop's own experience buffer** as
 calibration data, it can improve the model's downstream golden-task pass rate
 by more than the measured noise floor. Adoption language is reserved for
 deltas clearing `max(3%, measured floor)`; everything else is **noise, not a
@@ -48,8 +48,8 @@ over trained behaviors**, not generalization tests.
 
 ## Calibration data = the experience buffer, only
 
-Calibration inputs are fabricated into a throwaway `SABLE_HOME` through the
-**real** [`sable.store.TraceRecorder`](../sable/store/recorder.py) (JSONL
+Calibration inputs are fabricated into a throwaway `TOASTER_LOOP_HOME` through the
+**real** [`toaster_loop.store.TraceRecorder`](../toaster-loop/store/recorder.py) (JSONL
 under `buffer/YYYY/MM/` + SQLite index — documented stand-in for a real user's
 buffer), then read back via `TraceStore.list_traces` + JSONL transcripts like
 curation code does; foreign traces are skipped by the reader (mixed-buffer
@@ -69,7 +69,7 @@ feeds specialization; eval labels never touch the calibration path.
 
 ## Downstream eval = the production gate oracle
 
-Scoring reuses [`training/validate.py::_check_task`](../sable/training/validate.py)
+Scoring reuses [`training/validate.py::_check_task`](../toaster-loop/training/validate.py)
 — literally the same function object (test-asserted), so substring `expect_contains`
 semantics cannot drift from production. Verdict shape mirrors
 `run_golden_suite` (`total/passed/pass_rate/results`) plus the `ok = rate >=
@@ -157,10 +157,10 @@ python -m pytest tests/test_training.py -q   # ~2 s
 ## Not-wired seam (registration note)
 
 The spike lives in a top-level `experiments/` tree — **outside** the
-`sable` package — so `test_hygiene.py`'s import graph and
+`toaster-loop` package — so `test_hygiene.py`'s import graph and
 `test_hygiene.py`'s AST scan never see it, which is the deliberate
 not-wired seam (WP10-step-1 precedent, strengthened: no orphan-allowlist entry
 needed because the package can never reach it; `tests/test_training.py`
-asserts both that `sable/research/` does not exist and that no banned
+asserts both that `toaster-loop/research/` does not exist and that no banned
 D-12 name is imported anywhere in the spike). torch stays a lazy function-level
 import even inside the spike; `pyproject.toml` untouched.

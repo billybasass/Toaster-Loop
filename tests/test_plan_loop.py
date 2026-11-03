@@ -13,11 +13,11 @@ import time
 
 import pytest
 
-from sable.core import plan_loop as _pl
-from sable.core.config import SableConfig
-from sable.core.plan_loop import (LoopConflictError, PlanLoop,
+from toaster_loop.core import plan_loop as _pl
+from toaster_loop.core.config import ToasterLoopConfig
+from toaster_loop.core.plan_loop import (LoopConflictError, PlanLoop,
                                   read_loop_progress, start_plan_loop)
-from sable.core.plans import (add_task, get_task, load_plan, save_plan,
+from toaster_loop.core.plans import (add_task, get_task, load_plan, save_plan,
                               set_status)
 
 
@@ -33,7 +33,7 @@ def _reset_single_flight():
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
@@ -41,7 +41,7 @@ def _cfg(**plans):
     base = {"enabled": True,
             "loop": {"max_tasks": 10, "max_consecutive_failures": 1}}
     base.update(plans)
-    return SableConfig(plans=base)
+    return ToasterLoopConfig(plans=base)
 
 
 def _seed(*titles, project=None):
@@ -219,7 +219,7 @@ def test_single_flight_conflict(home):
 
 
 def test_stale_running_progress_file_conflicts(home):
-    from sable.core.plan_loop import write_loop_progress
+    from toaster_loop.core.plan_loop import write_loop_progress
 
     write_loop_progress(None, home, {"project": "", "status": "running",
                                      "iteration": 1, "tasks": []})
@@ -228,7 +228,7 @@ def test_stale_running_progress_file_conflicts(home):
 
 
 def test_resume_reads_progress_file(home):
-    from sable.core.plan_loop import write_loop_progress
+    from toaster_loop.core.plan_loop import write_loop_progress
 
     _seed("already", "next one")
     # Simulate a crashed earlier run: t1 done on disk + progress history.

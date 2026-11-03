@@ -5,7 +5,7 @@ that passes the golden task validation gate through the normal registry
 promotion path." WP10 proved GGUF-LoRA LOADS under llama-server (ROADMAP
 WP10 steps 2–3 entry); this closes the remaining gate half ON CPU:
 
-  1. train      — real streamed worker (`sable.training.worker.main`,
+  1. train      — real streamed worker (`toaster_loop.training.worker.main`,
                   training.backend: streamed) on a tiny synthetic llama
                   checkpoint built from locally written safetensors;
   2. export     — real `worker.run_export` relocation branch (method
@@ -65,13 +65,13 @@ VOCAB = (
 # ------------------------------------------------------------ prerequisites
 def find_binary() -> Optional[str]:
     """Existing llama-server binary or None (NEVER triggers a build/clone)."""
-    env = os.environ.get("SABLE_LLAMA_SERVER")
+    env = os.environ.get("TOASTER_LOOP_LLAMA_SERVER")
     if env and Path(env).is_file():
         return env
     found = shutil.which("llama-server")
     if found:
         return found
-    for cand in (Path.home() / ".sable" / "llama.cpp" / "build" / "bin",):
+    for cand in (Path.home() / ".toaster-loop" / "llama.cpp" / "build" / "bin",):
         p = cand / "llama-server"
         if p.is_file():
             return str(p)
@@ -122,7 +122,7 @@ def build_tiny_ckpt(root: Path):
 
 def train_streamed(root: Path, ckpt: Path) -> Dict[str, Any]:
     """Run the REAL streamed worker; returns its streamed_sft_done event."""
-    from sable.training.worker import main as worker_main
+    from toaster_loop.training.worker import main as worker_main
 
     rows = [{"conversations": [
         {"from": "human", "value": "w5 w12"},
@@ -157,7 +157,7 @@ def train_streamed(root: Path, ckpt: Path) -> Dict[str, Any]:
 
 def export_lora_gguf(root: Path, adapter_dir: str, gguf_out: Path) -> str:
     """Real run_export relocation branch (method gguf-lora)."""
-    from sable.training import worker
+    from toaster_loop.training import worker
 
     res = worker.run_export(
         {"_adapter_dir": adapter_dir, "_gguf_out": str(gguf_out),
@@ -210,7 +210,7 @@ def build_base_gguf(ckpt: Path, out_path: Path) -> None:
         arrs.append((k, t, vals))
 
     kv("general.architecture", STR, "llama")
-    kv("general.name", STR, "sable-tiny-gate")
+    kv("general.name", STR, "toaster_loop-tiny-gate")
     kv("general.file_type", U32, 1)  # f32
     kv("tokenizer.ggml.model", STR, "gpt2")
     kv_arr("tokenizer.ggml.tokens", STR, list(VOCAB))
@@ -297,11 +297,11 @@ def supervisor_starter(binary: str, base_gguf: Path,
     The adapter rides cfg.extra_llama_args — the documented last-wins extra
     args channel (serving/run_args.py precedence chain); no serving code path
     is modified or bypassed."""
-    from sable.core.config import SableConfig
-    from sable.serving.supervisor import ServingSupervisor
+    from toaster_loop.core.config import ToasterLoopConfig
+    from toaster_loop.serving.supervisor import ServingSupervisor
 
     def starter(_gguf_path: str):
-        cfg = SableConfig(gguf_path=str(base_gguf), port=0,
+        cfg = ToasterLoopConfig(gguf_path=str(base_gguf), port=0,
                             context_length=128)
         cfg.llama_server_binary = binary
         cfg.llama_auto_setup = False  # hermetic: never clone/build llama.cpp
@@ -330,12 +330,12 @@ def run(work: Optional[Path] = None, keep: bool = False) -> Dict[str, Any]:
     binary = find_binary()
     if not binary:
         raise RuntimeError("llama-server not found (no build triggered, by "
-                           "design). Run `sable setup` first.")
+                           "design). Run `toaster_loop setup` first.")
 
     tmp_ctx = tempfile.TemporaryDirectory(prefix="wp10_gate_")
     root = work or Path(tmp_ctx.name)
-    prev_home = os.environ.get("SABLE_HOME")  # restore on exit (pytest-safe)
-    os.environ["SABLE_HOME"] = str(root / "home")  # state stays hermetic
+    prev_home = os.environ.get("TOASTER_LOOP_HOME")  # restore on exit (pytest-safe)
+    os.environ["TOASTER_LOOP_HOME"] = str(root / "home")  # state stays hermetic
 
     evidence: Dict[str, Any] = {"llama_server": binary}
     try:
@@ -403,7 +403,7 @@ def run(work: Optional[Path] = None, keep: bool = False) -> Dict[str, Any]:
             raise RuntimeError("no adapter-distinguishing substring found")
         evidence["golden"] = golden
 
-        from sable.training.validate import ValidationConfig, validate_model
+        from toaster_loop.training.validate import ValidationConfig, validate_model
 
         vcfg = ValidationConfig(min_pass_rate=1.0, golden_tasks=[golden],
                                 max_tokens=48)
@@ -431,10 +431,10 @@ def run(work: Optional[Path] = None, keep: bool = False) -> Dict[str, Any]:
                                "vacuous, gate closure would be dishonest")
 
         # 5. normal registry promotion path -----------------------------------
-        from sable.registry import ModelRegistry
+        from toaster_loop.registry import ModelRegistry
 
         reg = ModelRegistry(root / "registry.db")
-        m = reg.register_model("sable-tiny-base", actor="wp10-gate")
+        m = reg.register_model("toaster_loop-tiny-base", actor="wp10-gate")
         reg.set_artifacts(m.model_id, gguf_path=str(lora_gguf), quant="lora")
         reg.set_provenance(m.model_id, {"version": 1, "backend": "streamed",
                                         "source": "experiments/wp10_gate"})
@@ -449,9 +449,9 @@ def run(work: Optional[Path] = None, keep: bool = False) -> Dict[str, Any]:
         return evidence
     finally:
         if prev_home is None:
-            os.environ.pop("SABLE_HOME", None)
+            os.environ.pop("TOASTER_LOOP_HOME", None)
         else:
-            os.environ["SABLE_HOME"] = prev_home
+            os.environ["TOASTER_LOOP_HOME"] = prev_home
         if not keep:
             tmp_ctx.cleanup()
 

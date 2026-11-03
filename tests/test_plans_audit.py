@@ -13,20 +13,20 @@ import threading
 
 import pytest
 
-from sable.core.config import SableConfig
-from sable.dashboard.app import DashboardApp
+from toaster_loop.core.config import ToasterLoopConfig
+from toaster_loop.dashboard.app import DashboardApp
 
 
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 def _app(home):
-    return DashboardApp(SableConfig(plans={"enabled": True}), home=home)
+    return DashboardApp(ToasterLoopConfig(plans={"enabled": True}), home=home)
 
 
 def _project(home, pid="proj-a"):
@@ -46,7 +46,7 @@ def test_concurrent_plan_progress_saves_do_not_lose_tasks(home):
     a task via the locked writer pattern all survive in the file. Before the
     fix _LOCK was declared but never taken, so late writers clobbered earlier
     saves (lost updates)."""
-    from sable.core import plans as P
+    from toaster_loop.core import plans as P
 
     P.save_plan({"project": "proj-a", "tasks": []})
     errors = []
@@ -81,7 +81,7 @@ def test_add_succeeds_despite_preexisting_dangling_dep(home):
     """A dangling dep elsewhere in the store (manual edit / keep-on-load
     policy) must not brick every future add. Pre-fix: _op_add validated the
     GLOBAL report and rejected all adds until the old edge was hand-fixed."""
-    from sable.core import plans as P
+    from toaster_loop.core import plans as P
 
     _project(home)
     # Seed a plan containing one task with a dangling dep, on disk.
@@ -103,7 +103,7 @@ def test_add_succeeds_despite_preexisting_dangling_dep(home):
 def test_add_still_refused_when_it_creates_a_cycle(home):
     """Scoping must not weaken cycle protection: an add whose deps close a
     cycle is still refused."""
-    from sable.core import plans as P
+    from toaster_loop.core import plans as P
 
     _project(home)
     store = {"project": "proj-a", "tasks": []}
@@ -119,8 +119,8 @@ def test_add_still_refused_when_it_creates_a_cycle(home):
 
 def test_plan_add_tool_scoped_to_new_problems(home):
     """Same scoped rule for the agent's plan_add tool."""
-    from sable.core import plans as P
-    from sable.core.tools import plan_add
+    from toaster_loop.core import plans as P
+    from toaster_loop.core.tools import plan_add
 
     store = {"project": None, "tasks": []}
     P.add_task(store, {"id": "t1", "title": "old", "deps": ["gone"]})
@@ -136,7 +136,7 @@ def test_loop_resolves_endpoint_once_and_closes_at_end(home, monkeypatch):
     loop and exposes close(); PlanLoop must call it when the loop ends.
     Pre-fix: _resolve_endpoint+stop ran per task -> spawn mode reloaded the
     model every iteration (inside the timeout)."""
-    from sable.core import plan_loop as pl
+    from toaster_loop.core import plan_loop as pl
 
     calls = {"resolve": 0, "close": 0}
 
@@ -148,7 +148,7 @@ def test_loop_resolves_endpoint_once_and_closes_at_end(home, monkeypatch):
         calls["resolve"] += 1
         return "http://x/v1", "m", FakeSup()
 
-    monkeypatch.setattr("sable.cli._resolve_endpoint", fake_resolve)
+    monkeypatch.setattr("toaster_loop.cli._resolve_endpoint", fake_resolve)
     made = []
 
     class R:
@@ -162,14 +162,14 @@ def test_loop_resolves_endpoint_once_and_closes_at_end(home, monkeypatch):
                 return R()
         return _R()
 
-    monkeypatch.setattr("sable.core.agent_runner.create_runner", fake_runner)
-    monkeypatch.setattr("sable.store.recorder.make_recorder",
+    monkeypatch.setattr("toaster_loop.core.agent_runner.create_runner", fake_runner)
+    monkeypatch.setattr("toaster_loop.store.recorder.make_recorder",
                         lambda *a, **k: None)
-    monkeypatch.setattr("sable.core.delegation.load_project",
+    monkeypatch.setattr("toaster_loop.core.delegation.load_project",
                         lambda *a, **k: None)
 
     cancel = threading.Event()
-    fn = pl._default_run_fn(SableConfig(), "p", cancel_event=cancel)
+    fn = pl._default_run_fn(ToasterLoopConfig(), "p", cancel_event=cancel)
     task = {"id": "t1"}
     fn("a", task, None)
     fn("b", task, None)
@@ -183,7 +183,7 @@ def test_loop_resolves_endpoint_once_and_closes_at_end(home, monkeypatch):
 
 def test_loop_guarded_close_called_on_completion(home, monkeypatch):
     """PlanLoop._guarded invokes the run_fn's close hook when it ends."""
-    from sable.core import plan_loop as pl
+    from toaster_loop.core import plan_loop as pl
 
     closed = []
 
@@ -191,7 +191,7 @@ def test_loop_guarded_close_called_on_completion(home, monkeypatch):
         return {"ok": True}
 
     run_fn.close = lambda: closed.append(True)  # type: ignore[attr-defined]
-    loop = pl.PlanLoop(SableConfig(), None, max_tasks=0, run_fn=run_fn)
+    loop = pl.PlanLoop(ToasterLoopConfig(), None, max_tasks=0, run_fn=run_fn)
     loop.start()
     loop.wait(timeout=5)
     assert closed == [True]
@@ -215,7 +215,7 @@ def test_int_body_fields_reject_junk_with_400(home):
 
 def test_project_id_ending_json_rejected(home):
     """'foo.json' would collide on disk with 'foo' (both -> foo.json)."""
-    from sable.core import plans as P
+    from toaster_loop.core import plans as P
 
     with pytest.raises(ValueError):
         P.plan_path("evil.json")
@@ -227,7 +227,7 @@ def test_project_id_ending_json_rejected(home):
 # ---------------------------------------- finding 6: Start task guards
 
 def test_start_task_rejects_terminal_and_running(home):
-    from sable.core import plans as P
+    from toaster_loop.core import plans as P
 
     _project(home)
     store = {"project": "proj-a", "tasks": []}
@@ -250,7 +250,7 @@ def test_start_task_rejects_terminal_and_running(home):
 
 def test_start_task_cleans_orphan_thread_on_run_failure(home, monkeypatch):
     """If chat admission fails, the seeded thread must not linger."""
-    from sable.core import plans as P
+    from toaster_loop.core import plans as P
 
     _project(home)
     store = {"project": "proj-a", "tasks": []}
@@ -259,7 +259,7 @@ def test_start_task_cleans_orphan_thread_on_run_failure(home, monkeypatch):
     app = _app(home)
 
     def boom(q, b):
-        from sable.dashboard.api.base import HttpError
+        from toaster_loop.dashboard.api.base import HttpError
 
         raise HttpError(409, "single-flight: busy")
     monkeypatch.setattr(app, "h_chat_stream", boom)
@@ -277,7 +277,7 @@ def test_start_task_cleans_orphan_thread_on_run_failure(home, monkeypatch):
 def test_stale_loop_marker_requires_force(home, monkeypatch):
     """A .loop.json left 'running' by a hard kill refuses restarts unless
     force is passed; force never overrides a LIVE in-process loop."""
-    from sable.core import plan_loop as pl
+    from toaster_loop.core import plan_loop as pl
 
     def run_fn(prompt, task, prof):
         return {"ok": True}
@@ -286,18 +286,18 @@ def test_stale_loop_marker_requires_force(home, monkeypatch):
     pl.write_loop_progress("stale-p", home, {"project": "stale-p",
                                              "status": "running"})
     with pytest.raises(pl.LoopConflictError):
-        pl.PlanLoop(SableConfig(), "stale-p", run_fn=run_fn)
-    loop = pl.PlanLoop(SableConfig(), "stale-p", max_tasks=0,
+        pl.PlanLoop(ToasterLoopConfig(), "stale-p", run_fn=run_fn)
+    loop = pl.PlanLoop(ToasterLoopConfig(), "stale-p", max_tasks=0,
                        run_fn=run_fn, force=True)
     loop.start()
     loop.wait(timeout=5)
     # While a live loop holds the slot, even force must refuse.
     if not getattr(pl, "_current", None):
-        live = pl.PlanLoop(SableConfig(), "other-p", run_fn=run_fn)
+        live = pl.PlanLoop(ToasterLoopConfig(), "other-p", run_fn=run_fn)
         live.start()
         try:
             with pytest.raises(pl.LoopConflictError):
-                pl.PlanLoop(SableConfig(), "stale-p", run_fn=run_fn,
+                pl.PlanLoop(ToasterLoopConfig(), "stale-p", run_fn=run_fn,
                             force=True)
         finally:
             live.cancel()
@@ -306,7 +306,7 @@ def test_stale_loop_marker_requires_force(home, monkeypatch):
 def test_loop_blocked_mark_uses_lock_and_rereads(home):
     """The loop's blocked-marking re-reads under the lock (a concurrent edit
     between the post-run load and the mark is not clobbered)."""
-    from sable.core import plan_loop as pl, plans as P
+    from toaster_loop.core import plan_loop as pl, plans as P
 
     store = {"project": None, "tasks": []}
     P.add_task(store, {"id": "t1", "title": "x"})
@@ -314,7 +314,7 @@ def test_loop_blocked_mark_uses_lock_and_rereads(home):
 
     loop = object.__new__(pl.PlanLoop)   # exercise the block in isolation
     loop.project_id = None
-    loop.cfg = SableConfig()
+    loop.cfg = ToasterLoopConfig()
     loop.progress = {"iteration": 1, "tasks": []}
     loop.publish = lambda *a: None
     loop.cancel_event = threading.Event()

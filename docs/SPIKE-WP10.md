@@ -5,7 +5,7 @@
 > "WP10 steps 2–3" for what was proven here vs hardware-unverified.
 > The text below is the step-1 record.
 
-Timeboxed mechanism spike in [`sable/training/streamed/`](../sable/training/streamed/)
+Timeboxed mechanism spike in [`toaster-loop/training/streamed/`](../toaster-loop/training/streamed/)
 with tests in [`tests/test_training.py`](../tests/test_training.py).
 NOT wired into `worker.py` (Step 2, gated separately). All four mechanisms
 re-implemented inline; airllm (Apache-2.0) read as reference only — cited in
@@ -32,8 +32,8 @@ guarantee: no module-level heavy imports).
 | (c) CPU-held graph + backward recompute (grads == dense autograd reference; loss decreases over 15 streamed steps; dropout p>0 rejected at construction) | **proven-executed-here** (fp64, deterministic seed) | `test_recompute_matches_dense_reference`, `test_streamed_training_loss_decreases`, `test_dropout_guard_rejects_p_gt_zero` |
 | (d) chunked linear CE vs `F.cross_entropy` on [2·8,1024]×[1024,64], fp64, ignore_index path, d_hidden gradient equality; pure-python online-LSE reference matches stdlib softmax | **proven-executed-here** (CPU) | `test_chunked_ce_matches_cross_entropy`, 3 pure-numerics tests |
 
-Full suite at time of writing: **1744 passed**, `ruff check sable tests`
-clean, `import sable.training.streamed` succeeds with torch blocked.
+Full suite at time of writing: **1744 passed**, `ruff check toaster-loop tests`
+clean, `import toaster_loop.training.streamed` succeeds with torch blocked.
 
 ## Key design decisions
 

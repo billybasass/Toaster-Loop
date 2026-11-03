@@ -1,4 +1,4 @@
-# UI-ARCHITECTURE — sable Phase 5 (design)
+# UI-ARCHITECTURE — toaster-loop Phase 5 (design)
 
 Status: **implemented** (Phases 5a–5e shipped; dashboard grew further in Phase 6 with
 multi-instance serving and the Model Hub / Easy panels). This is the design document as
@@ -11,7 +11,7 @@ written; where the build diverged, the code is the source of truth. Notable delt
 - Body caps are per-route: generic `/api/*` cap at 1 MB, but `POST /api/chat/stream`
   accepts ~43.5 MB for image attachments (up to 4 × 8 MB base64 data URLs).
 - Token auth shipped as designed (`--token` / `dashboard.token` /
-  `SABLE_DASHBOARD_TOKEN`, `X-Sable-Token` header or `?token=` for EventSource).
+  `TOASTER_LOOP_DASHBOARD_TOKEN`, `X-Toaster Loop-Token` header or `?token=` for EventSource).
 - Phase 6 added the `/api/servers*` instance endpoints on top of the legacy
   `/api/serve/*` default-instance path (README "Phase 6 API contract notes").
 
@@ -19,9 +19,9 @@ Supersedes the basic Phase 5 outline in [`ROADMAP.md`](ROADMAP.md). Companion do
 [`UI-ROADMAP.md`](UI-ROADMAP.md) (implementation phases 5a–5e).
 
 Design goal: one local web app that exposes **every user-facing capability of
-sable's own backend** — chat/agent runs, serving, registry, training loop, buffer
+toaster-loop's own backend** — chat/agent runs, serving, registry, training loop, buffer
 analytics — over a dependency-free, offline-capable UI. The shipped API surface is
-the route table in [`dashboard/app.py`](../sable/dashboard/app.py); contract notes
+the route table in [`dashboard/app.py`](../toaster-loop/dashboard/app.py); contract notes
 live in the README.
 
 ---
@@ -30,10 +30,10 @@ live in the README.
 
 ### 1.1 Backend HTTP layer — keep stdlib `ThreadingHTTPServer`
 
-The existing [`dashboard/server.py`](../sable/dashboard/server.py) already
+The existing [`dashboard/server.py`](../toaster-loop/dashboard/server.py) already
 implements the right shape: loopback-only bind (`127.0.0.1`, not configurable),
 transport-agnostic `DashboardApp.handle(method, path, query, body)` core
-([`dashboard/app.py`](../sable/dashboard/app.py)), static file serving with a
+([`dashboard/app.py`](../toaster-loop/dashboard/app.py)), static file serving with a
 path-traversal guard, CSP headers, and secret-free access logging. All 74+
 existing tests call `DashboardApp.handle()` directly — zero-socket unit testability.
 
@@ -56,7 +56,7 @@ stays.
 **Decision: keep vanilla JS (ES modules), no build step, no vendored framework.**
 
 Rationale:
-- The existing [`static/index.html`](../sable/dashboard/static/index.html)
+- The existing [`static/index.html`](../toaster-loop/dashboard/static/index.html)
   + `app.js` + `style.css` already enforce the hard constraints: CSP
   `default-src 'self'`, zero CDN references, offline-capable, and a hygiene test
   ([`tests/test_dashboard.py`](../tests/test_dashboard.py)) asserts no external
@@ -68,13 +68,13 @@ Rationale:
   a `<template>`-based render helper (~100 LOC). If a panel ever genuinely hurts,
   we can drop in vendored [Preact+htm](https://htm.dev) (MIT) later — that escape
   hatch stays open without paying for it now.
-- No build step means `pip install sable` ships the UI as package data
+- No build step means `pip install toaster-loop` ships the UI as package data
   (`pyproject.toml` already includes `static/*`); extend to `static/js/*.js`.
 
 Structure (multi-file, still zero-build; browser resolves module paths natively):
 
 ```
-sable/dashboard/static/
+toaster-loop/dashboard/static/
   index.html          # app shell: nav rail + <main> outlet + dialog host
   style.css           # design tokens (CSS custom props) + layout + components
   js/
@@ -92,7 +92,7 @@ sable/dashboard/static/
 
 **Decision: Server-Sent Events for event notification; plain GET polling for
 low-frequency state.** No WebSocket (adds an upgrade/handshake the stdlib server
-would need hand-rolled; sable's needs are all server→client).
+would need hand-rolled; toaster-loop's needs are all server→client).
 
 Two mechanisms, deliberately simple:
 
@@ -111,7 +111,7 @@ notification — see §5.
 
 ### 1.4 Serve model & auth
 
-- Single command: `sable dashboard [--port N]` (exists; keep). Default port
+- Single command: `toaster-loop dashboard [--port N]` (exists; keep). Default port
   0 → dynamic; config `dashboard.port`; print URL once. Consider
   `--no-browser`/auto-open later (deferred — opening browsers is environment
   rude).
@@ -119,8 +119,8 @@ notification — see §5.
   posture. Never configurable to non-loopback in v1; remote access, if ever, is
   an explicit future feature with real auth (out of scope).
 - **Optional token auth** for shared machines: `--token` flag or
-  `SABLE_DASHBOARD_TOKEN` env. When set, every `/api/*` request must carry
-  `X-Sable-Token`; static assets stay open (they contain no state); a login
+  `TOASTER_LOOP_DASHBOARD_TOKEN` env. When set, every `/api/*` request must carry
+  `X-Toaster Loop-Token`; static assets stay open (they contain no state); a login
   overlay in the SPA stores the token in `sessionStorage`. Default: off
   (loopback = single user). CSRF is handled by rejecting cross-origin requests:
   server checks `Origin`/`Sec-Fetch-Site` on mutating verbs regardless of token.
@@ -135,7 +135,7 @@ notification — see §5.
   dashboard tests enforce the shipped tree stays dependency-free: no external
   URLs, no vendored frameworks.
 - Any runtime integration with other local programs is HTTP-only as an ordinary
-  client (attach mode against `/v1`); sable never imports or embeds foreign
+  client (attach mode against `/v1`); toaster-loop never imports or embeds foreign
   UI code.
 
 ---
@@ -166,7 +166,7 @@ registry error mapping → 409, background-thread job execution with the
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│ ⛭ sable        [status chips: server ● model v2 ● GPU ▾]   │ header
+│ ⛭ toaster-loop        [status chips: server ● model v2 ● GPU ▾]   │ header
 ├──────────┬────────────────────────────────────────────────────┤
 │ Chat     │                                                    │
 │ Serve    │          panel outlet (hash-routed)                │
@@ -218,7 +218,7 @@ No persistence beyond `sessionStorage` (token, last tab, chat draft).
 ## 4. Panel → backend capability map (what already exists vs new)
 
 Backend capabilities reachable today from Python (verified against
-[`cli.py`](../sable/cli.py), [`app.py`](../sable/dashboard/app.py)):
+[`cli.py`](../toaster-loop/cli.py), [`app.py`](../toaster-loop/dashboard/app.py)):
 
 - **Already wrapped by dashboard API**: status, traces list/detail, feedback,
   datasets list/show, models + promote/rollback (+lineage edges), jobs list/cancel
@@ -239,7 +239,7 @@ Backend capabilities reachable today from Python (verified against
 
 ## 5. Chat & streaming design
 
-Chat in sable is the **agent playground** — run tasks through the built-in agent
+Chat in toaster-loop is the **agent playground** — run tasks through the built-in agent
 runner (`core/agent_runner.py`), capture traces, and let the user rate results
 inline. Two modes:
 
@@ -248,7 +248,7 @@ inline. Two modes:
    proxies with `httpx.stream(...)`, forwarding chunks as they arrive
    (`text/event-stream`). Trivial, works in attach mode too.
 2. **Agent run (recorded)** — `POST /api/chat/stream` runs the task through the
-   sable agent runner (with tool calls), and streams *our own* event protocol:
+   toaster-loop agent runner (with tool calls), and streams *our own* event protocol:
 
 ```
 event: message.delta    data: {"text": "..."}          # assistant text tokens
@@ -282,7 +282,7 @@ loop from chat → buffer in one click.
   `X-Frame-Options: DENY` (blocks drive-by framing of the control UI).
 - CSRF: mutating requests must have same-origin `Origin` (or absent, for curl)
   and `Content-Type: application/json`.
-- Optional token (§1.4) when `SABLE_DASHBOARD_TOKEN`/`--token` is set.
+- Optional token (§1.4) when `TOASTER_LOOP_DASHBOARD_TOKEN`/`--token` is set.
 - Static serving: traversal guard (exists); serve-time MIME allowlist (exists).
 - Destructive actions (promote/rollback/delete dataset rows/cancel job/stop
   server) require a modal confirm in UI **and** are single-shot API calls with

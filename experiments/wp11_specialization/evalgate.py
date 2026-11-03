@@ -8,7 +8,7 @@ Mapping to training/validate.py (documented per WP11 spec):
                                     (argmax = temperature-0 decode; no HTTP)
   task {prompt, expect_contains}    identical dict shape (testbed.make_task)
   _check_task(message, task)        THE SAME FUNCTION, imported from
-                                    sable.training.validate — the substring
+                                    toaster_loop.training.validate — the substring
                                     oracle is not re-implemented (D-12 spirit:
                                     reuse own code, no forked semantics)
   run_golden_suite -> {total,       run_eval() -> same verdict shape plus
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from sable.training.validate import _check_task  # production oracle, D-12-safe
+from toaster_loop.training.validate import _check_task  # production oracle, D-12-safe
 
 from .testbed import greedy_completion
 

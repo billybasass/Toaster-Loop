@@ -1,5 +1,5 @@
-# sable CI — no GPU required: the suite is hermetic (fake OpenAI server,
-# temp SABLE_HOME; torch stays lazily imported inside the training
+# Toaster Loop CI — no GPU required: the suite is hermetic (fake OpenAI server,
+# temp TOASTER_LOOP_HOME; torch stays lazily imported inside the training
 # worker, enforced by tests/test_license_hygiene.py).
 #
 # Cross-OS matrix (portability audit P0): the same hermetic suite runs on
@@ -38,13 +38,13 @@ jobs:
           uv sync --frozen --extra dev --python "${{ matrix.python-version }}"
 
       - name: Lint (ruff)
-        run: uv run --frozen ruff check sable tests
+        run: uv run --frozen ruff check toaster_loop tests
 
       - name: Type check (mypy — gated core; see [tool.mypy] in pyproject.toml)
         run: uv run --frozen mypy
 
       - name: Test (with coverage report, non-gating)
-        run: uv run --frozen pytest tests/ -q --cov=sable --cov-report=term
+        run: uv run --frozen pytest tests/ -q --cov=toaster_loop --cov-report=term
 
   js-check:
     # Real ES-module parse of the shipped dashboard JS; on machines without
@@ -58,7 +58,7 @@ jobs:
       - name: node --check every shipped .js
         run: |
           fail=0
-          for f in $(find sable/dashboard/static -name '*.js'); do
+          for f in $(find toaster_loop/dashboard/static -name '*.js'); do
             node --check "$f" || fail=1
           done
           exit $fail

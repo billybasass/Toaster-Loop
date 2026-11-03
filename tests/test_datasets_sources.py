@@ -21,16 +21,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from sable.core.config import SableConfig
-from sable.curate import sources as src
-from sable.curate.importer import ImportError_ as CurateImportError
+from toaster_loop.core.config import ToasterLoopConfig
+from toaster_loop.curate import sources as src
+from toaster_loop.curate.importer import ImportError_ as CurateImportError
 
 
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
@@ -211,10 +211,10 @@ def test_hub_import_lists_and_trains(home, monkeypatch):
     """Acceptance: import_hub snapshot -> listed by GET /api/datasets with hub
     provenance -> POST /api/train accepts it and the job params point at the
     materialized dataset dir (train.yaml + dataset_dir)."""
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
     _make_hub_snapshot(home)
-    app = DashboardApp(SableConfig(), home=home)
+    app = DashboardApp(ToasterLoopConfig(), home=home)
 
     r = app.handle("POST", "/api/datasets/import_hub",
                    body={"repo_id": "testorg/Test-Dataset"})
@@ -236,7 +236,7 @@ def test_hub_import_lists_and_trains(home, monkeypatch):
         captured["job"] = job
         return job
 
-    monkeypatch.setattr("sable.training.scheduler.Scheduler.run_claimed",
+    monkeypatch.setattr("toaster_loop.training.scheduler.Scheduler.run_claimed",
                         fake_run_claimed)
     tr = app.handle("POST", "/api/train", body={"dataset": ds_id})
     assert tr.status == 202
@@ -251,18 +251,18 @@ def test_hub_import_lists_and_trains(home, monkeypatch):
 
 
 def test_hub_import_missing_snapshot(home):
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
-    app = DashboardApp(SableConfig(), home=home)
+    app = DashboardApp(ToasterLoopConfig(), home=home)
     r = app.handle("POST", "/api/datasets/import_hub",
                    body={"repo_id": "org/never-downloaded"})
     assert r.status == 404
 
 
 def test_hub_import_bad_repo_id(home):
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
-    app = DashboardApp(SableConfig(), home=home)
+    app = DashboardApp(ToasterLoopConfig(), home=home)
     r = app.handle("POST", "/api/datasets/import_hub",
                    body={"repo_id": "../escape"})
     assert r.status == 400
@@ -275,7 +275,7 @@ def test_curate_source_endpoint_queues_folder_job(home, monkeypatch):
     dataset id so the UI can jump straight to it."""
     import time as _t
 
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
     folder = home / "in"
     folder.mkdir()
@@ -283,16 +283,16 @@ def test_curate_source_endpoint_queues_folder_job(home, monkeypatch):
 
     # No live server -> live_synth_fn None -> fallback synth inline.
     monkeypatch.setattr(src, "live_synth_fn", lambda app: None)
-    app = DashboardApp(SableConfig(), home=home)
+    app = DashboardApp(ToasterLoopConfig(), home=home)
 
     r = app.handle("POST", "/api/datasets/curate_source",
                    body={"source": "local_folder", "path": str(folder)})
     assert r.status == 202
     job_id = r.body["job_id"]
 
-    from sable.registry import ModelRegistry
+    from toaster_loop.registry import ModelRegistry
 
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     try:
         deadline = _t.monotonic() + 15
         state = None
@@ -308,9 +308,9 @@ def test_curate_source_endpoint_queues_folder_job(home, monkeypatch):
 
 
 def test_curate_source_validates(home):
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
-    app = DashboardApp(SableConfig(), home=home)
+    app = DashboardApp(ToasterLoopConfig(), home=home)
     assert app.handle("POST", "/api/datasets/curate_source",
                       body={"source": "ftp"}).status == 400
     assert app.handle("POST", "/api/datasets/curate_source",
@@ -324,7 +324,7 @@ def test_curate_source_validates(home):
 # --------------------------------------------------------------- env gate
 
 def test_datasets_env_preflight_and_install(monkeypatch, tmp_path):
-    from sable.core import datasetenv
+    from toaster_loop.core import datasetenv
 
     calls = []
 
@@ -360,8 +360,8 @@ def test_datasets_env_preflight_and_install(monkeypatch, tmp_path):
 
 
 def test_doctor_datasets_check(monkeypatch):
-    from sable import doctor
-    from sable.core import datasetenv
+    from toaster_loop import doctor
+    from toaster_loop.core import datasetenv
 
     monkeypatch.setattr(datasetenv, "preflight",
                         lambda cfg: {"python": "py", "datasets": False,

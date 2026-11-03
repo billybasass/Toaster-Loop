@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# sable cleanup — return the program to a freshly-downloaded state.
+# toaster-loop cleanup — return the program to a freshly-downloaded state.
 #
 #   ./cleanup.sh              # interactive: shows what would be removed, asks
 #   ./cleanup.sh --yes        # no prompt (also: -y)
 #   ./cleanup.sh --keep-models
 #
 # Removes:
-#   * SABLE_HOME runtime state (~/.sable by default): traces, skills, mined
+#   * TOASTER_LOOP_HOME runtime state (~/.toaster-loop by default): traces, skills, mined
 #     goldens, buffer, datasets, model registry, logs, serve/launch state,
 #     managed llama.cpp build (everything under the home).
 #   * Legacy ~/.unforge state dir from before the rename.
@@ -40,9 +40,9 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-SABLE_BIN="$REPO/.venv/bin/sable"
+TOASTER_LOOP_BIN="$REPO/.venv/bin/toaster-loop"
 
-echo "This returns sable to a freshly-downloaded state:"
+echo "This returns toaster-loop to a freshly-downloaded state:"
 echo "  - wipes the runtime home (traces, datasets, models, logs, llama.cpp)"
 echo "  - deletes the local .venv and build artifacts in $REPO"
 echo "  - removes the desktop launcher icon"
@@ -60,24 +60,24 @@ if [ -z "${UNFORGE_HOME:-}" ] && [ -d "$HOME/.unforge" ]; then
     rm -rf -- "$HOME/.unforge"
 fi
 
-# 1. Runtime state (stops sable-owned server/dashboard first). Uses the venv
+# 1. Runtime state (stops toaster-loop-owned server/dashboard first). Uses the venv
 #    CLI when present; otherwise a bare python -c import as fallback.
-if [ -x "$SABLE_BIN" ]; then
+if [ -x "$TOASTER_LOOP_BIN" ]; then
     echo "== wiping runtime home =="
-    "$SABLE_BIN" reset --yes ${KEEP_MODELS_ARGS[@]+"${KEEP_MODELS_ARGS[@]}"} \
-        || echo "warning: 'sable reset' failed; continuing with repo cleanup"
+    "$TOASTER_LOOP_BIN" reset --yes ${KEEP_MODELS_ARGS[@]+"${KEEP_MODELS_ARGS[@]}"} \
+        || echo "warning: 'toaster-loop reset' failed; continuing with repo cleanup"
 else
-    echo "== runtime home: venv already gone — removing ~/.sable directly =="
-    HOME_DIR="${SABLE_HOME:-$HOME/.sable}"
+    echo "== runtime home: venv already gone — removing ~/.toaster-loop directly =="
+    HOME_DIR="${TOASTER_LOOP_HOME:-$HOME/.toaster-loop}"
     case "$HOME_DIR" in
-        "$HOME/.sable"|"$HOME"/.sable-*) rm -rf -- "$HOME_DIR" ;;
-        *) echo "warning: refusing to delete unexpected SABLE_HOME=$HOME_DIR" >&2 ;;
+        "$HOME/.toaster-loop"|"$HOME"/.toaster-loop-*) rm -rf -- "$HOME_DIR" ;;
+        *) echo "warning: refusing to delete unexpected TOASTER_LOOP_HOME=$HOME_DIR" >&2 ;;
     esac
 fi
 
 # 2. Repo-local artifacts (the ones .gitignore declares as generated).
 echo "== cleaning repo checkout =="
-rm -rf .venv .pytest_cache .mypy_cache .ruff_cache sable.egg-info
+rm -rf .venv .pytest_cache .mypy_cache .ruff_cache toaster_loop.egg-info sable.egg-info
 # Legacy egg-info from the pre-rename (unforge) era.
 rm -rf unforge.egg-info
 find . -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
@@ -90,10 +90,10 @@ rm -rf .coverage htmlcov
 
 # 3. Desktop icon installed by setup.sh.
 ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
-rm -f "$ICON_DIR/sable.desktop" \
-      "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/sable.svg"
+rm -f "$ICON_DIR/toaster-loop.desktop" \
+      "${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps/toaster-loop.svg"
 update-desktop-database "$ICON_DIR" >/dev/null 2>&1 || true
 
 echo
-echo "sable is back to a freshly-downloaded state."
+echo "Toaster Loop is back to a freshly-downloaded state."
 echo "To start using it again: ./setup.sh"

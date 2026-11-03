@@ -27,8 +27,8 @@ from typing import Any, Dict
 
 import pytest
 
-from sable.core import delegation, delegation_store
-from sable.core.config import SableConfig, load_config
+from toaster_loop.core import delegation, delegation_store
+from toaster_loop.core.config import ToasterLoopConfig, load_config
 
 from fake_server import FakeOpenAIServer  # noqa: E402
 
@@ -37,7 +37,7 @@ from fake_server import FakeOpenAIServer  # noqa: E402
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
@@ -48,8 +48,8 @@ def _clean(home):
     delegation.reset_state()
 
 
-def _cfg(**kw) -> SableConfig:
-    cfg = SableConfig(**kw)
+def _cfg(**kw) -> ToasterLoopConfig:
+    cfg = ToasterLoopConfig(**kw)
     cfg.profiles = [{"name": "coder", "system_prompt": "code",
                      "tools": ["read_file"]}]
     return cfg
@@ -352,7 +352,7 @@ def test_runner_heartbeat_hook_per_iteration_and_tool(home):
     tool call; default None changes nothing."""
     from http.server import BaseHTTPRequestHandler
 
-    from sable.core.agent_runner import SableAgentClient
+    from toaster_loop.core.agent_runner import ToasterLoopAgentClient
     from tests.fake_server import FakeOpenAIServer
 
     calls = {"n": 0}
@@ -385,13 +385,13 @@ def test_runner_heartbeat_hook_per_iteration_and_tool(home):
             n_req["i"] += 1
 
     with FakeOpenAIServer(handler_cls=ToolOnceThenAnswer) as srv:
-        client = SableAgentClient(base_url=srv.base_url, model="m",
+        client = ToasterLoopAgentClient(base_url=srv.base_url, model="m",
                                   tool_impls={"noop": lambda **k: "ok"})
         # default: hook absent/None -> plain run works untouched
         assert client.run("go").completed
 
         ticks = []
-        client2 = SableAgentClient(base_url=srv.base_url, model="m",
+        client2 = ToasterLoopAgentClient(base_url=srv.base_url, model="m",
                                    tool_impls={"noop": lambda **k: "ok"})
         client2._heartbeat = lambda: ticks.append(1)
         assert client2.run("go").completed
@@ -541,7 +541,7 @@ def test_check_delegation_queued_reports_ahead(home, monkeypatch, _clean):
 # ---------------------------------------------------------------------------
 
 def test_config_defaults():
-    cfg = SableConfig()
+    cfg = ToasterLoopConfig()
     assert cfg.delegation_max_concurrent == 2
     assert cfg.delegation_queue_max == 16
     assert cfg.delegation_wake_retry_seconds == 2.0
@@ -552,7 +552,7 @@ def test_config_defaults():
 
 
 def test_config_yaml_section(tmp_path, monkeypatch):
-    monkeypatch.delenv("SABLE_DELEGATION_MAX", raising=False)
+    monkeypatch.delenv("TOASTER_LOOP_DELEGATION_MAX", raising=False)
     f = tmp_path / "c.yaml"
     f.write_text(
         "delegation:\n"
@@ -569,8 +569,8 @@ def test_config_yaml_section(tmp_path, monkeypatch):
 
 
 def test_config_env_overrides(tmp_path, monkeypatch):
-    monkeypatch.setenv("SABLE_CONFIG", str(tmp_path / "none.yaml"))
-    monkeypatch.setenv("SABLE_DELEGATION_MAX", "7")
+    monkeypatch.setenv("TOASTER_LOOP_CONFIG", str(tmp_path / "none.yaml"))
+    monkeypatch.setenv("TOASTER_LOOP_DELEGATION_MAX", "7")
     cfg = load_config()
     assert cfg.delegation_max_concurrent == 7
 
@@ -740,7 +740,7 @@ class _StubRunner:
         self.kw = kw
 
     def run(self, prompt, history=None, previous_summary=None):
-        from sable.core.agent_runner import AgentResult
+        from toaster_loop.core.agent_runner import AgentResult
 
         _StubRunner.made.append({"prompt": prompt,
                                  "ctx": self.kw.get("delegation_context")})
@@ -752,19 +752,19 @@ class _StubRunner:
 @pytest.fixture()
 def dash(home, monkeypatch):
     """DashboardApp wired to a fake serving endpoint + stub runner."""
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
     _StubRunner.made = []
 
     def _create(cfg, base_url, model, **kw):
         return _StubRunner(cfg, base_url, model, **kw)
 
-    monkeypatch.setattr("sable.core.agent_runner.create_runner", _create)
+    monkeypatch.setattr("toaster_loop.core.agent_runner.create_runner", _create)
     with FakeOpenAIServer() as fs:
         (home / "serve_state.json").write_text(json.dumps({
             "mode": "attach", "base_url": fs.base_url,
             "model_name": "fake-model"}))
-        yield DashboardApp(SableConfig(), home=home)
+        yield DashboardApp(ToasterLoopConfig(), home=home)
 
 
 def _wait_run_done(app, run_id, timeout=5.0):
@@ -884,17 +884,17 @@ def test_run_end_nudges_watcher_delivery(home, _clean, monkeypatch):
                         lambda: nudged.append(1))
     delegation.register_wake_hook("t-n", lambda t: {"started": False})
     # exercise the real code path through a user run on a thread
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
     def _create(cfg, base_url, model, **kw):
         return _StubRunner(cfg, base_url, model, **kw)
 
-    monkeypatch.setattr("sable.core.agent_runner.create_runner", _create)
+    monkeypatch.setattr("toaster_loop.core.agent_runner.create_runner", _create)
     with FakeOpenAIServer() as fs:
         (home / "serve_state.json").write_text(json.dumps({
             "mode": "attach", "base_url": fs.base_url,
             "model_name": "fake-model"}))
-        app = DashboardApp(SableConfig(), home=home)
+        app = DashboardApp(ToasterLoopConfig(), home=home)
         resp = app.handle("POST", "/api/chat/stream",
                           body={"prompt": "go", "thread": "t-n"})
         _drain_stream(resp)
@@ -1043,7 +1043,7 @@ def test_busy_poll_guard_silent_without_thread(home, monkeypatch, _clean):
 def test_check_delegation_tool_threads_ctx(home, monkeypatch, _clean):
     """core/tools.py check_delegation passes the runner ctx through so the
     guardrail actually engages on model calls."""
-    from sable.core import tools
+    from toaster_loop.core import tools
 
     monkeypatch.setattr(delegation, "POLL_GUARD_MAX_CHECKS", 1)
     seen = {}
@@ -1080,7 +1080,7 @@ def test_wake_run_trace_carries_inbox_wake_metadata(home, _clean, dash,
                                                     monkeypatch):
     """Phase 3: the wake run's recorder gets metadata {inbox_wake: True} so
     the traces panel can badge it; user runs get none."""
-    from sable.store import recorder as recorder_mod
+    from toaster_loop.store import recorder as recorder_mod
 
     made = []
     real = recorder_mod.make_recorder
@@ -1197,7 +1197,7 @@ def test_thread_delete_cancels_run_and_blocks_resurrection(home, _clean,
     its worker from re-creating the deleted file when it finishes."""
     import threading as _th
 
-    from sable.core.agent_runner import AgentResult
+    from toaster_loop.core.agent_runner import AgentResult
 
     class _SlowRunner:
         def __init__(self, cfg, base_url, model, **kw):
@@ -1217,7 +1217,7 @@ def test_thread_delete_cancels_run_and_blocks_resurrection(home, _clean,
                                           "content": "late answer"}],
                                trace_id="tr-late")
 
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
     slow = {}
 
@@ -1230,11 +1230,11 @@ def test_thread_delete_cancels_run_and_blocks_resurrection(home, _clean,
         (home / "serve_state.json").write_text(json.dumps({
             "mode": "attach", "base_url": fs.base_url,
             "model_name": "fake-model"}))
-        import sable.core.agent_runner as ar
+        import toaster_loop.core.agent_runner as ar
         old = ar.create_runner
         ar.create_runner = _create
         try:
-            app = DashboardApp(SableConfig(), home=home)
+            app = DashboardApp(ToasterLoopConfig(), home=home)
             # The real client creates the thread file before starting a run.
             app.handle("PUT", "/api/chat/threads/t-del",
                        body={"messages": [{"role": "user",
@@ -1281,7 +1281,7 @@ def _sse(text):
 def test_follow_chat_run_announces_dropped_frames():
     """Audit finding #11: a reader attaching after ring-buffer rollover gets
     exactly one stream.note frame naming the dropped count."""
-    from sable.dashboard.api.chat import _follow_chat_run
+    from toaster_loop.dashboard.api.chat import _follow_chat_run
 
     run = {"frames": ["event: message.delta\ndata: {}\n\n",
                       "event: run.done\ndata: {}\n\n"],

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <3.14"
 resolution-markers = [
     "python_full_version >= '3.12' and sys_platform == 'win32'",
@@ -1651,6 +1651,52 @@ wheels = [
 ]
 
 [[package]]
+name = "toaster-loop"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "httpx" },
+    { name = "pillow" },
+    { name = "pyyaml" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+training = [
+    { name = "accelerate" },
+    { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
+    { name = "datasets" },
+    { name = "peft" },
+    { name = "torch" },
+    { name = "transformers" },
+    { name = "trl" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate", marker = "extra == 'training'", specifier = ">=0.34" },
+    { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'training'", specifier = ">=0.43" },
+    { name = "datasets", marker = "extra == 'training'", specifier = ">=3.0" },
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "peft", marker = "extra == 'training'", specifier = ">=0.13" },
+    { name = "pillow", specifier = ">=10.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "torch", marker = "extra == 'training'", specifier = ">=2.4" },
+    { name = "transformers", marker = "extra == 'training'", specifier = ">=4.45" },
+    { name = "trl", marker = "extra == 'training'", specifier = ">=0.12" },
+]
+provides-extras = ["dev", "training"]
+
+[[package]]
 name = "tokenizers"
 version = "0.23.2"
 source = { registry = "https://pypi.org/simple" }
@@ -1843,52 +1889,6 @@ sdist = { url = "https://files.pythonhosted.org/packages/d9/68/f1b440335057bfce7
 wheels = [
     { url = "https://files.pythonhosted.org/packages/94/21/1e5995a1c920cce14e4bffae20c665ec10e7ed03ab25e006cd741092b718/tzdata-2026.5-py2.py3-none-any.whl", hash = "sha256:b683bd1b6659ddcd810ff02ad09ba821d4bf1065072805063eb35c49617905ac", size = 347996, upload-time = "2026-10-03T09:23:12.535Z" },
 ]
-
-[[package]]
-name = "sable"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "httpx" },
-    { name = "pillow" },
-    { name = "pyyaml" },
-]
-
-[package.optional-dependencies]
-dev = [
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-training = [
-    { name = "accelerate" },
-    { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
-    { name = "datasets" },
-    { name = "peft" },
-    { name = "torch" },
-    { name = "transformers" },
-    { name = "trl" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "accelerate", marker = "extra == 'training'", specifier = ">=0.34" },
-    { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'training'", specifier = ">=0.43" },
-    { name = "datasets", marker = "extra == 'training'", specifier = ">=3.0" },
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
-    { name = "peft", marker = "extra == 'training'", specifier = ">=0.13" },
-    { name = "pillow", specifier = ">=10.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
-    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
-    { name = "torch", marker = "extra == 'training'", specifier = ">=2.4" },
-    { name = "transformers", marker = "extra == 'training'", specifier = ">=4.45" },
-    { name = "trl", marker = "extra == 'training'", specifier = ">=0.12" },
-]
-provides-extras = ["dev", "training"]
 
 [[package]]
 name = "xxhash"

@@ -7,8 +7,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 
-# sable runtime state that must never live in the repo (all belongs under
-# SABLE_HOME / tmp paths)
+# toaster-loop runtime state that must never live in the repo (all belongs under
+# TOASTER_LOOP_HOME / tmp paths)
 serve_state.json
 serve_state.json.tmp
 adapter/

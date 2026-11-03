@@ -1,4 +1,4 @@
-# ROADMAP — sable
+# ROADMAP — toaster-loop
 
 > **Status (2026-10).** Phases 1–5 all shipped, plus a Phase 6 (multi-model serving) and
 > two idea passes that grew the loop: hub downloads, operation ledger + capability tiers,
@@ -16,15 +16,15 @@ No phase may introduce a cloud dependency.
 ## Phase 1 — Walking skeleton: agent loop against a local server
 
 **Scope**
-- `sable` package scaffold (`pyproject.toml`, uv, `sable/` src tree, `~/.sable/` layout).
+- `toaster-loop` package scaffold (`pyproject.toml`, uv, `toaster-loop/` src tree, `~/.toaster-loop/` layout).
 - Serving Supervisor v0: spawn llama-server with a GGUF (or explicitly attach to any
   running OpenAI-compatible server), health-check loop, clean shutdown.
 - Boot the agent runtime against `http://127.0.0.1:<port>/v1` and run a tool-calling
-  task end-to-end (CLI entry `sable run --task "…"`).
+  task end-to-end (CLI entry `toaster-loop run --task "…"`).
 - Minimal tool-call robustness probe: verify native `tool_calls` work with the chosen
   GGUF; text tool-call recovery for flaky function callers.
 
-**Deliverables**: `sable serve`, `sable run`; README quickstart; config file v0
+**Deliverables**: `toaster-loop serve`, `toaster-loop run`; README quickstart; config file v0
 (`config.yaml`).
 
 **Acceptance criteria**
@@ -48,7 +48,7 @@ No phase may introduce a cloud dependency.
   `model_version`, tool calls/results, token counts, latency, outcome fields.
 - Trace capture at one canonical post-run point in the runner.
 - Outcome capture v0: heuristic score + per-tool success/failure; CLI to browse
-  (`sable traces list|show|stats`) and explicit feedback (`sable feedback`).
+  (`toaster-loop traces list|show|stats`) and explicit feedback (`toaster-loop feedback`).
 
 **Acceptance criteria**
 - After N tasks, the buffer yields valid ShareGPT JSONL loadable by HF `datasets`.
@@ -89,7 +89,7 @@ No phase may introduce a cloud dependency.
   gate (substring + tool-call grammar checks) before promotion.
 
 **Acceptance criteria**
-- Full closed loop demonstrated end-to-end (`sable iterate`); rollback restores
+- Full closed loop demonstrated end-to-end (`toaster-loop iterate`); rollback restores
   previous behavior in one command.
 - Training and serving never co-reside beyond verified VRAM headroom.
 - Kill -9 of the training worker leaves registry/serving consistent (crash reaping).
@@ -100,7 +100,7 @@ No phase may introduce a cloud dependency.
 
 > **History note**: the original Phase 5 outline was replaced 2026-09-03 after review:
 > the UI exposes the union of local-model-management + agent-control capabilities as
-> reachable through sable's own backend. The minimal dashboard (`sable/dashboard/` —
+> reachable through toaster-loop's own backend. The minimal dashboard (`toaster-loop/dashboard/` —
 > stdlib loopback server + `DashboardApp` JSON API + vanilla static UI) was the growth
 > base for everything shipped since.
 
@@ -123,7 +123,7 @@ No phase may introduce a cloud dependency.
   tests pass over the full shipped UI tree.
 
 **Risks**
-- Scope creep into re-building other products' internals (mitigation: sable ships
+- Scope creep into re-building other products' internals (mitigation: toaster-loop ships
   only what its own backend implements).
 - Stdlib server growing beyond comfort (mitigation: thin transport layer; all logic
   stays in the transport-agnostic `DashboardApp`, which keeps everything unit-testable).
@@ -133,7 +133,7 @@ No phase may introduce a cloud dependency.
 ## Cross-cutting
 - Dependency-hygiene check in CI: import allowlist only (see D-3/D-12); zero external
   assets in the shipped UI.
-- Everything under `~/.sable/`; uninstall = delete dir.
+- Everything under `~/.toaster-loop/`; uninstall = delete dir.
 - Documented commands keep `--dry-run` ergonomics everywhere first.
 
 ## Phase 6 — Multi-model serving (shipped)
@@ -144,7 +144,7 @@ bind to instances; optional capability-tier-aware auto-routing cascades small→
 over-commit. API/contract details: README "Phase 6 API contract notes".
 
 ## Improvement Program — WP1: bench harness + noise floor (shipped)
-`sable bench` (`serving/bench.py`) measures prompt-processing and generation
+`toaster-loop bench` (`serving/bench.py`) measures prompt-processing and generation
 tokens/sec against a supervised llama-server endpoint over N repeated temperature-0
 runs (default 5), reporting per-run values plus median/min/max and run-to-run
 spread `((max-min)/median)` — the noise-floor methodology (measurement discipline
@@ -154,8 +154,8 @@ inspired by kimi-k3-in-c; re-implemented inline, no imports per D-12).
 must be reported as noise. **Token-identity rule:** speed comparisons run at
 temperature 0 over a fixed prompt fixture; if token streams diverge between runs
 (or prompt sets differ), `compare_records()` marks the speedup INVALID and the
-CLI says so explicitly. Records persist under `<SABLE_HOME>/bench/` as JSON
-keyed by timestamp+label (`SABLE_BENCH_DIR` overrides); llama.cpp `timings`
+CLI says so explicitly. Records persist under `<TOASTER_LOOP_HOME>/bench/` as JSON
+keyed by timestamp+label (`TOASTER_LOOP_BENCH_DIR` overrides); llama.cpp `timings`
 are preferred over wall-clock when the server reports them. No new dependencies;
 no behavior change to existing commands.
 
@@ -180,7 +180,7 @@ once — path, expected kind, found value (redacted via `core/redact`) — inste
 of failing on the first error ("refuse to guess"; kimi-k3-in-c pattern, inline).
 Mistypes are always errors; **unknown keys stay warn-only by default** (stray
 keys in existing configs load byte-identically) and become errors only with
-`SABLE_CONFIG_STRICT=1` / `load_config(strict_unknown=True)` — the choice is
+`TOASTER_LOOP_CONFIG_STRICT=1` / `load_config(strict_unknown=True)` — the choice is
 stated inside the error text itself. All valid configs load to identical
 objects (`tests/test_core.py`).
 
@@ -195,21 +195,21 @@ honest variant beside it:
 
 | Metric | Could mislead because | Raw variant | Honest variant | Action taken |
 |--------|----------------------|-------------|----------------|--------------|
-| `sable_outcome_score_mean` (overview "avg" chip) | computed only over SCORED traces — a mean over 3 of 400 reads like a whole-buffer quality signal | `sable_traces_scored_total` + `total_traces` | `sable_score_coverage_ratio` (scored/total) | new counter + gauge on `/api/metrics`; `unscored_traces` on `/api/status`; overview chip now renders "avg X (n/m scored)" |
-| `sable_promotion_pass_rate` | cumulative ratio hides sample size and time window — "100% pass" can mean one decision ever | promote/fail counts (`sable_promotions_total`) | `sable_promotion_decisions_total` (denominator counter) | paired denominator exposed on `/api/metrics`; HELP text warns against small-denominator reads |
-| `sable_instances_up` | attach-mode up=1 is only "state file exists" (no healthcheck in a cheap scrape) yet looks identical to a pid-verified spawn up=1 | per-instance up gauge | `sable_instance_up_strength{strength="pid_probe"\|"state_file"}` | evidence-strength split exposed on `/api/metrics` (API-level surfacing; serve panel left unchanged — panel change judged too invasive for the value) |
-| `sable_request_latency_seconds` mean-side reading | summary quantiles already ship p50/p90/p95 + `_count`, so bimodality is visible IF consumers use quantiles; a mean computed client-side would hide it | `_sum`/`_count` | p50/p90/p95 quantiles (already present) | audited — no change needed; exposition already gives the honest variants (nearest-rank via `insights.percentile`) |
-| `sable_traces_total{status}` counts vs rates | raw status counts carry no denominator for a failure RATE | per-status counters | client-side rate needs totals; totals are derivable from the same family | audited — honest as exposed (pure counts, no fabricated ratio); dashboard traces strip already shows "n failing" over its own scanned total |
+| `toaster_loop_outcome_score_mean` (overview "avg" chip) | computed only over SCORED traces — a mean over 3 of 400 reads like a whole-buffer quality signal | `toaster_loop_traces_scored_total` + `total_traces` | `toaster_loop_score_coverage_ratio` (scored/total) | new counter + gauge on `/api/metrics`; `unscored_traces` on `/api/status`; overview chip now renders "avg X (n/m scored)" |
+| `toaster_loop_promotion_pass_rate` | cumulative ratio hides sample size and time window — "100% pass" can mean one decision ever | promote/fail counts (`toaster_loop_promotions_total`) | `toaster_loop_promotion_decisions_total` (denominator counter) | paired denominator exposed on `/api/metrics`; HELP text warns against small-denominator reads |
+| `toaster_loop_instances_up` | attach-mode up=1 is only "state file exists" (no healthcheck in a cheap scrape) yet looks identical to a pid-verified spawn up=1 | per-instance up gauge | `toaster_loop_instance_up_strength{strength="pid_probe"\|"state_file"}` | evidence-strength split exposed on `/api/metrics` (API-level surfacing; serve panel left unchanged — panel change judged too invasive for the value) |
+| `toaster_loop_request_latency_seconds` mean-side reading | summary quantiles already ship p50/p90/p95 + `_count`, so bimodality is visible IF consumers use quantiles; a mean computed client-side would hide it | `_sum`/`_count` | p50/p90/p95 quantiles (already present) | audited — no change needed; exposition already gives the honest variants (nearest-rank via `insights.percentile`) |
+| `toaster_loop_traces_total{status}` counts vs rates | raw status counts carry no denominator for a failure RATE | per-status counters | client-side rate needs totals; totals are derivable from the same family | audited — honest as exposed (pure counts, no fabricated ratio); dashboard traces strip already shows "n failing" over its own scanned total |
 
 No KV-cache-hit-rate metric exists anywhere in the stack (audited: metrics.py,
-insights.py, panels) — the program-brief canonical example has no sable
+insights.py, panels) — the program-brief canonical example has no toaster-loop
 analogue to fix; the coverage/denominator/evidence pairs above are this codebase's
 instances of the same failure class. No new dependencies; successful command
 outputs byte-identical (`tests/test_cli.py`, `tests/test_cli.py`).
 
-## Improvement Program — WP3: `sable calibrate` per-machine autotune (shipped)
+## Improvement Program — WP3: `toaster-loop calibrate` per-machine autotune (shipped)
 
-New module `serving/calibrate.py` + CLI `sable calibrate`: a **coordinate-wise
+New module `serving/calibrate.py` + CLI `toaster-loop calibrate`: a **coordinate-wise
 staged sweep** (baseline → test each candidate against the current best, keep
 the winner, move on — bounded runtime, knob interactions explicitly not
 explored) over run_settings knobs already mapped in `serving/run_args.py`:
@@ -224,19 +224,19 @@ temperature 0, default 3 runs/candidate).
 
 | Rule | Definition |
 |------|------------|
-| Adoption threshold | A candidate is adopted **only if** its median gen tok/s beats the current best by MORE THAN `max(3%, noise_floor_spread_pct)`. The noise floor is the newest persisted `kind=noise_floor` bench record (`bench.load_noise_floor()`); when none exists, calibration first repeats the baseline settings and persists a noise-floor record exactly like `sable bench --noise-floor`. Effects inside the floor are recorded `rejected`, never claimed as wins. |
+| Adoption threshold | A candidate is adopted **only if** its median gen tok/s beats the current best by MORE THAN `max(3%, noise_floor_spread_pct)`. The noise floor is the newest persisted `kind=noise_floor` bench record (`bench.load_noise_floor()`); when none exists, calibration first repeats the baseline settings and persists a noise-floor record exactly like `toaster-loop bench --noise-floor`. Effects inside the floor are recorded `rejected`, never claimed as wins. |
 | Token identity | Carried over from `bench.compare_records`: identical prompt-set hash + identical temperature-0 token streams between best and candidate. Any divergence ⇒ verdict `invalid` — a faster setting that changes tokens is NEVER adopted, only recorded. |
 | Error handling | A candidate whose server fails to start or crashes mid-bench is recorded `error`, skipped, and the sweep continues (never aborts). If even the baseline cannot be measured, calibration exits 1 with nothing saved as adopted. |
 | Speculative honesty | When `mtp` is requested but no drafter GGUF exists next to the model, `run_args.speculative_args()` falls back to ngram-mod; the profile records `tested_as: "ngram (mtp unavailable)"` so no later reader can claim MTP was measured. |
 
-**Profiles**: JSON under `~/.sable/calibrate/` (`SABLE_CALIBRATE_DIR`
+**Profiles**: JSON under `~/.toaster-loop/calibrate/` (`TOASTER_LOOP_CALIBRATE_DIR`
 override), one file per machine-id + model-hash, atomic write. Fields:
 `profile_version`, `machine_id`, `model_hash`, `model_path`, `timestamp`,
 `runs_per_candidate`, `threshold_pct`, `noise_floor {spread_pct, record,
 source}`, `baseline_settings`, `adopted_settings`, and per-knob candidate tables
 (value → median gen tok/s, delta_pct vs running best, verdict
 `adopted|rejected|invalid|error|baseline`, `tested_as` for spec fallback).
-Machine id: `SABLE_MACHINE_ID` (test hook) > `/etc/machine-id` > sha256 of
+Machine id: `TOASTER_LOOP_MACHINE_ID` (test hook) > `/etc/machine-id` > sha256 of
 hostname+machine. Model hash: sha256 over the first 1 MiB + file size — cheap
 enough for the launch path (full-file hashing like `core.provenance.hash_file`
 is too slow on multi-GB weights); it is a profile lookup key, not an
@@ -251,7 +251,7 @@ config/instance `run_settings` — manual explicit values ALWAYS win. Consumed a
 the two argv assembly sites: `supervisor.build_instance_cmd` and
 `deploy._start_server_detached_once`.
 
-**CLI**: `sable calibrate [--quick] [--knobs k1,k2] [--runs N] [--model REF]
+**CLI**: `toaster-loop calibrate [--quick] [--knobs k1,k2] [--runs N] [--model REF]
 [--attach URL] [--list] [--show] [--clear]` — human-readable summary table
 (knob | candidate | median tok/s | delta% | noise floor | verdict). Exit 0 on
 success, 1 when nothing could be measured, 2 for usage mistakes (unknown knob,
@@ -261,7 +261,7 @@ receives the candidate knobs; such profiles record
 
 **Dashboard**: intentionally NOT surfaced (decision: surfacing calibration
 state in the serve panel would require new API + panel plumbing — invasive for
-optional value; `sable calibrate --show` covers it).
+optional value; `toaster-loop calibrate --show` covers it).
 
 **No real-machine numbers are claimed.** No real llama-server/GPU calibration
 was executed in this environment; everything above is validated by hermetic
@@ -304,7 +304,7 @@ the time it left zero, giving `inflight_age()`. Streaming progress needs no
 extra hooks — a streaming generation burns CPU/IO, so (b)/(c) already capture
 "progressing". The tally is inert (a dict counter) unless the watchdog runs.
 
-**Recovery**: on detection the pid is re-verified as sable-owned via
+**Recovery**: on detection the pid is re-verified as toaster-loop-owned via
 `runtime.terminate_owned_pid` — the WP4-extracted shared verify-then-kill
 helper (`pid_alive`: ours → SIGTERM, SIGKILL after grace; foreign/recycled →
 never killed, log + clear stale state) now also used by
@@ -385,7 +385,7 @@ a never-loaded instance keeps its pre-WP5 503 verbatim.
 `/api/servers/<id>/unload` (unload refuses 409 `request_in_flight` while a
 request is tracked), instance rows carry `load_state`
 (loaded|unloaded|unloading|stopped), and the CLI gains
-`sable instances status|load|unload <id>`. Serve-panel JS surfacing beyond
+`toaster-loop instances status|load|unload <id>`. Serve-panel JS surfacing beyond
 the JSON field was skipped (non-invasive-UI rule; the field is ready for it).
 
 **Train+serve handshake — the algorithm** (`min_free_vram_mib > 0` AND
@@ -439,17 +439,17 @@ reload + retry-once, endpoint/CLI state round-trips, the full gate matrix
 (no-wiring / refuse+event / unload+admit / still-insufficient) and the no-
 double-launch serialization — without hardware.
 
-## Improvement Program — WP6: MCP control plane — `sable mcp` (shipped)
+## Improvement Program — WP6: MCP control plane — `toaster-loop mcp` (shipped)
 
 Inspired by Strata's MCP control-plane pattern — re-implemented inline with
 **zero new dependencies**: no MCP SDK, stdlib-only (`json`/`sys` framing in
-`sable/mcp/server.py`); `tests/test_hygiene.py` keeps the import
+`toaster-loop/mcp/server.py`); `tests/test_hygiene.py` keeps the import
 allowlist green. New opt-in command: nothing existing changes when
-`sable mcp` is not invoked; defaults byte-identical.
+`toaster-loop mcp` is not invoked; defaults byte-identical.
 
 **Transport — stdio, no socket.** JSON-RPC 2.0 line-delimited over
 stdin/stdout (MCP's canonical local transport): the client spawns
-`python -m sable mcp` and pipes frames. No listener exists, so the
+`python -m toaster-loop mcp` and pipes frames. No listener exists, so the
 loopback-only rule holds by construction; zero cloud, zero keys. Single-
 threaded synchronous request loop (documented: spec-compliant, keeps the
 confirm store trivially safe). stdout carries JSON-RPC only; diagnostics go
@@ -470,7 +470,7 @@ and `bench`. Classification judgment calls documented in tools.py + README:
 occupy the GPU (and bench persists records) — process side effects make
 them mutating by policy.
 
-**Plan-then-confirm for every mutating tool** (`sable/mcp/confirm.py`):
+**Plan-then-confirm for every mutating tool** (`toaster-loop/mcp/confirm.py`):
 first call returns PLAN `{action, target, exact_effect, risks, params}` + an
 opaque `secrets`-random token; second call with the token executes. Tokens:
 in-memory store only (restart drops plans), TTL 300 s, single-use (consume
@@ -503,7 +503,7 @@ first-run config, the record→curate→train→export→promote→serve loop, b
 calibrate/coexistence/watchdog features, MCP client wiring with the plan-then-
 confirm flow, and a troubleshooting table keyed to the exit-code taxonomy
 (exit 3 consolidated config report, exit 4 corrupt artifact, llama-server
-missing → `sable setup`, port conflicts, VRAM-gate refusal → coexist/
+missing → `toaster-loop setup`, port conflicts, VRAM-gate refusal → coexist/
 instances unload, frozen server → watchdog, stale calibration profile,
 token-identity INVALID on bench compare). [`AGENTS.md`](../AGENTS.md): the two
 cardinal rules (opt-in features keep outputs byte-identical; no claims below
@@ -512,13 +512,13 @@ never import reference projects — `tests/test_hygiene.py` enforces),
 dependency policy, test/lint commands, exit-code pointer, and how to add a
 config key.
 
-**`sable doctor --env`** (`sable/doctor.py`, stdlib-only like dashboard/
+**`toaster-loop doctor --env`** (`toaster-loop/doctor.py`, stdlib-only like dashboard/
 MCP; kimi-k3-doctor's measure-don't-assume pattern re-implemented inline per
-D-12). Existing `sable doctor` (runtime GPU/backend diagnosis) is untouched;
-`--env` opts into the measurement report (`python -m sable.doctor` runs it
+D-12). Existing `toaster-loop doctor` (runtime GPU/backend diagnosis) is untouched;
+`--env` opts into the measurement report (`python -m toaster_loop.doctor` runs it
 directly — no new console-script surface). Checks: python version range; core
 deps + `[training]` extras detection; config parse via `load_config` with the
-consolidated ConfigError printed VERBATIM (exit 3); `SABLE_HOME` writability;
+consolidated ConfigError printed VERBATIM (exit 3); `TOASTER_LOOP_HOME` writability;
 free disk via `shutil.disk_usage` on the SAME filesystems export/training write
 to (home, configured `training.output_dir`, temp/staging dir — deduped by
 device) against the largest registered GGUF + safety margin (max(2 GiB, 10%));
@@ -526,17 +526,17 @@ MemAvailable from `/proc/meminfo` → serve-context and train-batch presets with
 the tier formulas printed; free VRAM via a local `nvidia-smi` call when present
 (absence reported honestly) → `-ngl`/context tiers; llama-server discovery
 reusing the existing runtime path; loopback bindability of configured ports
-(live sable instances excuse their own ports); stale instance state files —
+(live toaster-loop instances excuse their own ports); stale instance state files —
 reported with exact cleanup, and `--fix` removes ONLY entries whose pid is
 deterministically gone (ownership rule: foreign/alive-but-not-ours pids are
-never touched). Findings emit copy-paste next commands (`sable bench
---noise-floor` when no persisted baseline; `sable calibrate --quick` when
-`serve.calibration: auto` but no profile; `sable setup` when the binary is
+never touched). Findings emit copy-paste next commands (`toaster-loop bench
+--noise-floor` when no persisted baseline; `toaster-loop calibrate --quick` when
+`serve.calibration: auto` but no profile; `toaster-loop setup` when the binary is
 missing). Exit codes per taxonomy: 0 ok (warnings allowed), 1 actionable
 problems, 3 invalid config.
 
 **Tests** (`tests/test_serving.py`, hermetic): every probe injectable — tmp
-`SABLE_HOME`, fake `disk_usage`, fixture meminfo text, stubbed pid-alive —
+`TOASTER_LOOP_HOME`, fake `disk_usage`, fixture meminfo text, stubbed pid-alive —
 covering low-disk flagging on export paths, RAM/VRAM preset math on fixed
 inputs, next-command suggestions for missing noise-floor/calibration states,
 config-error passthrough (exit 3, verbatim report), stale-state detection with
@@ -695,17 +695,17 @@ indexed counts — no per-scrape full scans heavier than an indexed count.
 Metric name mapping (vLLM-compatible names are inspiration only, re-implemented
 inline per D-12; mirrors exist ONLY where semantics truly match):
 
-| sable:* | vllm mirror? | semantics note |
+| toaster-loop:* | vllm mirror? | semantics note |
 |---|---|---|
-| `sable_requests_total` (new) | NO | chat-proxy agent runs, not engine completions — one trace can span N completions; mirroring as `vllm:num_requests_total` would lie |
-| `sable_tokens_in_total` | `vllm:prompt_tokens_total` | prompt tokens processed — same semantics, identical value from one source |
-| `sable_tokens_out_total` | `vllm:generation_tokens_total` | generation tokens processed — same semantics, identical value |
-| `sable_request_latency_seconds` | NO (`vllm:time_to_first_token_seconds` deliberately absent) | sable records end-to-end duration only, never TTFT; no honest histogram buckets exist, so absence is documented in HELP instead of faking samples |
-| `sable_jobs_queued` / `sable_jobs_running` (new gauges) | NO (`vllm:num_requests_waiting` absent) | training/curate job-queue depth — a different queue than the vLLM scheduler's waiting-request queue |
+| `toaster_loop_requests_total` (new) | NO | chat-proxy agent runs, not engine completions — one trace can span N completions; mirroring as `vllm:num_requests_total` would lie |
+| `toaster_loop_tokens_in_total` | `vllm:prompt_tokens_total` | prompt tokens processed — same semantics, identical value from one source |
+| `toaster_loop_tokens_out_total` | `vllm:generation_tokens_total` | generation tokens processed — same semantics, identical value |
+| `toaster_loop_request_latency_seconds` | NO (`vllm:time_to_first_token_seconds` deliberately absent) | toaster-loop records end-to-end duration only, never TTFT; no honest histogram buckets exist, so absence is documented in HELP instead of faking samples |
+| `toaster_loop_jobs_queued` / `toaster_loop_jobs_running` (new gauges) | NO (`vllm:num_requests_waiting` absent) | training/curate job-queue depth — a different queue than the vLLM scheduler's waiting-request queue |
 
 Honesty rule enforced by test: every rate family keeps its WP2c denominator
-counter beside it (`sable_score_coverage_ratio` ↔ `sable_traces_scored_total`;
-`sable_promotion_pass_rate` ↔ `sable_promotion_decisions_total`), and all
+counter beside it (`toaster_loop_score_coverage_ratio` ↔ `toaster_loop_traces_scored_total`;
+`toaster_loop_promotion_pass_rate` ↔ `toaster_loop_promotion_decisions_total`), and all
 pre-existing families render unchanged.
 
 **Dashboard surfacing (minimal, additive).** Datasets panel gains a "Curation
@@ -733,7 +733,7 @@ parity (401 unauthenticated / header / `?token=` / cross-site 403). Full suite
 Step-1 scope only: prove the four mechanisms of a streamed-LoRA trainer for
 checkpoints that exceed VRAM, re-implemented inline (D-12; airllm read as
 reference, cited in docstrings, never imported). New opt-in package
-[`sable/training/streamed/`](../sable/training/streamed/) — `streaming.py`
+[`toaster-loop/training/streamed/`](../toaster-loop/training/streamed/) — `streaming.py`
 (meta shell + bounded-window layer streaming with sync/threaded prefetch from
 safetensors), `lora_linear.py` (PEFT-free LoRALinear keeping the frozen base
 `weight` Parameter in place → checkpoint-shaped state_dict for the later
@@ -842,10 +842,10 @@ pyproject untouched.
 Final work package: an opt-in-by-nothing research spike testing whether a
 downstream-eval-judged specialization pass (expert pruning with router
 renormalization, and calibrated activation sparsity — sparse_transformers
-methodology cited inline, never imported, D-12) using **only the Sable
+methodology cited inline, never imported, D-12) using **only the Toaster Loop
 experience buffer** as calibration data can beat the noise floor. Testbed: a
 hand-built 4-expert tiny MoE on CPU (torch lazily imported; no downloads);
-buffer seeded through the real `TraceRecorder` into a tmp `SABLE_HOME`;
+buffer seeded through the real `TraceRecorder` into a tmp `TOASTER_LOOP_HOME`;
 downstream eval scored by `training/validate.py::_check_task` itself (same
 function object — no forked gate semantics). Noise floor: no persisted bench
 floor on this box (`load_noise_floor()` → None), so R=13 baseline eval
@@ -875,9 +875,9 @@ clients keep working — reads use `.get()` defaults, no migrations of data).
 <uuid8>.json.tmp`), `os.replace` wrapped in a 5×50ms retry loop tolerating
 transient sharing violations (AV/indexer handles — the WinError 32 root cause),
 WARNING log with the path on any failure. The LLM-title writer, delegation
-lineage writes and the child-run bridge share it. `sable doctor` gained
+lineage writes and the child-run bridge share it. `toaster-loop doctor` gained
 `chat-tmp` (stale tmp files = smoking gun for failed replaces) and
-`home-consistency` (SABLE_HOME env vs config vs default must resolve to one
+`home-consistency` (TOASTER_LOOP_HOME env vs config vs default must resolve to one
 root). Client thread PUT failures now toast instead of silently keeping
 in-memory state.
 

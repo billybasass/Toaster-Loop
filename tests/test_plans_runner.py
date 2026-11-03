@@ -16,10 +16,10 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent))
 from fake_server import FakeOpenAIServer  # noqa: E402
 
-from sable.core import delegation
-from sable.core.agent_runner import SableAgentClient, create_runner  # noqa: E402
-from sable.core.config import SableConfig  # noqa: E402
-from sable.core.tools import (TOOL_SCHEMAS, PLAN_TOOL_NAMES, plan_add,
+from toaster_loop.core import delegation
+from toaster_loop.core.agent_runner import ToasterLoopAgentClient, create_runner  # noqa: E402
+from toaster_loop.core.config import ToasterLoopConfig  # noqa: E402
+from toaster_loop.core.tools import (TOOL_SCHEMAS, PLAN_TOOL_NAMES, plan_add,
                               plan_next, plan_progress, plan_view)
 
 PLAN_TOOLS = set(PLAN_TOOL_NAMES)
@@ -33,7 +33,7 @@ def _tool_names(client) -> set:
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
@@ -41,7 +41,7 @@ def home(tmp_path, monkeypatch):
 
 def test_disabled_zero_plan_tools_byte_identical_prompt(home):
     """plans off: no plan tools registered, prompt untouched."""
-    ref = create_runner(SableConfig(), "http://127.0.0.1:1", "m",
+    ref = create_runner(ToasterLoopConfig(), "http://127.0.0.1:1", "m",
                         system_prompt="BASE")
     assert not (PLAN_TOOLS & _tool_names(ref))
     assert ref.system_prompt == "BASE"
@@ -52,14 +52,14 @@ def test_disabled_zero_plan_tools_byte_identical_prompt(home):
 
 
 def test_enabled_tools_present_and_section_injected_capped(home):
-    from sable.core.plans import add_task, load_plan, save_plan
+    from toaster_loop.core.plans import add_task, load_plan, save_plan
 
     store = load_plan(None)
     for i in range(40):
         add_task(store, {"title": "a fairly long plan task title " + str(i)})
     save_plan(store)
 
-    cfg = SableConfig(plans={"enabled": True, "max_inject_chars": 300})
+    cfg = ToasterLoopConfig(plans={"enabled": True, "max_inject_chars": 300})
     runner = create_runner(cfg, "http://127.0.0.1:1", "m",
                            system_prompt="BASE")
     assert PLAN_TOOLS <= _tool_names(runner)
@@ -72,26 +72,26 @@ def test_enabled_tools_present_and_section_injected_capped(home):
 
 
 def test_enabled_empty_plan_prompt_identical(home):
-    cfg = SableConfig(plans={"enabled": True})
+    cfg = ToasterLoopConfig(plans={"enabled": True})
     runner = create_runner(cfg, "http://127.0.0.1:1", "m",
                            system_prompt="BASE")
     assert runner.system_prompt == "BASE"   # no tasks => nothing to inject
 
 
 def test_inject_summary_false_skips_section(home):
-    from sable.core.plans import add_task, load_plan, save_plan
+    from toaster_loop.core.plans import add_task, load_plan, save_plan
 
     store = load_plan(None)
     add_task(store, {"title": "x"})
     save_plan(store)
-    cfg = SableConfig(plans={"enabled": True, "inject_summary": False})
+    cfg = ToasterLoopConfig(plans={"enabled": True, "inject_summary": False})
     runner = create_runner(cfg, "http://127.0.0.1:1", "m",
                            system_prompt="BASE")
     assert runner.system_prompt == "BASE"
 
 
 def test_profile_tool_subset_can_drop_plan_tools(home):
-    cfg = SableConfig(plans={"enabled": True})
+    cfg = ToasterLoopConfig(plans={"enabled": True})
     runner = create_runner(cfg, "http://127.0.0.1:1", "m",
                            enabled_tool_names=["read_file"])
     names = _tool_names(runner)
@@ -140,7 +140,7 @@ def test_forged_plan_ctx_refused(home):
             self.wfile.write(body)
 
     with FakeOpenAIServer(handler_cls=H) as fs:
-        client = SableAgentClient(
+        client = ToasterLoopAgentClient(
             base_url=fs.base_url, model="m",
             tools=[s for s in TOOL_SCHEMAS
                    if s["function"]["name"] == "plan_next"],
@@ -157,7 +157,7 @@ def test_forged_plan_ctx_refused(home):
 # ------------------------------------------------------- plan tools direct
 
 def test_plan_tools_via_bound_ctx(home):
-    from sable.core.plans import add_task, get_task, load_plan, save_plan
+    from toaster_loop.core.plans import add_task, get_task, load_plan, save_plan
 
     store = load_plan(None)
     add_task(store, {"title": "first"})
@@ -183,7 +183,7 @@ def test_plan_tools_via_bound_ctx(home):
 
 
 def test_plan_progress_invalid_status_is_error_string(home):
-    from sable.core.plans import add_task, load_plan, save_plan
+    from toaster_loop.core.plans import add_task, load_plan, save_plan
 
     store = load_plan(None)
     add_task(store, {"title": "x"})
@@ -193,7 +193,7 @@ def test_plan_progress_invalid_status_is_error_string(home):
 
 
 def test_plan_add_cycle_refused(home):
-    from sable.core.plans import add_task, load_plan, save_plan
+    from toaster_loop.core.plans import add_task, load_plan, save_plan
 
     store = load_plan(None)
     add_task(store, {"title": "a"})                # t1
@@ -203,7 +203,7 @@ def test_plan_add_cycle_refused(home):
     assert "added task t3" in out
     # now force a cycle attempt: t1 depends on t3 -> refused by validation
     store = load_plan(None)
-    from sable.core.plans import PlanError, add_dependency
+    from toaster_loop.core.plans import PlanError, add_dependency
 
     with pytest.raises(PlanError):
         add_dependency(store, "t1", "t3")
@@ -214,7 +214,7 @@ def test_plan_add_cycle_refused(home):
 def test_delegate_task_builds_prompt_from_task(home, tmp_path, monkeypatch):
     """delegate_task(plan_task=...) => child prompt = build_task_prompt +
     the free-text instruction; child trace stamped with plan_task."""
-    from sable.core.plans import add_task, load_plan, save_plan, set_status
+    from toaster_loop.core.plans import add_task, load_plan, save_plan, set_status
 
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -229,7 +229,7 @@ def test_delegate_task_builds_prompt_from_task(home, tmp_path, monkeypatch):
                      "deps": ["t1"], "test_strategy": "run tests"})       # t2
     save_plan(store)
 
-    cfg = SableConfig(attach_url="http://127.0.0.1:9/v1")
+    cfg = ToasterLoopConfig(attach_url="http://127.0.0.1:9/v1")
     cfg.profiles = [{"name": "coder", "system_prompt": "code",
                      "tools": ["read_file"]}]
     seen = {}
@@ -273,7 +273,7 @@ def test_delegate_unknown_plan_task_degrades(home, tmp_path, monkeypatch):
                     "child_trace_id": None, "failure_reason": None})
 
     monkeypatch.setattr(delegation, "_run_child", fake_run_child)
-    cfg = SableConfig(attach_url="http://127.0.0.1:9/v1")
+    cfg = ToasterLoopConfig(attach_url="http://127.0.0.1:9/v1")
     cfg.profiles = [{"name": "coder", "system_prompt": "code",
                      "tools": ["read_file"]}]
     payload = delegation.execute_delegation(

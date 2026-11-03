@@ -24,48 +24,48 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import sable.cli as cli  # noqa: E402
-from sable.curate import Curater, CurationConfig, messages_to_sharegpt  # noqa: E402
-from sable.store.db import TraceRow, TraceStore  # noqa: E402
-from sable.curate.importer import ImportError_, detect_format, import_dataset  # noqa: E402
-from sable.curate.importer import import_dataset  # noqa: E402
-from sable.curate.ingest_gate import dataset_trust, lint_datasets, load_flags_sidecar, load_hashes_sidecar, normalize_compare_key, trust_rank  # noqa: E402
+import toaster_loop.cli as cli  # noqa: E402
+from toaster_loop.curate import Curater, CurationConfig, messages_to_sharegpt  # noqa: E402
+from toaster_loop.store.db import TraceRow, TraceStore  # noqa: E402
+from toaster_loop.curate.importer import ImportError_, detect_format, import_dataset  # noqa: E402
+from toaster_loop.curate.importer import import_dataset  # noqa: E402
+from toaster_loop.curate.ingest_gate import dataset_trust, lint_datasets, load_flags_sidecar, load_hashes_sidecar, normalize_compare_key, trust_rank  # noqa: E402
 from fake_server import FakeOpenAIServer, make_message_handler  # noqa: E402
-from sable.curate.judge import JUDGE_RUBRIC, TOOL_VIEW_CAP, build_judge_messages, judge_trace, parse_judge_reply, select_borderline  # noqa: E402
-from sable.core.config import GoldensMineConfig, load_config  # noqa: E402
-from sable.curate.mine_goldens import MineGoldensError, load_mined_goldens, merge_mined_into_tasks, mined_path, run_mine_goldens, task_pair  # noqa: E402
-from sable.registry import ModelRegistry  # noqa: E402
-from sable.training.rejection import make_rft_job_runner, select_prompts  # noqa: E402
-from sable.curate.mine_goldens import make_mine_goldens_job_runner  # noqa: E402
-from sable.training.scheduler import JobDispatcher, Scheduler, TrainingConfig  # noqa: E402
-from sable.training.validate import run_golden_suite  # noqa: E402
-from sable.core.config import SableConfig  # noqa: E402
-from sable.curate.dataset_diff import diff_datasets  # noqa: E402
-from sable.dashboard.app import DashboardApp  # noqa: E402
-from sable.registry.registry import ModelRegistry  # noqa: E402
-from sable.training.pipeline import eval_regression_check, parse_worker_losses  # noqa: E402
-from sable.training.worker import EVAL_MIN_ROWS, EVAL_MIN_TOTAL_ROWS, eval_event, find_named_eval_files, find_resumable_checkpoint, make_protocol_callback, maybe_eval_split, plan_cadence, progress_event, resolve_resume_path  # noqa: E402
-from sable.evaluation.evolve import APPLIED_KEY, DISMISSED_KEY, MUTATION_DIRECTIONS, RESULT_KEY, EvolveError, apply_prompt_to_config, length_cap_for, make_evolve_job_runner, run_evolution, validate_variant  # noqa: E402
-from sable.training.scheduler import Scheduler, TrainingConfig  # noqa: E402
-from sable.core.provenance import LOAD_MODE_PREQUANTIZED, LOAD_MODE_RUNTIME_4BIT, LOAD_MODE_UNQUANTIZED, PROVENANCE_VERSION, attest_hub_repo, attest_path, file_entry, hash_file, parse_worker_provenance, worker_provenance_event  # noqa: E402
-from sable.curate import Curater, CurationConfig  # noqa: E402
-from sable.store import analytics  # noqa: E402
+from toaster_loop.curate.judge import JUDGE_RUBRIC, TOOL_VIEW_CAP, build_judge_messages, judge_trace, parse_judge_reply, select_borderline  # noqa: E402
+from toaster_loop.core.config import GoldensMineConfig, load_config  # noqa: E402
+from toaster_loop.curate.mine_goldens import MineGoldensError, load_mined_goldens, merge_mined_into_tasks, mined_path, run_mine_goldens, task_pair  # noqa: E402
+from toaster_loop.registry import ModelRegistry  # noqa: E402
+from toaster_loop.training.rejection import make_rft_job_runner, select_prompts  # noqa: E402
+from toaster_loop.curate.mine_goldens import make_mine_goldens_job_runner  # noqa: E402
+from toaster_loop.training.scheduler import JobDispatcher, Scheduler, TrainingConfig  # noqa: E402
+from toaster_loop.training.validate import run_golden_suite  # noqa: E402
+from toaster_loop.core.config import ToasterLoopConfig  # noqa: E402
+from toaster_loop.curate.dataset_diff import diff_datasets  # noqa: E402
+from toaster_loop.dashboard.app import DashboardApp  # noqa: E402
+from toaster_loop.registry.registry import ModelRegistry  # noqa: E402
+from toaster_loop.training.pipeline import eval_regression_check, parse_worker_losses  # noqa: E402
+from toaster_loop.training.worker import EVAL_MIN_ROWS, EVAL_MIN_TOTAL_ROWS, eval_event, find_named_eval_files, find_resumable_checkpoint, make_protocol_callback, maybe_eval_split, plan_cadence, progress_event, resolve_resume_path  # noqa: E402
+from toaster_loop.evaluation.evolve import APPLIED_KEY, DISMISSED_KEY, MUTATION_DIRECTIONS, RESULT_KEY, EvolveError, apply_prompt_to_config, length_cap_for, make_evolve_job_runner, run_evolution, validate_variant  # noqa: E402
+from toaster_loop.training.scheduler import Scheduler, TrainingConfig  # noqa: E402
+from toaster_loop.core.provenance import LOAD_MODE_PREQUANTIZED, LOAD_MODE_RUNTIME_4BIT, LOAD_MODE_UNQUANTIZED, PROVENANCE_VERSION, attest_hub_repo, attest_path, file_entry, hash_file, parse_worker_provenance, worker_provenance_event  # noqa: E402
+from toaster_loop.curate import Curater, CurationConfig  # noqa: E402
+from toaster_loop.store import analytics  # noqa: E402
 
 # ------------------------------------------------------------------------
 # from tests/test_curate.py
 # ------------------------------------------------------------------------
 
 @pytest.fixture()
-def sable_home(tmp_path, monkeypatch):
+def toaster_loop_home(tmp_path, monkeypatch):
     home = tmp_path / "uf-home"
-    monkeypatch.setenv("SABLE_HOME", str(home))
-    monkeypatch.delenv("SABLE_CONFIG", raising=False)
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
+    monkeypatch.delenv("TOASTER_LOOP_CONFIG", raising=False)
     return home
 
 
 @pytest.fixture()
-def store(sable_home):
-    st = TraceStore(sable_home / "buffer" / "sable.db")
+def store(toaster_loop_home):
+    st = TraceStore(toaster_loop_home / "buffer" / "toaster_loop.db")
     yield st
     st.close()
 
@@ -202,18 +202,18 @@ def test_sharegpt_multiple_tool_calls_collapse_into_one_tool_turn():
 
 # ----------------------------------------------------------------- dedup
 
-def test_dedup_prefix_overlap_keeps_longest(store, sable_home):
+def test_dedup_prefix_overlap_keeps_longest(store, toaster_loop_home):
     base = SIMPLE_OK[:2]
-    seed_trace(store, sable_home, trace_id="short", messages=SIMPLE_OK)
+    seed_trace(store, toaster_loop_home, trace_id="short", messages=SIMPLE_OK)
     long_msgs = base + [
         {"role": "assistant", "content": "4"},
         {"role": "user", "content": "and squared?"},
         {"role": "assistant", "content": "16"},
     ]
-    seed_trace(store, sable_home, trace_id="long", messages=long_msgs,
+    seed_trace(store, toaster_loop_home, trace_id="long", messages=long_msgs,
                timestamp="2026-09-01T11:00:00+00:00")
     # Different conversation -> kept separately.
-    seed_trace(store, sable_home, trace_id="other", messages=[
+    seed_trace(store, toaster_loop_home, trace_id="other", messages=[
         {"role": "user", "content": "totally different"},
         {"role": "assistant", "content": "ok"},
     ])
@@ -221,14 +221,14 @@ def test_dedup_prefix_overlap_keeps_longest(store, sable_home):
     res = cli.main(["curate", "--name", "dd"])
     assert res == 0
     rows = [json.loads(l) for l in
-            next((sable_home / "datasets").rglob("sft.jsonl")).read_text().splitlines()]
+            next((toaster_loop_home / "datasets").rglob("sft.jsonl")).read_text().splitlines()]
     tids = {r["trace_id"] for r in rows}
     assert tids == {"long", "other"}  # 'short' collapsed into its continuation
 
 
 # ------------------------------------------------------------------ DPO
 
-def test_dpo_pairs_mined_from_group(store, sable_home):
+def test_dpo_pairs_mined_from_group(store, toaster_loop_home):
     good = [
         {"role": "system", "content": "s"},
         {"role": "user", "content": "same task"},
@@ -239,14 +239,14 @@ def test_dpo_pairs_mined_from_group(store, sable_home):
         {"role": "user", "content": "same task"},
         {"role": "assistant", "content": "terrible answer"},
     ]
-    seed_trace(store, sable_home, trace_id="good", messages=good, score=1.0)
-    seed_trace(store, sable_home, trace_id="bad", messages=bad,
+    seed_trace(store, toaster_loop_home, trace_id="good", messages=good, score=1.0)
+    seed_trace(store, toaster_loop_home, trace_id="bad", messages=bad,
                status="failure", score=-1.0,
                timestamp="2026-09-01T09:00:00+00:00")
 
     # failure traces only enter the pool as DPO negatives when requested
     assert cli.main(["curate", "--name", "dp", "--include-failures"]) == 0
-    dpo_path = next((sable_home / "datasets").rglob("dpo.jsonl"))
+    dpo_path = next((toaster_loop_home / "datasets").rglob("dpo.jsonl"))
     rows = [json.loads(l) for l in dpo_path.read_text().splitlines()]
     assert len(rows) == 1
     r = rows[0]
@@ -259,22 +259,22 @@ def test_dpo_pairs_mined_from_group(store, sable_home):
     assert r["metadata"]["rejected_trace_id"] == "bad"
 
 
-def test_dpo_empty_case_warns_and_emits_valid_empty_file(store, sable_home):
-    seed_trace(store, sable_home, trace_id="solo", messages=SIMPLE_OK)
+def test_dpo_empty_case_warns_and_emits_valid_empty_file(store, toaster_loop_home):
+    seed_trace(store, toaster_loop_home, trace_id="solo", messages=SIMPLE_OK)
     assert cli.main(["curate", "--name", "empty"]) == 0
-    dpo_path = next((sable_home / "datasets").rglob("dpo.jsonl"))
+    dpo_path = next((toaster_loop_home / "datasets").rglob("dpo.jsonl"))
     assert dpo_path.read_text() == ""  # valid empty JSONL
     manifest = json.loads((dpo_path.parent / "manifest.json").read_text())
     assert any("no DPO preference pairs" in w for w in manifest["warnings"])
 
 
-def test_dpo_tie_yields_no_pairs(store, sable_home):
+def test_dpo_tie_yields_no_pairs(store, toaster_loop_home):
     a = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}]
     b = [{"role": "user", "content": "q"}, {"role": "assistant", "content": "b"}]
-    seed_trace(store, sable_home, trace_id="t1", messages=a, score=0.5)
-    seed_trace(store, sable_home, trace_id="t2", messages=b, score=0.5)
+    seed_trace(store, toaster_loop_home, trace_id="t1", messages=a, score=0.5)
+    seed_trace(store, toaster_loop_home, trace_id="t2", messages=b, score=0.5)
     assert cli.main(["curate"]) == 0
-    dpo_path = next((sable_home / "datasets").rglob("dpo.jsonl"))
+    dpo_path = next((toaster_loop_home / "datasets").rglob("dpo.jsonl"))
     assert dpo_path.read_text() == ""
 
 
@@ -284,15 +284,15 @@ def test_dpo_tie_yields_no_pairs(store, sable_home):
 # was fixed after the trace ran, so it must not be mined as bad-data DPO
 # negative material. Other statuses stay display-only.
 
-def _seed_failure_pair(store, sable_home, *, reason="max_iterations",
+def _seed_failure_pair(store, toaster_loop_home, *, reason="max_iterations",
                        agent_profile="fallback"):
     """Same-conversation good/bad pair; the failure carries a runner reason."""
     good = [{"role": "user", "content": "same task"},
             {"role": "assistant", "content": "great answer"}]
     bad = [{"role": "user", "content": "same task"},
            {"role": "assistant", "content": "terrible answer"}]
-    seed_trace(store, sable_home, trace_id="good", messages=good, score=1.0)
-    row = seed_trace(store, sable_home, trace_id="bad", messages=bad,
+    seed_trace(store, toaster_loop_home, trace_id="good", messages=good, score=1.0)
+    row = seed_trace(store, toaster_loop_home, trace_id="bad", messages=bad,
                      status="failure", score=-1.0,
                      timestamp="2026-09-01T09:00:00+00:00",
                      agent_profile=agent_profile)
@@ -305,35 +305,35 @@ def _seed_failure_pair(store, sable_home, *, reason="max_iterations",
     return row
 
 
-def _dpo_pairs(store, sable_home):
+def _dpo_pairs(store, toaster_loop_home):
     """Curate once and return the DPO rows; releases claims afterwards so a
     second call with different notes sees the same candidate pool. Dataset
     ids are sortable timestamps (with -N suffixes), so the newest is last."""
     assert cli.main(["curate", "--name", "remed", "--include-failures"]) == 0
-    newest = sorted(d.name for d in (sable_home / "datasets").iterdir())[-1]
-    dpo_path = sable_home / "datasets" / newest / "dpo.jsonl"
+    newest = sorted(d.name for d in (toaster_loop_home / "datasets").iterdir())[-1]
+    dpo_path = toaster_loop_home / "datasets" / newest / "dpo.jsonl"
     rows = [json.loads(l) for l in dpo_path.read_text().splitlines()]
     for ds_id in store.claimed_dataset_ids():
         store.reset_claims(ds_id)
     return rows
 
 
-def test_resolved_note_newer_than_trace_not_down_weighted(store, sable_home):
-    _seed_failure_pair(store, sable_home)
+def test_resolved_note_newer_than_trace_not_down_weighted(store, toaster_loop_home):
+    _seed_failure_pair(store, toaster_loop_home)
     # Resolved AFTER the failure trace was recorded -> bug fixed after the
     # fact. set_failure_note stamps ts=now(); traces are seeded 2026-09-01,
     # so any wall-clock "now" is newer than the trace date.
     store.set_failure_note("max_iterations", "resolved", note="prompt fix")
     assert store.get_failure_note("max_iterations")["status"] == "resolved"
-    pairs = _dpo_pairs(store, sable_home)
+    pairs = _dpo_pairs(store, toaster_loop_home)
     # the failure is no longer rejected material -> no pair survives
     assert pairs == []
 
 
-def test_open_or_older_resolved_note_still_down_weights(store, sable_home):
-    _seed_failure_pair(store, sable_home)
+def test_open_or_older_resolved_note_still_down_weights(store, toaster_loop_home):
+    _seed_failure_pair(store, toaster_loop_home)
     store.set_failure_note("max_iterations", "acknowledged", note="todo")
-    pairs = _dpo_pairs(store, sable_home)
+    pairs = _dpo_pairs(store, toaster_loop_home)
     assert len(pairs) == 1 and pairs[0]["metadata"]["rejected_trace_id"] == "bad"
 
     # RESOLVED but stamped BEFORE the trace -> still bad data (conservative).
@@ -343,28 +343,28 @@ def test_open_or_older_resolved_note_still_down_weights(store, sable_home):
     conn.execute("UPDATE failure_notes SET ts = ? WHERE reason = ?",
                  ("2025-01-01T00:00:00+00:00", "max_iterations"))
     conn.commit()
-    pairs = _dpo_pairs(store, sable_home)
+    pairs = _dpo_pairs(store, toaster_loop_home)
     assert len(pairs) == 1 and pairs[0]["metadata"]["rejected_trace_id"] == "bad"
 
 
-def test_resolved_note_profile_scoping(store, sable_home):
-    _seed_failure_pair(store, sable_home, agent_profile="fallback")
+def test_resolved_note_profile_scoping(store, toaster_loop_home):
+    _seed_failure_pair(store, toaster_loop_home, agent_profile="fallback")
     # note scoped to a different profile must not rescue this trace
     store.set_failure_note("max_iterations", "resolved", note="other agent",
                            profile="other-profile")
-    pairs = _dpo_pairs(store, sable_home)
+    pairs = _dpo_pairs(store, toaster_loop_home)
     assert len(pairs) == 1 and pairs[0]["metadata"]["rejected_trace_id"] == "bad"
 
     # global note rescues everywhere; matching-profile note rescues its own
     store.set_failure_note("max_iterations", "resolved", note="fixed")
-    pairs = _dpo_pairs(store, sable_home)
+    pairs = _dpo_pairs(store, toaster_loop_home)
     assert pairs == []
 
 
 # --------------------------------------------------------------- claiming
 
-def test_claiming_idempotency_and_rebuild(store, sable_home):
-    seed_trace(store, sable_home, trace_id="t1", messages=SIMPLE_OK)
+def test_claiming_idempotency_and_rebuild(store, toaster_loop_home):
+    seed_trace(store, toaster_loop_home, trace_id="t1", messages=SIMPLE_OK)
 
     assert cli.main(["curate", "--name", "first"]) == 0
     row = store.get_trace("t1")
@@ -373,30 +373,30 @@ def test_claiming_idempotency_and_rebuild(store, sable_home):
 
     # Second run: nothing new to claim, dataset has zero rows.
     assert cli.main(["curate", "--name", "second"]) == 0
-    datasets = sorted((sable_home / "datasets").iterdir())
+    datasets = sorted((toaster_loop_home / "datasets").iterdir())
     assert len(datasets) == 2
-    second_sft = (sable_home / "datasets" / datasets[1].name / "sft.jsonl")
+    second_sft = (toaster_loop_home / "datasets" / datasets[1].name / "sft.jsonl")
     assert second_sft.read_text() == ""
 
     # --rebuild releases the claim and rewrites the original dataset.
     assert cli.main(["curate", "--rebuild", ds_id]) == 0
     row = store.get_trace("t1")
     assert row.curated is True and row.dataset_id == ds_id
-    first_sft = (sable_home / "datasets" / ds_id / "sft.jsonl")
+    first_sft = (toaster_loop_home / "datasets" / ds_id / "sft.jsonl")
     rows = [json.loads(l) for l in first_sft.read_text().splitlines()]
     assert [r["trace_id"] for r in rows] == ["t1"]
 
 
-def test_trace_appears_in_at_most_one_dataset(store, sable_home):
-    seed_trace(store, sable_home, trace_id="t1", messages=SIMPLE_OK)
-    seed_trace(store, sable_home, trace_id="t2", messages=[
+def test_trace_appears_in_at_most_one_dataset(store, toaster_loop_home):
+    seed_trace(store, toaster_loop_home, trace_id="t1", messages=SIMPLE_OK)
+    seed_trace(store, toaster_loop_home, trace_id="t2", messages=[
         {"role": "user", "content": "other"},
         {"role": "assistant", "content": "ok"},
     ])
     assert cli.main(["curate"]) == 0
     assert cli.main(["curate"]) == 0
     all_ids = []
-    for mf in (sable_home / "datasets").rglob("manifest.json"):
+    for mf in (toaster_loop_home / "datasets").rglob("manifest.json"):
         m = json.loads(mf.read_text())
         all_ids.extend(m["files"]["sft.jsonl"]["trace_ids"])
     assert len(all_ids) == len(set(all_ids)) == 2
@@ -404,55 +404,55 @@ def test_trace_appears_in_at_most_one_dataset(store, sable_home):
 
 # ------------------------------------------------------------- selection
 
-def test_min_score_and_user_feedback_selection(store, sable_home):
+def test_min_score_and_user_feedback_selection(store, toaster_loop_home):
     def msg(c):
         return [{"role": "user", "content": c}, {"role": "assistant", "content": "a"}]
 
-    seed_trace(store, sable_home, trace_id="low", messages=msg("lo"), score=0.2)
-    seed_trace(store, sable_home, trace_id="mid", messages=msg("mi"), score=0.6)
-    seed_trace(store, sable_home, trace_id="rescued", messages=msg("rs"),
+    seed_trace(store, toaster_loop_home, trace_id="low", messages=msg("lo"), score=0.2)
+    seed_trace(store, toaster_loop_home, trace_id="mid", messages=msg("mi"), score=0.6)
+    seed_trace(store, toaster_loop_home, trace_id="rescued", messages=msg("rs"),
                score=0.1, user_feedback=0.9)
-    seed_trace(store, sable_home, trace_id="fail", messages=msg("fa"),
+    seed_trace(store, toaster_loop_home, trace_id="fail", messages=msg("fa"),
                status="failure", score=-1.0)
 
     assert cli.main(["curate"]) == 0
-    sft = next((sable_home / "datasets").rglob("sft.jsonl"))
+    sft = next((toaster_loop_home / "datasets").rglob("sft.jsonl"))
     ids = {json.loads(l)["trace_id"] for l in sft.read_text().splitlines()}
     assert ids == {"mid", "rescued"}  # low below threshold, failure excluded
 
 
-def test_include_failures_and_filters(store, sable_home):
+def test_include_failures_and_filters(store, toaster_loop_home):
     def msg(c):
         return [{"role": "user", "content": c}, {"role": "assistant", "content": "a"}]
 
-    seed_trace(store, sable_home, trace_id="f1", messages=msg("x"),
+    seed_trace(store, toaster_loop_home, trace_id="f1", messages=msg("x"),
                status="failure", score=-1.0)
-    seed_trace(store, sable_home, trace_id="old", messages=msg("y"),
+    seed_trace(store, toaster_loop_home, trace_id="old", messages=msg("y"),
                timestamp="2026-01-01T00:00:00+00:00")
-    seed_trace(store, sable_home, trace_id="old2", messages=msg("w"),
+    seed_trace(store, toaster_loop_home, trace_id="old2", messages=msg("w"),
                timestamp="2026-02-01T00:00:00+00:00")
 
     assert cli.main(["curate", "--include-failures"]) == 0
-    sft = next((sable_home / "datasets").rglob("sft.jsonl"))
+    sft = next((toaster_loop_home / "datasets").rglob("sft.jsonl"))
     ids = {json.loads(l)["trace_id"] for l in sft.read_text().splitlines()}
     # failure with score -1 still fails the min-score gate even when included
     assert "f1" not in ids
 
     # seed AFTER the first run so the profile/time filters see fresh material
-    seed_trace(store, sable_home, trace_id="hm", messages=msg("z"),
+    seed_trace(store, toaster_loop_home, trace_id="hm", messages=msg("z"),
                agent_profile="legacy")
 
     assert cli.main(["curate", "--since", "2026-06-01", "--profile", "legacy"]) == 0
-    dirs = sorted((sable_home / "datasets").iterdir(), reverse=True)
+    dirs = sorted((toaster_loop_home / "datasets").iterdir(), reverse=True)
     rows = [json.loads(l) for l in
             (dirs[0] / "sft.jsonl").read_text().splitlines()]
     assert {r["trace_id"] for r in rows} == {"hm"}
 
 
-def test_null_score_not_treated_as_zero(store, sable_home):
+def test_null_score_not_treated_as_zero(store, toaster_loop_home):
     # NULL score + clean success status => included; NULL + errors => excluded.
-    seed_trace(store, sable_home, trace_id="nulls", messages=SIMPLE_OK, score=None)
-    seed_trace(store, sable_home, trace_id="nullerr", messages=[
+    seed_trace(store, toaster_loop_home, trace_id="nulls", messages=SIMPLE_OK, score=None)
+    seed_trace(store, toaster_loop_home, trace_id="nullerr", messages=[
         {"role": "user", "content": "q"},
         {"role": "assistant", "tool_calls": [
             {"id": "c", "function": {"name": "t", "arguments": "{}"}}]},
@@ -460,29 +460,29 @@ def test_null_score_not_treated_as_zero(store, sable_home):
         {"role": "assistant", "content": "gave up"},
     ], score=None)
     assert cli.main(["curate"]) == 0
-    sft = next((sable_home / "datasets").rglob("sft.jsonl"))
+    sft = next((toaster_loop_home / "datasets").rglob("sft.jsonl"))
     ids = {json.loads(l)["trace_id"] for l in sft.read_text().splitlines()}
     assert ids == {"nulls"}
 
 
-def test_limit_caps_rows(store, sable_home):
+def test_limit_caps_rows(store, toaster_loop_home):
     for i in range(4):
-        seed_trace(store, sable_home, trace_id=f"t{i}", messages=[
+        seed_trace(store, toaster_loop_home, trace_id=f"t{i}", messages=[
             {"role": "user", "content": f"q{i}"},
             {"role": "assistant", "content": f"a{i}"},
         ], timestamp=f"2026-09-01T10:0{i}:00+00:00")
     assert cli.main(["curate", "--limit", "2"]) == 0
-    sft = next((sable_home / "datasets").rglob("sft.jsonl"))
+    sft = next((toaster_loop_home / "datasets").rglob("sft.jsonl"))
     rows = [json.loads(l) for l in sft.read_text().splitlines()]
     assert len(rows) == 2
 
 
 # ------------------------------------------------------- manifest & yaml
 
-def test_manifest_completeness_and_train_yaml(store, sable_home):
-    seed_trace(store, sable_home, trace_id="t1", messages=TOOLCALL_TRACE)
+def test_manifest_completeness_and_train_yaml(store, toaster_loop_home):
+    seed_trace(store, toaster_loop_home, trace_id="t1", messages=TOOLCALL_TRACE)
     assert cli.main(["curate", "--name", "mf"]) == 0
-    mf_path = next((sable_home / "datasets").rglob("manifest.json"))
+    mf_path = next((toaster_loop_home / "datasets").rglob("manifest.json"))
     m = json.loads(mf_path.read_text())
 
     for key in ("dataset_id", "created_at", "dataset_schema_version",
@@ -503,8 +503,8 @@ def test_manifest_completeness_and_train_yaml(store, sable_home):
     assert Path(doc["data"]["local_dataset"][0]).is_file()
 
 
-def test_datasets_cli_list_show_export(store, sable_home, capsys):
-    seed_trace(store, sable_home, trace_id="t1", messages=SIMPLE_OK)
+def test_datasets_cli_list_show_export(store, toaster_loop_home, capsys):
+    seed_trace(store, toaster_loop_home, trace_id="t1", messages=SIMPLE_OK)
     assert cli.main(["datasets", "list"]) == 0
     assert "no datasets curated yet" in capsys.readouterr().out
 
@@ -519,7 +519,7 @@ def test_datasets_cli_list_show_export(store, sable_home, capsys):
     shown = json.loads(capsys.readouterr().out)
     assert shown["dataset_id"] == ds_id
 
-    dest = sable_home.parent / "export-dest"
+    dest = toaster_loop_home.parent / "export-dest"
     assert cli.main(["datasets", "export", ds_id, "--to", str(dest)]) == 0
     assert (dest / ds_id / "sft.jsonl").is_file()
     assert (dest / ds_id / "manifest.json").is_file()
@@ -552,10 +552,10 @@ GOLDEN_SFT_ROW = {
 }
 
 
-def test_sft_golden_fixture(store, sable_home):
-    seed_trace(store, sable_home, trace_id="gold", messages=TOOLCALL_TRACE)
+def test_sft_golden_fixture(store, toaster_loop_home):
+    seed_trace(store, toaster_loop_home, trace_id="gold", messages=TOOLCALL_TRACE)
     assert cli.main(["curate"]) == 0
-    sft = next((sable_home / "datasets").rglob("sft.jsonl"))
+    sft = next((toaster_loop_home / "datasets").rglob("sft.jsonl"))
     rows = [json.loads(l) for l in sft.read_text().splitlines()]
     assert len(rows) == 1
     row = rows[0]
@@ -568,7 +568,7 @@ def test_sft_golden_fixture(store, sable_home):
 
 # ------------------------------------------------- claim race (finding #8)
 
-def test_concurrent_curates_produce_disjoint_manifests(store, sable_home):
+def test_concurrent_curates_produce_disjoint_manifests(store, toaster_loop_home):
     """Two curates racing over one candidate pool never share a trace ID.
 
     Claim-before-write makes this structural: each trace flips curated=0->1
@@ -577,12 +577,12 @@ def test_concurrent_curates_produce_disjoint_manifests(store, sable_home):
     DB file — the realistic two-process shape under WAL."""
     n = 12
     for i in range(n):
-        seed_trace(store, sable_home, trace_id=f"t{i}", messages=[
+        seed_trace(store, toaster_loop_home, trace_id=f"t{i}", messages=[
             {"role": "user", "content": f"question {i}"},
             {"role": "assistant", "content": f"answer {i}"},
         ], timestamp=f"2026-09-01T10:00:{i:02d}+00:00")
 
-    db = sable_home / "buffer" / "sable.db"
+    db = toaster_loop_home / "buffer" / "toaster_loop.db"
     store_a = TraceStore(db)
     store_b = TraceStore(db)
     barrier = threading.Barrier(2)
@@ -592,7 +592,7 @@ def test_concurrent_curates_produce_disjoint_manifests(store, sable_home):
     def run(st):
         try:
             barrier.wait(timeout=10)
-            results.append(Curater(st, sable_home).curate(
+            results.append(Curater(st, toaster_loop_home).curate(
                 CurationConfig(formats="sft"), name="race"))
         except Exception as e:  # noqa: BLE001 - surfaced below
             errors.append(e)
@@ -622,12 +622,12 @@ def test_concurrent_curates_produce_disjoint_manifests(store, sable_home):
     assert mf_ids[0] & mf_ids[1] == set()
 
 
-def test_short_claim_is_warned_and_reported(store, sable_home, caplog,
+def test_short_claim_is_warned_and_reported(store, toaster_loop_home, caplog,
                                             monkeypatch):
     """Traces lost to a concurrent claim: WARNING log + result/manifest field."""
-    seed_trace(store, sable_home, trace_id="mine", messages=[
+    seed_trace(store, toaster_loop_home, trace_id="mine", messages=[
         {"role": "user", "content": "q1"}, {"role": "assistant", "content": "a"}])
-    seed_trace(store, sable_home, trace_id="theirs", messages=[
+    seed_trace(store, toaster_loop_home, trace_id="theirs", messages=[
         {"role": "user", "content": "q2"}, {"role": "assistant", "content": "b"}])
 
     # Deterministic interleaving of two curates: 'theirs' is selected fine
@@ -643,8 +643,8 @@ def test_short_claim_is_warned_and_reported(store, sable_home, caplog,
 
     monkeypatch.setattr(store, "claim_traces_owned", racing_claim)
 
-    with caplog.at_level(logging.WARNING, logger="sable.curate"):
-        res = Curater(store, sable_home).curate(CurationConfig(), name="sc")
+    with caplog.at_level(logging.WARNING, logger="toaster_loop.curate"):
+        res = Curater(store, toaster_loop_home).curate(CurationConfig(), name="sc")
 
     assert res.short_claims == 1
     assert res.claimed == 1
@@ -660,27 +660,27 @@ def test_short_claim_is_warned_and_reported(store, sable_home, caplog,
     assert store.get_trace("theirs").dataset_id == "other-ds"
 
 
-def test_write_failure_releases_claims(store, sable_home, monkeypatch):
+def test_write_failure_releases_claims(store, toaster_loop_home, monkeypatch):
     """An error after claiming returns every trace to the buffer."""
-    seed_trace(store, sable_home, trace_id="t1", messages=SIMPLE_OK)
+    seed_trace(store, toaster_loop_home, trace_id="t1", messages=SIMPLE_OK)
 
     def boom(*a, **k):
         raise RuntimeError("disk on fire")
 
     # Fails inside the write block, after claims landed and manifest bytes
     # were prepared — exactly the window finding #8 is about.
-    monkeypatch.setattr("sable.curate.curater.render_train_yaml", boom)
+    monkeypatch.setattr("toaster_loop.curate.curater.render_train_yaml", boom)
     with pytest.raises(RuntimeError, match="disk on fire"):
-        Curater(store, sable_home).curate(CurationConfig(), name="boom")
+        Curater(store, toaster_loop_home).curate(CurationConfig(), name="boom")
     monkeypatch.undo()  # the re-curation below must render for real
 
     row = store.get_trace("t1")
     assert row.curated is False and row.dataset_id is None
     # partial dataset dir cleaned up; nothing half-written is discoverable
-    assert not any((sable_home / "datasets").rglob("manifest.json"))
+    assert not any((toaster_loop_home / "datasets").rglob("manifest.json"))
 
     # ...and the trace is curatable again.
-    res = Curater(store, sable_home).curate(CurationConfig(), name="again")
+    res = Curater(store, toaster_loop_home).curate(CurationConfig(), name="again")
     assert res.sft_trace_ids == ["t1"]
     assert res.claimed == 1
     assert (res.dataset_dir / "train.yaml").is_file()
@@ -690,11 +690,11 @@ def test_write_failure_releases_claims(store, sable_home, monkeypatch):
 # ------------------------------------------------------------------------
 
 @pytest.fixture()
-def sable_home__test_importer(tmp_path, monkeypatch):
+def toaster_loop_home__test_importer(tmp_path, monkeypatch):
     home = tmp_path / "uf-import"
     home.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("SABLE_HOME", str(home))
-    monkeypatch.delenv("SABLE_CONFIG", raising=False)
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
+    monkeypatch.delenv("TOASTER_LOOP_CONFIG", raising=False)
     return home
 
 
@@ -744,11 +744,11 @@ def _sft_rows(ds_dir: Path):
             (ds_dir / "sft.jsonl").read_text().splitlines()]
 
 
-def test_golden_alpaca_pair(sable_home__test_importer):
-    src = write_jsonl(sable_home__test_importer / "a.jsonl", [
+def test_golden_alpaca_pair(toaster_loop_home__test_importer):
+    src = write_jsonl(toaster_loop_home__test_importer / "a.jsonl", [
         {"instruction": "Add 2 and 2.", "input": "", "output": "4"},
     ])
-    res = import_dataset(src, home=sable_home__test_importer)
+    res = import_dataset(src, home=toaster_loop_home__test_importer)
     (row,) = _sft_rows(res.dataset_dir)
     # exact internal shape: ShareGPT turns with the gpt think-block invariant
     assert row == {"conversations": [
@@ -757,22 +757,22 @@ def test_golden_alpaca_pair(sable_home__test_importer):
     ]}
 
 
-def test_golden_alpaca_with_input_prefix(sable_home__test_importer):
-    src = write_jsonl(sable_home__test_importer / "a.jsonl", [
+def test_golden_alpaca_with_input_prefix(toaster_loop_home__test_importer):
+    src = write_jsonl(toaster_loop_home__test_importer / "a.jsonl", [
         {"instruction": "Translate.", "input": "Hello", "output": "Hola"},
     ])
-    res = import_dataset(src, home=sable_home__test_importer)
+    res = import_dataset(src, home=toaster_loop_home__test_importer)
     (row,) = _sft_rows(res.dataset_dir)
     assert row["conversations"][0]["value"] == "Hello\n\nTranslate."
 
 
-def test_golden_chatml_passthrough(sable_home__test_importer):
-    src = write_jsonl(sable_home__test_importer / "c.jsonl", [
+def test_golden_chatml_passthrough(toaster_loop_home__test_importer):
+    src = write_jsonl(toaster_loop_home__test_importer / "c.jsonl", [
         {"messages": [{"role": "system", "content": "s"},
                       {"role": "user", "content": "u"},
                       {"role": "assistant", "content": "a"}]},
     ])
-    res = import_dataset(src, home=sable_home__test_importer)
+    res = import_dataset(src, home=toaster_loop_home__test_importer)
     (row,) = _sft_rows(res.dataset_dir)
     assert row["conversations"] == [
         {"from": "system", "value": "s"},
@@ -781,12 +781,12 @@ def test_golden_chatml_passthrough(sable_home__test_importer):
     ]
 
 
-def test_golden_sharegpt_internal_keys(sable_home__test_importer):
-    src = write_jsonl(sable_home__test_importer / "s.jsonl", [
+def test_golden_sharegpt_internal_keys(toaster_loop_home__test_importer):
+    src = write_jsonl(toaster_loop_home__test_importer / "s.jsonl", [
         {"conversations": [{"from": "human", "value": "q"},
                            {"from": "gpt", "value": "< think>\n< /think>\na"}]},
     ])
-    res = import_dataset(src, home=sable_home__test_importer)
+    res = import_dataset(src, home=toaster_loop_home__test_importer)
     (row,) = _sft_rows(res.dataset_dir)
     # from/value round-trips byte-identically through the internal builder
     assert row["conversations"] == [
@@ -795,30 +795,30 @@ def test_golden_sharegpt_internal_keys(sable_home__test_importer):
     ]
 
 
-def test_sharegpt_role_content_keys_accepted(sable_home__test_importer):
-    src = write_jsonl(sable_home__test_importer / "s.jsonl", [
+def test_sharegpt_role_content_keys_accepted(toaster_loop_home__test_importer):
+    src = write_jsonl(toaster_loop_home__test_importer / "s.jsonl", [
         {"conversations": [{"role": "user", "content": "q"},
                            {"role": "assistant", "content": "a"}]},
     ])
-    res = import_dataset(src, home=sable_home__test_importer)
+    res = import_dataset(src, home=toaster_loop_home__test_importer)
     (row,) = _sft_rows(res.dataset_dir)
     assert [t["from"] for t in row["conversations"]] == ["human", "gpt"]
 
 
-def test_chatml_bad_role_row_skipped(sable_home__test_importer):
-    src = write_jsonl(sable_home__test_importer / "c.jsonl", [
+def test_chatml_bad_role_row_skipped(toaster_loop_home__test_importer):
+    src = write_jsonl(toaster_loop_home__test_importer / "c.jsonl", [
         {"messages": [{"role": "wizard", "content": "?"}]},
         {"messages": [{"role": "user", "content": "u"},
                       {"role": "assistant", "content": "a"}]},
     ])
-    res = import_dataset(src, home=sable_home__test_importer)
+    res = import_dataset(src, home=toaster_loop_home__test_importer)
     assert res.rows == 1 and res.skipped_rows == 1
 
 
 # ------------------------------------------------------- malformed + manifest
 
-def test_malformed_rows_skipped_and_counted(sable_home__test_importer):
-    src = sable_home__test_importer / "m.jsonl"
+def test_malformed_rows_skipped_and_counted(toaster_loop_home__test_importer):
+    src = toaster_loop_home__test_importer / "m.jsonl"
     src.write_text(
         '{"instruction": "ok", "output": "y"}\n'
         'not json at all\n'
@@ -826,17 +826,17 @@ def test_malformed_rows_skipped_and_counted(sable_home__test_importer):
         '"just a string"\n'
         '{"instruction": "ok2", "output": "y2"}\n',
         encoding="utf-8")
-    res = import_dataset(src, home=sable_home__test_importer)
+    res = import_dataset(src, home=toaster_loop_home__test_importer)
     assert res.rows == 2
     assert res.skipped_rows == 3  # bad json + empty pair + bare string
     mf = json.loads((res.dataset_dir / "manifest.json").read_text())
     assert mf["skipped_rows"] == 3
 
 
-def test_manifest_provenance_fields(sable_home__test_importer):
-    src = write_jsonl(sable_home__test_importer / "pub.jsonl", [
+def test_manifest_provenance_fields(toaster_loop_home__test_importer):
+    src = write_jsonl(toaster_loop_home__test_importer / "pub.jsonl", [
         {"instruction": "i", "output": "o"}])
-    res = import_dataset(src, name="pub", home=sable_home__test_importer)
+    res = import_dataset(src, name="pub", home=toaster_loop_home__test_importer)
     mf = json.loads((res.dataset_dir / "manifest.json").read_text())
     assert mf["provenance"] == "imported"
     assert mf["source_file"].endswith("pub.jsonl")
@@ -849,26 +849,26 @@ def test_manifest_provenance_fields(sable_home__test_importer):
     assert (res.dataset_dir / "train.yaml").is_file()
 
 
-def test_json_array_input_accepted(sable_home__test_importer):
-    src = sable_home__test_importer / "arr.json"
+def test_json_array_input_accepted(toaster_loop_home__test_importer):
+    src = toaster_loop_home__test_importer / "arr.json"
     src.write_text(json.dumps([{"instruction": "i", "output": "o"}]))
-    res = import_dataset(src, home=sable_home__test_importer)
+    res = import_dataset(src, home=toaster_loop_home__test_importer)
     assert res.rows == 1
 
 
-def test_unreadable_and_undetectable_raise(sable_home__test_importer):
+def test_unreadable_and_undetectable_raise(toaster_loop_home__test_importer):
     with pytest.raises(ImportError_):
-        import_dataset(sable_home__test_importer / "missing.jsonl", home=sable_home__test_importer)
-    bad = sable_home__test_importer / "bad.jsonl"
+        import_dataset(toaster_loop_home__test_importer / "missing.jsonl", home=toaster_loop_home__test_importer)
+    bad = toaster_loop_home__test_importer / "bad.jsonl"
     write_jsonl(bad, [{"foo": 1}])
     with pytest.raises(ImportError_):
-        import_dataset(bad, home=sable_home__test_importer)
+        import_dataset(bad, home=toaster_loop_home__test_importer)
 
 
 # -------------------------------------------------------------------- CLI
 
-def test_cli_import_and_list(sable_home__test_importer):
-    src = write_jsonl(sable_home__test_importer / "seed.jsonl", [
+def test_cli_import_and_list(toaster_loop_home__test_importer):
+    src = write_jsonl(toaster_loop_home__test_importer / "seed.jsonl", [
         {"instruction": "i1", "output": "o1"},
         {"garbage": True},
     ])
@@ -877,8 +877,8 @@ def test_cli_import_and_list(sable_home__test_importer):
     assert out == 0
 
 
-def test_cli_import_undetectable_exits_nonzero(sable_home__test_importer, capsys):
-    bad = sable_home__test_importer / "bad.jsonl"
+def test_cli_import_undetectable_exits_nonzero(toaster_loop_home__test_importer, capsys):
+    bad = toaster_loop_home__test_importer / "bad.jsonl"
     write_jsonl(bad, [{"weird": 1}])
     assert cli.main(["datasets", "import", str(bad)]) != 0
     assert "error:" in capsys.readouterr().err
@@ -929,14 +929,14 @@ emit("done")
 '''
 
 
-def test_imported_dataset_trains_end_to_end(sable_home__test_importer, tmp_path, monkeypatch):
+def test_imported_dataset_trains_end_to_end(toaster_loop_home__test_importer, tmp_path, monkeypatch):
     from fake_server import FakeOpenAIServer, make_scripted_handler
-    from sable.curate import CurationConfig
-    from sable.registry import ModelRegistry
-    from sable.store.db import TraceStore
-    from sable.training.pipeline import run_iterate
-    from sable.training.scheduler import Scheduler, TrainingConfig
-    from sable.training.validate import ValidationConfig
+    from toaster_loop.curate import CurationConfig
+    from toaster_loop.registry import ModelRegistry
+    from toaster_loop.store.db import TraceStore
+    from toaster_loop.training.pipeline import run_iterate
+    from toaster_loop.training.scheduler import Scheduler, TrainingConfig
+    from toaster_loop.training.validate import ValidationConfig
 
     stub = tmp_path / "stub.py"
     stub.write_text(STUB)
@@ -944,14 +944,14 @@ def test_imported_dataset_trains_end_to_end(sable_home__test_importer, tmp_path,
     fixture_gguf.write_bytes(b"GGUF" + b"\x00" * 32)
     monkeypatch.setenv("STUB_FIXTURE_GGUF", str(fixture_gguf))
 
-    src = write_jsonl(sable_home__test_importer / "seed.jsonl", [
+    src = write_jsonl(toaster_loop_home__test_importer / "seed.jsonl", [
         {"instruction": f"task {i}", "output": f"result {i} ok"}
         for i in range(3)
     ])
-    res = import_dataset(src, name="e2e", home=sable_home__test_importer)
+    res = import_dataset(src, name="e2e", home=toaster_loop_home__test_importer)
 
-    store = TraceStore(sable_home__test_importer / "buffer" / "sable.db")
-    reg = ModelRegistry(sable_home__test_importer / "buffer" / "sable.db")
+    store = TraceStore(toaster_loop_home__test_importer / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(toaster_loop_home__test_importer / "buffer" / "toaster_loop.db")
 
     def starter(gguf_path):
         srv = FakeOpenAIServer(handler_cls=make_scripted_handler(
@@ -963,7 +963,7 @@ def test_imported_dataset_trains_end_to_end(sable_home__test_importer, tmp_path,
         sched = Scheduler(registry=reg, cfg=TrainingConfig(),
                           worker_command=[sys.executable, str(stub)])
         result = run_iterate(
-            home=sable_home__test_importer, registry=reg, scheduler=sched, store=store,
+            home=toaster_loop_home__test_importer, registry=reg, scheduler=sched, store=store,
             curation_cfg=CurationConfig(),
             training_cfg=TrainingConfig(base_model="Base/HF-Model"),
             validation_cfg=ValidationConfig(
@@ -985,11 +985,11 @@ def test_imported_dataset_trains_end_to_end(sable_home__test_importer, tmp_path,
 # ------------------------------------------------------------------------
 
 @pytest.fixture()
-def sable_home__test_ingest_gate(tmp_path, monkeypatch):
+def toaster_loop_home__test_ingest_gate(tmp_path, monkeypatch):
     home = tmp_path / "uf-gate"
     home.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("SABLE_HOME", str(home))
-    monkeypatch.delenv("SABLE_CONFIG", raising=False)
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
+    monkeypatch.delenv("TOASTER_LOOP_CONFIG", raising=False)
     return home
 
 
@@ -1026,20 +1026,20 @@ def gate_of(res):
 
 # ------------------------------------------------------------ exact dedupe
 
-def test_exact_dupe_across_two_imports_flagged_not_dropped(sable_home__test_ingest_gate):
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+def test_exact_dupe_across_two_imports_flagged_not_dropped(toaster_loop_home__test_ingest_gate):
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": "What is the capital of France?", "output": "Paris."},
     ])
-    res1 = import_dataset(a, name="one", home=sable_home__test_ingest_gate)
+    res1 = import_dataset(a, name="one", home=toaster_loop_home__test_ingest_gate)
     assert res1.rows == 1
     # first import: sidecars written, nothing flagged
     assert load_hashes_sidecar(res1.dataset_dir) is not None
     assert flags_of(res1.dataset_dir) == {}
 
-    b = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "b.jsonl", [
+    b = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "b.jsonl", [
         {"instruction": "What is the capital of France?", "output": "Paris."},
     ])
-    res2 = import_dataset(b, name="two", home=sable_home__test_ingest_gate)
+    res2 = import_dataset(b, name="two", home=toaster_loop_home__test_ingest_gate)
     # flagged, NOT dropped: the row still lands in sft.jsonl
     assert res2.rows == 1 and len(sft_rows(res2.dataset_dir)) == 1
     assert gate_of(res2).exact_dupes == 1
@@ -1049,13 +1049,13 @@ def test_exact_dupe_across_two_imports_flagged_not_dropped(sable_home__test_inge
     assert f"{res1.dataset_id}:0" in fl["0"][0]
 
 
-def test_exact_dupe_within_batch(sable_home__test_ingest_gate):
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+def test_exact_dupe_within_batch(toaster_loop_home__test_ingest_gate):
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": "same", "output": "same"},
         {"instruction": "same", "output": "same"},
         {"instruction": "other", "output": "answer"},
     ])
-    res = import_dataset(a, home=sable_home__test_ingest_gate)
+    res = import_dataset(a, home=toaster_loop_home__test_ingest_gate)
     assert res.rows == 3  # nothing dropped
     assert gate_of(res).exact_dupes == 1
     fl = flags_of(res.dataset_dir)
@@ -1064,18 +1064,18 @@ def test_exact_dupe_within_batch(sable_home__test_ingest_gate):
 
 # --------------------------------------------------------- normalized dupes
 
-def test_normalized_variant_flagged_near_duplicate(sable_home__test_ingest_gate):
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+def test_normalized_variant_flagged_near_duplicate(toaster_loop_home__test_ingest_gate):
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": "Add 2 and 2.", "output": "4"},
     ])
-    res1 = import_dataset(a, name="norm", home=sable_home__test_ingest_gate)
+    res1 = import_dataset(a, name="norm", home=toaster_loop_home__test_ingest_gate)
     assert gate_of(res1).exact_dupes == 0
 
-    b = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "b.jsonl", [
+    b = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "b.jsonl", [
         # case + whitespace + punctuation differ -> exact miss, norm hit
         {"instruction": "  ADD 2  and 2 ?! ", "output": "4"},
     ])
-    res2 = import_dataset(b, name="norm2", home=sable_home__test_ingest_gate)
+    res2 = import_dataset(b, name="norm2", home=toaster_loop_home__test_ingest_gate)
     assert res2.rows == 1  # kept
     assert gate_of(res2).exact_dupes == 0
     assert gate_of(res2).near_dupes == 1
@@ -1085,12 +1085,12 @@ def test_normalized_variant_flagged_near_duplicate(sable_home__test_ingest_gate)
     assert normalize_compare_key("  Add 2,  and\t2!! ") == "add 2 and 2"
 
 
-def test_distinct_rows_no_false_flags(sable_home__test_ingest_gate):
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+def test_distinct_rows_no_false_flags(toaster_loop_home__test_ingest_gate):
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": f"question number {i}", "output": f"answer {i}"}
         for i in range(5)
     ])
-    res = import_dataset(a, name="distinct", home=sable_home__test_ingest_gate)
+    res = import_dataset(a, name="distinct", home=toaster_loop_home__test_ingest_gate)
     assert res.rows == 5
     assert gate_of(res).exact_dupes == 0
     assert gate_of(res).near_dupes == 0
@@ -1100,33 +1100,33 @@ def test_distinct_rows_no_false_flags(sable_home__test_ingest_gate):
 
 # --------------------------------------------------------------- conflicts
 
-def test_conflict_against_higher_trust_row_flagged_with_reference(sable_home__test_ingest_gate):
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+def test_conflict_against_higher_trust_row_flagged_with_reference(toaster_loop_home__test_ingest_gate):
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": "What is two plus two?", "output": "four"},
     ])
-    res1 = import_dataset(a, name="truth", home=sable_home__test_ingest_gate)
+    res1 = import_dataset(a, name="truth", home=toaster_loop_home__test_ingest_gate)
     set_trust(res1.dataset_dir, "curated")  # pretend internal curation
 
-    b = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "b.jsonl", [
+    b = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "b.jsonl", [
         {"instruction": "what is two plus two?", "output": "seventeen, obviously"},
     ])
-    res2 = import_dataset(b, name="doubt", home=sable_home__test_ingest_gate)
+    res2 = import_dataset(b, name="doubt", home=toaster_loop_home__test_ingest_gate)
     assert res2.rows == 1  # kept — flag-only gate
     assert gate_of(res2).conflicts == 1 and gate_of(res2).notes == 0
     fl = flags_of(res2.dataset_dir)
     assert fl["0"] == [f"conflicts_with:{res1.dataset_id}:0"]
 
 
-def test_conflict_equal_trust_informational_only(sable_home__test_ingest_gate):
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+def test_conflict_equal_trust_informational_only(toaster_loop_home__test_ingest_gate):
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": "What is two plus two?", "output": "four"},
     ])
-    res1 = import_dataset(a, name="src1", home=sable_home__test_ingest_gate)
+    res1 = import_dataset(a, name="src1", home=toaster_loop_home__test_ingest_gate)
 
-    b = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "b.jsonl", [
+    b = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "b.jsonl", [
         {"instruction": "What is two plus two?", "output": "seventeen, obviously"},
     ])
-    res2 = import_dataset(b, name="src2", home=sable_home__test_ingest_gate)
+    res2 = import_dataset(b, name="src2", home=toaster_loop_home__test_ingest_gate)
     assert res2.rows == 1
     assert gate_of(res2).conflicts == 0
     assert gate_of(res2).notes == 1
@@ -1134,15 +1134,15 @@ def test_conflict_equal_trust_informational_only(sable_home__test_ingest_gate):
     assert fl["0"] == [f"conflict_note:{res1.dataset_id}:0"]
 
 
-def test_same_input_similar_output_not_a_conflict(sable_home__test_ingest_gate):
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+def test_same_input_similar_output_not_a_conflict(toaster_loop_home__test_ingest_gate):
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": "spell color", "output": "colour"},
     ])
-    import_dataset(a, name="c1", home=sable_home__test_ingest_gate)
-    b = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "b.jsonl", [
+    import_dataset(a, name="c1", home=toaster_loop_home__test_ingest_gate)
+    b = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "b.jsonl", [
         {"instruction": "spell color", "output": "colouur"},  # near-identical
     ])
-    res2 = import_dataset(b, name="c2", home=sable_home__test_ingest_gate)
+    res2 = import_dataset(b, name="c2", home=toaster_loop_home__test_ingest_gate)
     assert gate_of(res2).conflicts == 0 and gate_of(res2).notes == 0
 
 
@@ -1155,24 +1155,24 @@ def test_trust_precedence_ordering():
     assert trust_rank("bogus") == trust_rank("imported")
 
 
-def test_legacy_manifest_defaults_to_imported(sable_home__test_ingest_gate):
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+def test_legacy_manifest_defaults_to_imported(toaster_loop_home__test_ingest_gate):
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": "i", "output": "o"}])
-    res = import_dataset(a, name="t", home=sable_home__test_ingest_gate)
+    res = import_dataset(a, name="t", home=toaster_loop_home__test_ingest_gate)
     assert json.loads((res.dataset_dir / "manifest.json")
                       .read_text())["trust"] == "imported"
     set_trust(res.dataset_dir, None)  # simulate a pre-#42 manifest
     assert dataset_trust(res.dataset_dir) == "imported"
 
 
-def test_curater_writes_curated_and_judge_scored(sable_home__test_ingest_gate):
-    from sable.curate import CurationConfig, Curater
-    from sable.store.db import TraceRow, TraceStore
+def test_curater_writes_curated_and_judge_scored(toaster_loop_home__test_ingest_gate):
+    from toaster_loop.curate import CurationConfig, Curater
+    from toaster_loop.store.db import TraceRow, TraceStore
 
-    store = TraceStore(sable_home__test_ingest_gate / "buffer" / "sable.db")
+    store = TraceStore(toaster_loop_home__test_ingest_gate / "buffer" / "toaster_loop.db")
     try:
         def seed(tid: str, judge=None):
-            p = sable_home__test_ingest_gate / "buffer" / f"{tid}.jsonl"
+            p = toaster_loop_home__test_ingest_gate / "buffer" / f"{tid}.jsonl"
             p.parent.mkdir(parents=True, exist_ok=True)
             with open(p, "w") as f:
                 f.write(json.dumps({"kind": "trace_header"}) + "\n")
@@ -1196,12 +1196,12 @@ def test_curater_writes_curated_and_judge_scored(sable_home__test_ingest_gate):
                                    timestamp="2026-09-01T10:01:00+00:00")
 
         seed("plain")
-        res = Curater(store, sable_home__test_ingest_gate).curate(CurationConfig(), name="c")
+        res = Curater(store, toaster_loop_home__test_ingest_gate).curate(CurationConfig(), name="c")
         mf = json.loads((res.dataset_dir / "manifest.json").read_text())
         assert mf["trust"] == "curated"
 
         seed("judged", judge=0.9)
-        res2 = Curater(store, sable_home__test_ingest_gate).curate(CurationConfig(), name="j")
+        res2 = Curater(store, toaster_loop_home__test_ingest_gate).curate(CurationConfig(), name="j")
         mf2 = json.loads((res2.dataset_dir / "manifest.json").read_text())
         assert mf2["trust"] == "judge_scored"
     finally:
@@ -1210,12 +1210,12 @@ def test_curater_writes_curated_and_judge_scored(sable_home__test_ingest_gate):
 
 # ------------------------------------------------- curater/train byte-compat
 
-def test_gated_dataset_stays_canonical_sharegpt(sable_home__test_ingest_gate):
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+def test_gated_dataset_stays_canonical_sharegpt(toaster_loop_home__test_ingest_gate):
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": "q1", "output": "a1"},
         {"instruction": "q1", "output": "a1"},   # in-batch dupe -> flagged
     ])
-    res = import_dataset(a, name="compat", home=sable_home__test_ingest_gate)
+    res = import_dataset(a, name="compat", home=toaster_loop_home__test_ingest_gate)
     rows = sft_rows(res.dataset_dir)
     assert len(rows) == 2 and gate_of(res).exact_dupes == 1
     for row in rows:
@@ -1230,15 +1230,15 @@ def test_gated_dataset_stays_canonical_sharegpt(sable_home__test_ingest_gate):
 
 # ------------------------------------------------------------------- lint
 
-def test_datasets_lint_idempotent_and_refreshes_sidecars(sable_home__test_ingest_gate):
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+def test_datasets_lint_idempotent_and_refreshes_sidecars(toaster_loop_home__test_ingest_gate):
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": "capital of France?", "output": "Paris."},
     ])
-    res1 = import_dataset(a, name="fr", home=sable_home__test_ingest_gate)
-    b = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "b.jsonl", [
+    res1 = import_dataset(a, name="fr", home=toaster_loop_home__test_ingest_gate)
+    b = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "b.jsonl", [
         {"instruction": "CAPITAL OF FRANCE", "output": "Paris."},  # near-dupe
     ])
-    res2 = import_dataset(b, name="fr2", home=sable_home__test_ingest_gate)
+    res2 = import_dataset(b, name="fr2", home=toaster_loop_home__test_ingest_gate)
     assert gate_of(res2).near_dupes == 1
 
     # simulate legacy datasets: no sidecars at all
@@ -1247,7 +1247,7 @@ def test_datasets_lint_idempotent_and_refreshes_sidecars(sable_home__test_ingest
         (d / "flags.json").unlink()
         assert load_hashes_sidecar(d) is None
 
-    reports = lint_datasets(sable_home__test_ingest_gate / "datasets")
+    reports = lint_datasets(toaster_loop_home__test_ingest_gate / "datasets")
     by_id = {r["dataset_id"]: r for r in reports}
     assert set(by_id) == {res1.dataset_id, res2.dataset_id}
     # lint re-checks every dataset against ALL others: the normalized pair is
@@ -1266,32 +1266,32 @@ def test_datasets_lint_idempotent_and_refreshes_sidecars(sable_home__test_ingest
     # idempotent: a second lint reports exactly the same thing
     first = {r["dataset_id"]: (r["exact_dupes"], r["near_dupes"],
                                r["conflicts"], r["notes"], r["details"])
-             for r in lint_datasets(sable_home__test_ingest_gate / "datasets")}
+             for r in lint_datasets(toaster_loop_home__test_ingest_gate / "datasets")}
     again = {r["dataset_id"]: (r["exact_dupes"], r["near_dupes"],
                                r["conflicts"], r["notes"], r["details"])
-             for r in lint_datasets(sable_home__test_ingest_gate / "datasets")}
+             for r in lint_datasets(toaster_loop_home__test_ingest_gate / "datasets")}
     assert first == again
     assert first[res2.dataset_id][1] == 1
 
 
-def test_datasets_lint_name_filter(sable_home__test_ingest_gate):
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+def test_datasets_lint_name_filter(toaster_loop_home__test_ingest_gate):
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": "one", "output": "uno"}])
-    res = import_dataset(a, name="alpha", home=sable_home__test_ingest_gate)
-    reports = lint_datasets(sable_home__test_ingest_gate / "datasets", name="alpha")
+    res = import_dataset(a, name="alpha", home=toaster_loop_home__test_ingest_gate)
+    reports = lint_datasets(toaster_loop_home__test_ingest_gate / "datasets", name="alpha")
     assert [r["dataset_id"] for r in reports] == [res.dataset_id]
-    assert lint_datasets(sable_home__test_ingest_gate / "datasets", name="zzz") == []
+    assert lint_datasets(toaster_loop_home__test_ingest_gate / "datasets", name="zzz") == []
 
 
-def test_cli_import_prints_gate_summary_and_lint(sable_home__test_ingest_gate, capsys):
-    src = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "seed.jsonl", [
+def test_cli_import_prints_gate_summary_and_lint(toaster_loop_home__test_ingest_gate, capsys):
+    src = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "seed.jsonl", [
         {"instruction": "hello there", "output": "hi"},
     ])
     assert cli.main(["datasets", "import", str(src), "--name", "g"]) == 0
     out = capsys.readouterr().out
     assert "gate:" in out and "n_rows=1" in out and "exact_dupes=0" in out
 
-    dup = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "dup.jsonl", [
+    dup = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "dup.jsonl", [
         {"instruction": "hello there", "output": "hi"},
     ])
     assert cli.main(["datasets", "import", str(dup), "--name", "g2"]) == 0
@@ -1305,15 +1305,15 @@ def test_cli_import_prints_gate_summary_and_lint(sable_home__test_ingest_gate, c
 
 # ------------------------------------------------------------ dashboard API
 
-def test_dashboard_datasets_expose_trust_and_lint(sable_home__test_ingest_gate):
-    from sable.core.config import SableConfig
-    from sable.dashboard.app import DashboardApp
+def test_dashboard_datasets_expose_trust_and_lint(toaster_loop_home__test_ingest_gate):
+    from toaster_loop.core.config import ToasterLoopConfig
+    from toaster_loop.dashboard.app import DashboardApp
 
-    a = write_jsonl__test_ingest_gate(sable_home__test_ingest_gate / "a.jsonl", [
+    a = write_jsonl__test_ingest_gate(toaster_loop_home__test_ingest_gate / "a.jsonl", [
         {"instruction": "dash q", "output": "dash a"},
     ])
-    res = import_dataset(a, name="ds", home=sable_home__test_ingest_gate)
-    app = DashboardApp(SableConfig(), home=sable_home__test_ingest_gate)
+    res = import_dataset(a, name="ds", home=toaster_loop_home__test_ingest_gate)
+    app = DashboardApp(ToasterLoopConfig(), home=toaster_loop_home__test_ingest_gate)
 
     listed = app.handle("GET", "/api/datasets").body["datasets"]
     mine = [d for d in listed if d["dataset_id"] == res.dataset_id]
@@ -1335,16 +1335,16 @@ def test_dashboard_datasets_expose_trust_and_lint(sable_home__test_ingest_gate):
 # ------------------------------------------------------------------------
 
 @pytest.fixture()
-def sable_home__test_judge(tmp_path, monkeypatch):
+def toaster_loop_home__test_judge(tmp_path, monkeypatch):
     home = tmp_path / "uf-judge"
-    monkeypatch.setenv("SABLE_HOME", str(home))
-    monkeypatch.delenv("SABLE_CONFIG", raising=False)
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
+    monkeypatch.delenv("TOASTER_LOOP_CONFIG", raising=False)
     return home
 
 
 @pytest.fixture()
-def store__test_judge(sable_home__test_judge):
-    st = TraceStore(sable_home__test_judge / "buffer" / "sable.db")
+def store__test_judge(toaster_loop_home__test_judge):
+    st = TraceStore(toaster_loop_home__test_judge / "buffer" / "toaster_loop.db")
     yield st
     st.close()
 
@@ -1447,14 +1447,14 @@ def test_judge_feedback_row_written_and_outcome_score_untouched(store__test_judg
     assert store__test_judge.get_trace("t1").outcome_score == 0.4
 
 
-def test_precedence_user_over_judge_over_heuristic(store__test_judge, sable_home__test_judge):
-    from sable.curate.curater import load_trace
+def test_precedence_user_over_judge_over_heuristic(store__test_judge, toaster_loop_home__test_judge):
+    from toaster_loop.curate.curater import load_trace
 
-    seed_trace__test_judge(store__test_judge, sable_home__test_judge, trace_id="h-only", score=0.4)
-    seed_trace__test_judge(store__test_judge, sable_home__test_judge, trace_id="judge-wins", score=0.4)
+    seed_trace__test_judge(store__test_judge, toaster_loop_home__test_judge, trace_id="h-only", score=0.4)
+    seed_trace__test_judge(store__test_judge, toaster_loop_home__test_judge, trace_id="judge-wins", score=0.4)
     store__test_judge.add_feedback("judge-wins", 0.8, comment="j", source="judge",
                        timestamp="2026-09-01T10:02:00+00:00")
-    seed_trace__test_judge(store__test_judge, sable_home__test_judge, trace_id="user-wins", score=0.4)
+    seed_trace__test_judge(store__test_judge, toaster_loop_home__test_judge, trace_id="user-wins", score=0.4)
     store__test_judge.add_feedback("user-wins", 0.8, comment="j", source="judge",
                        timestamp="2026-09-01T10:02:00+00:00")
     store__test_judge.add_feedback("user-wins", -1.0, comment="u", source="user",
@@ -1472,14 +1472,14 @@ def test_precedence_user_over_judge_over_heuristic(store__test_judge, sable_home
     assert eff["user-wins"] == -1.0    # user overrides judge
 
 
-def test_curater_selection_uses_judge_score(sable_home__test_judge, store__test_judge):
+def test_curater_selection_uses_judge_score(toaster_loop_home__test_judge, store__test_judge):
     """A trace below min_score but above it by judge score enters SFT."""
-    seed_trace__test_judge(store__test_judge, sable_home__test_judge, trace_id="below", score=0.4)
-    seed_trace__test_judge(store__test_judge, sable_home__test_judge, trace_id="above-by-judge", score=0.4)
+    seed_trace__test_judge(store__test_judge, toaster_loop_home__test_judge, trace_id="below", score=0.4)
+    seed_trace__test_judge(store__test_judge, toaster_loop_home__test_judge, trace_id="above-by-judge", score=0.4)
     store__test_judge.add_feedback("above-by-judge", 0.9, comment="j", source="judge",
                        timestamp="2026-09-01T10:05:00+00:00")
     assert cli.main(["curate", "--name", "jsel"]) == 0
-    ds = next((sable_home__test_judge / "datasets").rglob("sft.jsonl"))
+    ds = next((toaster_loop_home__test_judge / "datasets").rglob("sft.jsonl"))
     tids = {json.loads(l)["trace_id"] for l in
             ds.read_text().splitlines()}
     assert "above-by-judge" in tids and "below" not in tids
@@ -1515,11 +1515,11 @@ def _fake_judge_server(reply=VERDICT):
     return srv, handler
 
 
-def test_curate_judge_flag_scores_borderline_only(sable_home__test_judge, store__test_judge,
+def test_curate_judge_flag_scores_borderline_only(toaster_loop_home__test_judge, store__test_judge,
                                                   monkeypatch, capsys):
-    seed_trace__test_judge(store__test_judge, sable_home__test_judge, trace_id="border0", score=0.5)
-    seed_trace__test_judge(store__test_judge, sable_home__test_judge, trace_id="border1", score=0.4)
-    seed_trace__test_judge(store__test_judge, sable_home__test_judge, trace_id="far", score=0.9)
+    seed_trace__test_judge(store__test_judge, toaster_loop_home__test_judge, trace_id="border0", score=0.5)
+    seed_trace__test_judge(store__test_judge, toaster_loop_home__test_judge, trace_id="border1", score=0.4)
+    seed_trace__test_judge(store__test_judge, toaster_loop_home__test_judge, trace_id="far", score=0.9)
 
     srv, handler = _fake_judge_server()
     monkeypatch.setattr(cli, "_resolve_endpoint",
@@ -1542,9 +1542,9 @@ def test_curate_judge_flag_scores_borderline_only(sable_home__test_judge, store_
     assert "judge summary: 2 scored, 0 skipped" in out
 
 
-def test_curate_without_judge_flag_makes_zero_llm_calls(sable_home__test_judge, store__test_judge,
+def test_curate_without_judge_flag_makes_zero_llm_calls(toaster_loop_home__test_judge, store__test_judge,
                                                         monkeypatch):
-    seed_trace__test_judge(store__test_judge, sable_home__test_judge, trace_id="t", score=0.5)
+    seed_trace__test_judge(store__test_judge, toaster_loop_home__test_judge, trace_id="t", score=0.5)
     srv, handler = _fake_judge_server()
 
     def spy(*a, **k):
@@ -1559,9 +1559,9 @@ def test_curate_without_judge_flag_makes_zero_llm_calls(sable_home__test_judge, 
         assert [fb["source"] for fb in store__test_judge.get_feedback(f)] == ["heuristic"]
 
 
-def test_curate_judge_unparseable_reply_skips_not_crashes(sable_home__test_judge, store__test_judge,
+def test_curate_judge_unparseable_reply_skips_not_crashes(toaster_loop_home__test_judge, store__test_judge,
                                                           monkeypatch, capsys):
-    seed_trace__test_judge(store__test_judge, sable_home__test_judge, trace_id="s", score=0.5)
+    seed_trace__test_judge(store__test_judge, toaster_loop_home__test_judge, trace_id="s", score=0.5)
     srv, handler = _fake_judge_server(reply="I think it went pretty well!")
     monkeypatch.setattr(cli, "_resolve_endpoint",
                         lambda cfg, spawn_if_needed: (srv.base_url, "m", None))
@@ -1580,13 +1580,13 @@ def test_curate_judge_unparseable_reply_skips_not_crashes(sable_home__test_judge
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "umine"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 @pytest.fixture()
 def store__test_mine_goldens(home):
-    st = TraceStore(home / "buffer" / "sable.db")
+    st = TraceStore(home / "buffer" / "toaster_loop.db")
     yield st
     st.close()
 
@@ -1687,7 +1687,7 @@ def test_rft_select_prompts_picks_up_mined_golden(home, store__test_mine_goldens
     seed_trace__test_mine_goldens(store__test_mine_goldens, home, trace_id="t1", messages=BRANCH_TRACE)
     run_mine_goldens(store__test_mine_goldens, home, cfg())
 
-    from sable.core.config import RFTConfig as _RC
+    from toaster_loop.core.config import RFTConfig as _RC
     rcfg = _RC(enabled=True, sample_k=1, max_prompts=10)
     prompts, _ = select_prompts(store__test_mine_goldens, rcfg,
                                 goldens=load_mined_goldens(home))
@@ -1695,7 +1695,7 @@ def test_rft_select_prompts_picks_up_mined_golden(home, store__test_mine_goldens
     assert prompts[0].is_golden and prompts[0].source == "golden"
 
     # and the rft job runner (the real consumer) samples + verifies it:
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     try:
         sampler = lambda msgs: {"role": "assistant", "content": GOOD_CONTENT}
         runner = make_rft_job_runner(
@@ -1882,7 +1882,7 @@ def test_fresh_claims_are_not_reclaimed(home, store__test_mine_goldens):
 # ---------------------------------------------------- list + toggle (UI API)
 
 def test_list_and_toggle_mined_goldens(home, store__test_mine_goldens):
-    from sable.curate.mine_goldens import (
+    from toaster_loop.curate.mine_goldens import (
         list_mined_goldens, set_mined_enabled)
 
     seed_trace__test_mine_goldens(store__test_mine_goldens, home, trace_id="tg1", messages=BRANCH_TRACE)
@@ -1925,7 +1925,7 @@ def test_disabled_master_switch_refuses(home, store__test_mine_goldens):
 
 
 def test_runner_refuses_when_master_switch_off(home):
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     try:
         runner = make_mine_goldens_job_runner(reg, home=home,
                                               defaults=GoldensMineConfig())
@@ -1945,16 +1945,16 @@ def test_runner_refuses_when_master_switch_off(home):
 def test_mine_goldens_job_flows_through_dispatcher(home):
     """queued -> running -> done under a JobDispatcher tick; _result recorded;
     the in-process kind survives reap_stale (INPROCESS_JOB_KINDS)."""
-    st = TraceStore(home / "buffer" / "sable.db")
+    st = TraceStore(home / "buffer" / "toaster_loop.db")
     seed_trace__test_mine_goldens(st, home, trace_id="d1", messages=BRANCH_TRACE)
     st.close()
 
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     try:
         runner = make_mine_goldens_job_runner(reg, home=home, defaults=cfg())
         tc = TrainingConfig()
         factory = lambda: Scheduler(registry=ModelRegistry(
-            home / "buffer" / "sable.db"), cfg=tc,
+            home / "buffer" / "toaster_loop.db"), cfg=tc,
             inprocess_runners={"mine_goldens": runner})
         sched = factory()
         job = sched.submit("mine_goldens", log_dir=home / "train_runs",
@@ -2010,12 +2010,12 @@ def test_load_config_recognizes_goldens_mine_without_warnings(tmp_path, caplog):
 
 
 def test_cli_mine_goldens_parses_and_refuses_when_disabled(tmp_path, monkeypatch):
-    from sable.cli import build_parser, cmd_mine_goldens
+    from toaster_loop.cli import build_parser, cmd_mine_goldens
 
     args = build_parser().parse_args(["mine-goldens", "--max", "3"])
     assert args.command == "mine-goldens" and args.max == 3
 
-    monkeypatch.setenv("SABLE_HOME", str(tmp_path / "h"))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(tmp_path / "h"))
     c = tmp_path / "c.yaml"
     c.write_text("goldens_mine:\n  enabled: false\n")
     ns = argparse.Namespace(config=str(c), verbose=False, max=None,
@@ -2044,19 +2044,19 @@ def test_task_pair_shapes():
 @pytest.fixture()
 def home__test_metrics_and_diff(tmp_path, monkeypatch):
     h = tmp_path / "uf-md"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 @pytest.fixture()
 def app__test_metrics_and_diff(home__test_metrics_and_diff):
-    return DashboardApp(SableConfig(), home=home__test_metrics_and_diff)
+    return DashboardApp(ToasterLoopConfig(), home=home__test_metrics_and_diff)
 
 
 # ============================================================ text-format gate
 
 # Prometheus text exposition spec patterns (metric/label names + sample
-# syntax). Family names here are sable_* so [a-zA-Z_:] covers them.
+# syntax). Family names here are toaster_loop_* so [a-zA-Z_:] covers them.
 _RE_NAME = re.compile(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$")
 _RE_HELP = re.compile(r"^# HELP [a-zA-Z_:][a-zA-Z0-9_:]* .+$")
 _RE_TYPE = re.compile(
@@ -2111,7 +2111,7 @@ def assert_valid_exposition(text: str) -> Dict[str, str]:
 
 def _seed_rich_home__test_metrics_and_diff(home):
     """Traces + jobs (+gate reason) + promotion/rollback + rft/mined ledgers."""
-    store = TraceStore(Path(home) / "buffer" / "sable.db")
+    store = TraceStore(Path(home) / "buffer" / "toaster_loop.db")
     for n, status in ((5, "success"), (2, "failure"), (1, "partial")):
         for i in range(n):
             tid = f"{status[0]}{i}"
@@ -2140,7 +2140,7 @@ def _seed_rich_home__test_metrics_and_diff(home):
     store.record_gate_event("seed-blocked-1", "disk gate")
     store.close()
 
-    reg = ModelRegistry(Path(home) / "buffer" / "sable.db")
+    reg = ModelRegistry(Path(home) / "buffer" / "toaster_loop.db")
     j1 = reg.enqueue_job("sft")
     reg.claim_next_queued(pid=4242)          # -> running, started_at set
     reg.enqueue_job("curate")                # stays queued
@@ -2183,22 +2183,22 @@ def test_metrics_exposition_valid_and_complete(app__test_metrics_and_diff, home_
     text = resp.raw.decode("utf-8")
     types = assert_valid_exposition(text)
     expected = {
-        "sable_traces_total": "counter",
-        "sable_outcome_score_mean": "gauge",
-        "sable_tokens_in_total": "counter",
-        "sable_tokens_out_total": "counter",
-        "sable_tokens_per_second": "summary",
-        "sable_request_latency_seconds": "summary",
-        "sable_jobs_total": "counter",
-        "sable_job_queue_wait_seconds": "summary",
-        "sable_gate_blocks_total": "counter",
-        "sable_jobs_gate_blocked": "gauge",
-        "sable_promotions_total": "counter",
-        "sable_promotion_pass_rate": "gauge",
-        "sable_instances_up": "gauge",
-        "sable_rft_samples_kept_total": "counter",
-        "sable_rft_samples_dropped_total": "counter",
-        "sable_mined_goldens_total": "counter",
+        "toaster_loop_traces_total": "counter",
+        "toaster_loop_outcome_score_mean": "gauge",
+        "toaster_loop_tokens_in_total": "counter",
+        "toaster_loop_tokens_out_total": "counter",
+        "toaster_loop_tokens_per_second": "summary",
+        "toaster_loop_request_latency_seconds": "summary",
+        "toaster_loop_jobs_total": "counter",
+        "toaster_loop_job_queue_wait_seconds": "summary",
+        "toaster_loop_gate_blocks_total": "counter",
+        "toaster_loop_jobs_gate_blocked": "gauge",
+        "toaster_loop_promotions_total": "counter",
+        "toaster_loop_promotion_pass_rate": "gauge",
+        "toaster_loop_instances_up": "gauge",
+        "toaster_loop_rft_samples_kept_total": "counter",
+        "toaster_loop_rft_samples_dropped_total": "counter",
+        "toaster_loop_mined_goldens_total": "counter",
     }
     assert expected == {k: types[k] for k in expected}, sorted(types)
     # every family has HELP and TYPE (grammar check above already enforced
@@ -2211,50 +2211,50 @@ def test_metrics_exposition_valid_and_complete(app__test_metrics_and_diff, home_
 def test_metrics_values_match_seed(app__test_metrics_and_diff, home__test_metrics_and_diff):
     _seed_rich_home__test_metrics_and_diff(home__test_metrics_and_diff)
     text = _metrics__test_metrics_and_diff(app__test_metrics_and_diff).raw.decode("utf-8")
-    assert _sample_value(text, "sable_traces_total",
+    assert _sample_value(text, "toaster_loop_traces_total",
                          '{status="success"}') == "5"
-    assert _sample_value(text, "sable_traces_total",
+    assert _sample_value(text, "toaster_loop_traces_total",
                          '{status="failure"}') == "2"
-    assert _sample_value(text, "sable_traces_total",
+    assert _sample_value(text, "toaster_loop_traces_total",
                          '{status="partial"}') == "1"
-    assert _sample_value(text, "sable_traces_total",
+    assert _sample_value(text, "toaster_loop_traces_total",
                          '{status="unknown"}') == "0"
     # 8 traces x tokens_in=7 / tokens_out=10
-    assert _sample_value(text, "sable_tokens_in_total") == "56"
-    assert _sample_value(text, "sable_tokens_out_total") == "80"
-    assert _sample_value(text, "sable_outcome_score_mean") == "0.5"
+    assert _sample_value(text, "toaster_loop_tokens_in_total") == "56"
+    assert _sample_value(text, "toaster_loop_tokens_out_total") == "80"
+    assert _sample_value(text, "toaster_loop_outcome_score_mean") == "0.5"
     # durations: success 1..5, failure 1..2, partial 1 -> count 8.
-    assert _sample_value(text, "sable_request_latency_seconds_count") == "8"
+    assert _sample_value(text, "toaster_loop_request_latency_seconds_count") == "8"
     # throughput 10/d sorted [2, 2.5, 3.3333, 5, 5, 10, 10, 10] -> p50 rank 4 = 5
     assert _sample_value(
-        text, "sable_tokens_per_second{quantile=\"0.5\"}") == "5"
+        text, "toaster_loop_tokens_per_second{quantile=\"0.5\"}") == "5"
     # jobs: one running sft + one queued curate (state counts)
-    assert _sample_value(text, "sable_jobs_total",
+    assert _sample_value(text, "toaster_loop_jobs_total",
                          '{kind="sft",state="running"}') == "1"
-    assert _sample_value(text, "sable_jobs_total",
+    assert _sample_value(text, "toaster_loop_jobs_total",
                          '{kind="curate",state="queued"}') == "1"
     # gate blocks: counter = durable block episodes (one seeded event);
     # gauge = jobs currently carrying a non-null _gate_reason (the same one)
-    assert _sample_value(text, "sable_gate_blocks_total") == "1"
-    assert _sample_value(text, "sable_jobs_gate_blocked") == "1"
+    assert _sample_value(text, "toaster_loop_gate_blocks_total") == "1"
+    assert _sample_value(text, "toaster_loop_jobs_gate_blocked") == "1"
     # promotions: 2 promote ops, 1 rollback op in the ledger -> pass-rate 2/3
-    assert _sample_value(text, "sable_promotions_total",
+    assert _sample_value(text, "toaster_loop_promotions_total",
                          '{result="pass"}') == "2"
-    assert _sample_value(text, "sable_promotions_total",
+    assert _sample_value(text, "toaster_loop_promotions_total",
                          '{result="fail"}') == "1"
-    rate_s = _sample_value(text, "sable_promotion_pass_rate")
+    rate_s = _sample_value(text, "toaster_loop_promotion_pass_rate")
     assert rate_s is not None
     rate = float(rate_s)
     assert abs(rate - 2 / 3) < 1e-6
     # ledgers
-    assert _sample_value(text, "sable_rft_samples_kept_total") == "1"
-    assert _sample_value(text, "sable_rft_samples_dropped_total") == "2"
-    assert _sample_value(text, "sable_mined_goldens_total",
+    assert _sample_value(text, "toaster_loop_rft_samples_kept_total") == "1"
+    assert _sample_value(text, "toaster_loop_rft_samples_dropped_total") == "2"
+    assert _sample_value(text, "toaster_loop_mined_goldens_total",
                          '{status="mined"}') == "1"
-    assert _sample_value(text, "sable_mined_goldens_total",
+    assert _sample_value(text, "toaster_loop_mined_goldens_total",
                          '{status="dropped"}') == "1"
     # default instance exists (config-derived) but is not running
-    assert _sample_value(text, "sable_instances_up",
+    assert _sample_value(text, "toaster_loop_instances_up",
                          '{id="default"}') == "0"
 
 
@@ -2262,12 +2262,12 @@ def test_metrics_empty_home_is_honest(app__test_metrics_and_diff):
     resp = _metrics__test_metrics_and_diff(app__test_metrics_and_diff)
     text = resp.raw.decode("utf-8")
     types = assert_valid_exposition(text)
-    assert "sable_traces_total" in types
+    assert "toaster_loop_traces_total" in types
     # zero-valued status counters still present (valid empty family)
-    assert _sample_value(text, "sable_traces_total",
+    assert _sample_value(text, "toaster_loop_traces_total",
                          '{status="success"}') == "0"
     # score mean honest-absent when nothing is scored
-    assert "sable_outcome_score_mean " not in text
+    assert "toaster_loop_outcome_score_mean " not in text
 
 
 def test_metrics_content_type(app__test_metrics_and_diff):
@@ -2279,7 +2279,7 @@ def test_metrics_ttl_cache(app__test_metrics_and_diff, home__test_metrics_and_di
     _seed_rich_home__test_metrics_and_diff(home__test_metrics_and_diff)
     body1 = _metrics__test_metrics_and_diff(app__test_metrics_and_diff).raw.decode()
     # New data lands in the DB *after* the first scrape...
-    store = TraceStore(Path(home__test_metrics_and_diff) / "buffer" / "sable.db")
+    store = TraceStore(Path(home__test_metrics_and_diff) / "buffer" / "toaster_loop.db")
     p = Path(store.db_path).parent / "late.jsonl"
     p.write_text(json.dumps({"kind": "trace_header"}) + "\n")
     store.insert_trace(TraceRow(
@@ -2295,17 +2295,17 @@ def test_metrics_ttl_cache(app__test_metrics_and_diff, home__test_metrics_and_di
     assert body2 == body1
     # ...until an explicit refresh bypasses it.
     body3 = _metrics__test_metrics_and_diff(app__test_metrics_and_diff).raw.decode()
-    assert _sample_value(body3, "sable_traces_total",
+    assert _sample_value(body3, "toaster_loop_traces_total",
                          '{status="success"}') == "6"
-    assert _sample_value(body2, "sable_traces_total",
+    assert _sample_value(body2, "toaster_loop_traces_total",
                          '{status="success"}') == "5"
 
 
 def test_metrics_percentile_matches_insights(app__test_metrics_and_diff, home__test_metrics_and_diff):
     """Quantiles reuse insights.percentile (ceil nearest-rank)."""
-    from sable.store.insights import percentile
+    from toaster_loop.store.insights import percentile
 
-    store = TraceStore(Path(home__test_metrics_and_diff) / "buffer" / "sable.db")
+    store = TraceStore(Path(home__test_metrics_and_diff) / "buffer" / "toaster_loop.db")
     durs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
     for i, d in enumerate(durs):
         tid = f"p{i}"
@@ -2323,27 +2323,27 @@ def test_metrics_percentile_matches_insights(app__test_metrics_and_diff, home__t
     text = _metrics__test_metrics_and_diff(app__test_metrics_and_diff).raw.decode()
     srt = sorted(durs)
     assert _sample_value(
-        text, "sable_request_latency_seconds{quantile=\"0.5\"}") \
+        text, "toaster_loop_request_latency_seconds{quantile=\"0.5\"}") \
         == _fmt(percentile(srt, 50))
     assert _sample_value(
-        text, "sable_request_latency_seconds{quantile=\"0.9\"}") \
+        text, "toaster_loop_request_latency_seconds{quantile=\"0.9\"}") \
         == _fmt(percentile(srt, 90))
     assert _sample_value(
-        text, "sable_request_latency_seconds{quantile=\"0.95\"}") \
+        text, "toaster_loop_request_latency_seconds{quantile=\"0.95\"}") \
         == _fmt(percentile(srt, 95))
 
 
 def _fmt(v) -> str:
-    from sable.dashboard.metrics import _fmt_num
+    from toaster_loop.dashboard.metrics import _fmt_num
     return _fmt_num(v)
 
 
 # ------------------------------------------------------------------ auth: A
 
 def _start_server_with_token__test_metrics_and_diff(home, token=None):
-    from sable.dashboard.server import BIND_HOST, make_server
+    from toaster_loop.dashboard.server import BIND_HOST, make_server
 
-    httpd = make_server(SableConfig(), port=0, home=home, token=token)
+    httpd = make_server(ToasterLoopConfig(), port=0, home=home, token=token)
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     return httpd, f"http://{BIND_HOST}:{httpd.server_address[1]}"
@@ -2358,7 +2358,7 @@ def test_metrics_token_auth_parity(home__test_metrics_and_diff):
 
         assert httpx.get(base + "/api/metrics", timeout=5).status_code == 401
         r = httpx.get(base + "/api/metrics", timeout=5,
-                      headers={"X-Sable-Token": "scr4pe"})
+                      headers={"X-Toaster-Loop-Token": "scr4pe"})
         assert r.status_code == 200
         assert r.headers["content-type"] == "text/plain; version=0.0.4"
         # GET query token allowed for scrapers (same rule as SSE/EventSource)
@@ -2512,9 +2512,9 @@ def test_dataset_diff_library_and_cli(home__test_metrics_and_diff, monkeypatch, 
     assert json.dumps(d, sort_keys=True) == json.dumps(
         diff_datasets(root, "ds-a", "ds-b"), sort_keys=True)
 
-    from sable.cli import cmd_datasets_diff
+    from toaster_loop.cli import cmd_datasets_diff
     import argparse
-    monkeypatch.setenv("SABLE_HOME", str(home__test_metrics_and_diff))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home__test_metrics_and_diff))
     ns = argparse.Namespace(verbose=False, config=None, a="ds-a", b="ds-b")
     assert cmd_datasets_diff(ns) == 0
     printed = json.loads(capsys.readouterr().out)
@@ -2525,7 +2525,7 @@ def test_dataset_diff_library_and_cli(home__test_metrics_and_diff, monkeypatch, 
 
 
 def test_datasets_cli_parser_has_diff():
-    from sable.cli import build_parser
+    from toaster_loop.cli import build_parser
 
     ns = build_parser().parse_args(["datasets", "diff", "a1", "b2"])
     assert ns.func.__name__ == "cmd_datasets_diff"
@@ -2802,7 +2802,7 @@ def test_protocol_callback_loss_from_log_history_fallback(tmp_path):
 # ---------------------------------------------------- registry losses + gate
 
 def test_registry_migration_adds_loss_columns(tmp_path):
-    db = tmp_path / "sable.db"
+    db = tmp_path / "toaster_loop.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     # Simulate a pre-#4 models table (no train_loss/eval_loss columns).
     con = sqlite3.connect(db)
@@ -2941,7 +2941,7 @@ emit("done")
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     home = tmp_path / "uf-eval"
-    monkeypatch.setenv("SABLE_HOME", str(home))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
     stub = tmp_path / "stub.py"
     stub.write_text(STUB__test_eval_logging)
     yield home, stub
@@ -2960,7 +2960,7 @@ def seed_trace__test_eval_logging(store, home, i, score=0.9):
         for m in msgs:
             f.write(json.dumps({"kind": "message", "message": m}) + "\n")
         f.write(json.dumps({"kind": "trace_footer", "status": "success"}) + "\n")
-    from sable.store.db import TraceRow
+    from toaster_loop.store.db import TraceRow
     store.insert_trace(TraceRow(
         trace_id=f"ev-{i}", session_id=None, timestamp=ts,
         agent_profile="fallback", model_alias="base-model",
@@ -2981,10 +2981,10 @@ def _starter(reply="ok-answer"):
 
 
 def _run(home, stub, reg, store, monkeypatch, *, eval_loss, gate):
-    from sable.curate import CurationConfig
-    from sable.training.pipeline import run_iterate
-    from sable.training.scheduler import Scheduler, TrainingConfig
-    from sable.training.validate import ValidationConfig
+    from toaster_loop.curate import CurationConfig
+    from toaster_loop.training.pipeline import run_iterate
+    from toaster_loop.training.scheduler import Scheduler, TrainingConfig
+    from toaster_loop.training.validate import ValidationConfig
 
     monkeypatch.setenv("STUB_EVAL_LOSS", str(eval_loss))
     sched = Scheduler(registry=reg, cfg=TrainingConfig(base_model="B/M"),
@@ -3002,11 +3002,11 @@ def _run(home, stub, reg, store, monkeypatch, *, eval_loss, gate):
 
 
 def test_pipeline_stores_losses_and_gate_blocks(tmp_path, env, monkeypatch):
-    from sable.store.db import TraceStore
+    from toaster_loop.store.db import TraceStore
 
     home, stub = env
-    store = TraceStore(home / "buffer" / "sable.db")
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     for i in range(2):
         seed_trace__test_eval_logging(store, home, i)
 
@@ -3033,11 +3033,11 @@ def test_pipeline_stores_losses_and_gate_blocks(tmp_path, env, monkeypatch):
 
 
 def test_pipeline_gate_block_refuses_promotion(env, monkeypatch):
-    from sable.store.db import TraceStore
+    from toaster_loop.store.db import TraceStore
 
     home, stub = env
-    store = TraceStore(home / "buffer" / "sable.db")
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     for i in range(2):
         seed_trace__test_eval_logging(store, home, i)
     _run(home, stub, reg, store, monkeypatch, eval_loss=1.0, gate="warn")
@@ -3058,12 +3058,12 @@ def test_pipeline_gate_block_refuses_promotion(env, monkeypatch):
 
 def test_pipeline_gate_skipped_without_eval_data(env, monkeypatch):
     """Stub worker without eval_loss -> gate silently skipped (compat)."""
-    from sable.store.db import TraceStore
+    from toaster_loop.store.db import TraceStore
 
     home, stub = env
     monkeypatch.setenv("STUB_EVAL_LOSS", "0")  # -> None via `or None`
-    store = TraceStore(home / "buffer" / "sable.db")
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     for i in range(2):
         seed_trace__test_eval_logging(store, home, i)
     r = _run(home, stub, reg, store, monkeypatch, eval_loss=0, gate="block")
@@ -3294,8 +3294,8 @@ def _endpoint():
 
 @pytest.fixture()
 def home__test_evolve(tmp_path, monkeypatch):
-    h = tmp_path / ".sable-test-home"
-    monkeypatch.setenv("SABLE_CONFIG", str(h / "sable.yaml"))
+    h = tmp_path / ".toaster-loop-test-home"
+    monkeypatch.setenv("TOASTER_LOOP_CONFIG", str(h / "toaster_loop.yaml"))
     (h / "buffer").mkdir(parents=True)
     return h
 
@@ -3308,9 +3308,9 @@ def _job_params(**over):
 
 
 def test_evolve_job_runs_via_scheduler_and_stores_result(home__test_evolve, monkeypatch):
-    monkeypatch.setattr("sable.training.scheduler.gpu_free_mib",
+    monkeypatch.setattr("toaster_loop.training.scheduler.gpu_free_mib",
                         lambda: None)
-    reg = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     stub = Stub(variants=[("good", "Assistant.\n\n## Tools\ntools <!--good-->")],
                 golden_pass=("<!--",))
 
@@ -3323,7 +3323,7 @@ def test_evolve_job_runs_via_scheduler_and_stores_result(home__test_evolve, monk
         # production run/judge paths need HTTP; inject via mutate + monkeypatch
         )
     # Replace the heavy execution with the pure search over stubs:
-    import sable.evaluation.evolve as ev
+    import toaster_loop.evaluation.evolve as ev
 
     monkeypatch.setattr(
         ev, "run_prompt_evolution",
@@ -3351,9 +3351,9 @@ def test_evolve_job_runs_via_scheduler_and_stores_result(home__test_evolve, monk
 
 
 def test_evolve_job_refuses_when_disabled(home__test_evolve, monkeypatch):
-    monkeypatch.setattr("sable.training.scheduler.gpu_free_mib",
+    monkeypatch.setattr("toaster_loop.training.scheduler.gpu_free_mib",
                         lambda: None)
-    reg = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     runner = make_evolve_job_runner(
         reg, home=home__test_evolve, defaults={"enabled": False},
         endpoint_for=_endpoint)
@@ -3367,9 +3367,9 @@ def test_evolve_job_refuses_when_disabled(home__test_evolve, monkeypatch):
 
 
 def test_evolve_job_honest_empty_no_goldens(home__test_evolve, monkeypatch):
-    monkeypatch.setattr("sable.training.scheduler.gpu_free_mib",
+    monkeypatch.setattr("toaster_loop.training.scheduler.gpu_free_mib",
                         lambda: None)
-    reg = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     runner = make_evolve_job_runner(
         reg, home=home__test_evolve, defaults={"enabled": True}, endpoint_for=_endpoint)
     sched = Scheduler(registry=reg, cfg=TrainingConfig(),
@@ -3384,12 +3384,12 @@ def test_evolve_job_honest_empty_no_goldens(home__test_evolve, monkeypatch):
 
 
 def test_evolve_job_kind_accepted_by_registry_and_migration(home__test_evolve):
-    reg = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     job = reg.enqueue_job("evolve", params={"profile": "coder"})
     assert job.state == "queued"
     reg.close()
     # reopen: CHECK already contains 'evolve' -> migration is a no-op
-    reg2 = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    reg2 = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     assert reg2.get_job(job.job_id) is not None
     reg2.close()
 
@@ -3405,7 +3405,7 @@ def _write_cfg(path: Path, prompt="old prompt text"):
 
 
 def test_apply_updates_profile_and_keeps_backup(home__test_evolve):
-    cfg = home__test_evolve / "sable.yaml"
+    cfg = home__test_evolve / "toaster_loop.yaml"
     _write_cfg(cfg)
     out = apply_prompt_to_config(cfg, "coder", "new evolved prompt")
     data = yaml.safe_load(cfg.read_text())
@@ -3417,14 +3417,14 @@ def test_apply_updates_profile_and_keeps_backup(home__test_evolve):
 
 
 def test_apply_missing_profile_raises(home__test_evolve):
-    cfg = home__test_evolve / "sable.yaml"
+    cfg = home__test_evolve / "toaster_loop.yaml"
     _write_cfg(cfg)
     with pytest.raises(EvolveError, match="no profile"):
         apply_prompt_to_config(cfg, "ghost", "x")
 
 
 def test_dismiss_and_applied_flags_persist_without_deleting_history(home__test_evolve):
-    reg = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     job = reg.enqueue_job("evolve", params={"profile": "coder"})
     reg.finish_job(job.job_id, "done")
     reg.set_job_param(job.job_id, RESULT_KEY, {"improved": True})
@@ -3442,16 +3442,16 @@ def test_dismiss_and_applied_flags_persist_without_deleting_history(home__test_e
 
 def test_plain_run_never_touches_profile_config(home__test_evolve, monkeypatch):
     """Guardrail: an evolve job NEVER mutates the config file."""
-    monkeypatch.setattr("sable.training.scheduler.gpu_free_mib",
+    monkeypatch.setattr("toaster_loop.training.scheduler.gpu_free_mib",
                         lambda: None)
-    cfg = home__test_evolve / "sable.yaml"
+    cfg = home__test_evolve / "toaster_loop.yaml"
     _write_cfg(cfg)
     before = cfg.read_text()
 
-    reg = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     stub = Stub(variants=[("good", "Assistant.\n\n## Tools\ntools <!--g-->")],
                 golden_pass=("<!--",))
-    import sable.evaluation.evolve as ev
+    import toaster_loop.evaluation.evolve as ev
 
     monkeypatch.setattr(
         ev, "run_prompt_evolution",
@@ -3473,16 +3473,16 @@ def test_plain_run_never_touches_profile_config(home__test_evolve, monkeypatch):
 # ------------------------------------------------------------- dashboard API
 
 def _dash_app__test_evolve(home):
-    from sable.core.config import SableConfig
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.core.config import ToasterLoopConfig
+    from toaster_loop.dashboard.app import DashboardApp
 
-    return DashboardApp(SableConfig(), home=home)
+    return DashboardApp(ToasterLoopConfig(), home=home)
 
 
 def test_dashboard_evolve_endpoints(home__test_evolve, monkeypatch):
-    cfg = home__test_evolve / "sable.yaml"
+    cfg = home__test_evolve / "toaster_loop.yaml"
     _write_cfg(cfg)
-    reg = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     job = reg.enqueue_job("evolve", params={"profile": "coder"})
     reg.set_job_param(job.job_id, RESULT_KEY, {
         "ts": "2026-01-01T00:00:00+00:00", "improved": True,
@@ -3518,7 +3518,7 @@ def test_dashboard_evolve_endpoints(home__test_evolve, monkeypatch):
 
     # dismiss flag on another proposal
     job2 = reg2 = None
-    reg2 = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    reg2 = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     j2 = reg2.enqueue_job("evolve", params={"profile": "coder"})
     reg2.set_job_param(j2.job_id, RESULT_KEY, {"improved": False})
     reg2.finish_job(j2.job_id, "done")
@@ -3534,11 +3534,11 @@ def test_dashboard_evolve_endpoints(home__test_evolve, monkeypatch):
 # ----------------------------------------------------------------- CLI smoke
 
 def test_cli_evolve_refuses_when_disabled(home__test_evolve, monkeypatch, capsys):
-    from sable.cli import main
+    from toaster_loop.cli import main
 
-    cfg = home__test_evolve / "sable.yaml"
+    cfg = home__test_evolve / "toaster_loop.yaml"
     _write_cfg(cfg)
-    monkeypatch.setenv("SABLE_CONFIG", str(cfg))
+    monkeypatch.setenv("TOASTER_LOOP_CONFIG", str(cfg))
     rc = main(["evolve", "coder", "--goldens", "x.json"])
     assert rc == 2
     err = capsys.readouterr().err
@@ -3546,12 +3546,12 @@ def test_cli_evolve_refuses_when_disabled(home__test_evolve, monkeypatch, capsys
 
 
 def test_cli_evolve_apply_updates_config(home__test_evolve, monkeypatch, capsys):
-    from sable.cli import main
+    from toaster_loop.cli import main
 
-    cfg = home__test_evolve / "sable.yaml"
+    cfg = home__test_evolve / "toaster_loop.yaml"
     _write_cfg(cfg)
-    monkeypatch.setenv("SABLE_CONFIG", str(cfg))
-    reg = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    monkeypatch.setenv("TOASTER_LOOP_CONFIG", str(cfg))
+    reg = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     job = reg.enqueue_job("evolve", params={"profile": "coder"})
     reg.set_job_param(job.job_id, RESULT_KEY, {
         "improved": True, "best": {"variant_id": "v1",
@@ -3572,19 +3572,19 @@ def test_cli_evolve_apply_updates_config(home__test_evolve, monkeypatch, capsys)
 
 
 def test_cli_evolve_dismiss_flags_job(home__test_evolve, monkeypatch):
-    from sable.cli import main
+    from toaster_loop.cli import main
 
-    cfg = home__test_evolve / "sable.yaml"
+    cfg = home__test_evolve / "toaster_loop.yaml"
     _write_cfg(cfg)
-    monkeypatch.setenv("SABLE_CONFIG", str(cfg))
-    reg = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    monkeypatch.setenv("TOASTER_LOOP_CONFIG", str(cfg))
+    reg = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     job = reg.enqueue_job("evolve", params={"profile": "coder"})
     reg.set_job_param(job.job_id, RESULT_KEY, {"improved": False})
     reg.finish_job(job.job_id, "done")
     reg.close()
 
     assert main(["evolve", "dismiss", job.job_id]) == 0
-    reg2 = ModelRegistry(home__test_evolve / "buffer" / "sable.db")
+    reg2 = ModelRegistry(home__test_evolve / "buffer" / "toaster_loop.db")
     row = reg2.get_job(job.job_id)
     assert row is not None
     assert row.params[DISMISSED_KEY] and row.params[RESULT_KEY]
@@ -3712,7 +3712,7 @@ def _fresh_db(path: Path) -> sqlite3.Connection:
 
 
 def test_registry_migrates_and_roundtrips(tmp_path):
-    from sable.registry.registry import ModelRegistry
+    from toaster_loop.registry.registry import ModelRegistry
 
     db = tmp_path / "registry.db"
     conn = _fresh_db(db)
@@ -3737,7 +3737,7 @@ def test_registry_migrates_and_roundtrips(tmp_path):
 
 def test_registry_status_check_rebuild_keeps_provenance(tmp_path):
     """The #16 CHECK-rebuild path must survive the new last column (#23)."""
-    from sable.registry.registry import ModelRegistry
+    from toaster_loop.registry.registry import ModelRegistry
 
     db = tmp_path / "registry.db"
     conn = _fresh_db(db)
@@ -3775,8 +3775,8 @@ ALPACA_ROW = json.dumps({
 
 
 def test_import_manifest_carries_source_and_dataset_hashes(tmp_path, monkeypatch):
-    monkeypatch.setenv("SABLE_HOME", str(tmp_path / "home"))
-    from sable.curate.importer import import_dataset
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(tmp_path / "home"))
+    from toaster_loop.curate.importer import import_dataset
 
     src = tmp_path / "data.jsonl"
     src.write_text(ALPACA_ROW * 3)
@@ -3795,7 +3795,7 @@ def test_import_manifest_carries_source_and_dataset_hashes(tmp_path, monkeypatch
 # ------------------------------------------------- pipeline glue (unit-level)
 
 def test_dataset_file_inventory(tmp_path):
-    from sable.training.pipeline import _dataset_file_inventory
+    from toaster_loop.training.pipeline import _dataset_file_inventory
 
     (tmp_path / "sft.jsonl").write_text("a\n")
     (tmp_path / "train.yaml").write_text("x")   # not hashed
@@ -3810,13 +3810,13 @@ def test_dataset_file_inventory(tmp_path):
 @pytest.fixture()
 def home__test_wp9_analytics(tmp_path, monkeypatch):
     h = tmp_path / "uf-wp9"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 @pytest.fixture()
 def app__test_wp9_analytics(home__test_wp9_analytics):
-    return DashboardApp(SableConfig(), home=home__test_wp9_analytics)
+    return DashboardApp(ToasterLoopConfig(), home=home__test_wp9_analytics)
 
 
 # ------------------------------------------------------------------- seeding
@@ -3874,7 +3874,7 @@ OTHER_MSGS = [
 # ================================================================== 9a funnel
 
 def test_funnel_snapshot_persisted_with_honest_denominators(home__test_wp9_analytics):
-    store = TraceStore(home__test_wp9_analytics / "buffer" / "sable.db")
+    store = TraceStore(home__test_wp9_analytics / "buffer" / "toaster_loop.db")
     try:
         seed_trace__test_wp9_analytics(store, home__test_wp9_analytics, trace_id="t1", messages=OK_MSGS, score=0.9)
         seed_trace__test_wp9_analytics(store, home__test_wp9_analytics, trace_id="t2", messages=OTHER_MSGS, score=None)
@@ -3901,7 +3901,7 @@ def test_funnel_snapshot_persisted_with_honest_denominators(home__test_wp9_analy
 
 
 def test_funnel_history_accumulates_over_runs(home__test_wp9_analytics):
-    store = TraceStore(home__test_wp9_analytics / "buffer" / "sable.db")
+    store = TraceStore(home__test_wp9_analytics / "buffer" / "toaster_loop.db")
     try:
         seed_trace__test_wp9_analytics(store, home__test_wp9_analytics, trace_id="a1", messages=OK_MSGS)
         Curater(store, home__test_wp9_analytics).curate(CurationConfig(), name="one")
@@ -3920,7 +3920,7 @@ def test_funnel_history_accumulates_over_runs(home__test_wp9_analytics):
 
 
 def test_funnel_dedup_rejects_counted_on_dup_fixture(home__test_wp9_analytics):
-    store = TraceStore(home__test_wp9_analytics / "buffer" / "sable.db")
+    store = TraceStore(home__test_wp9_analytics / "buffer" / "toaster_loop.db")
     try:
         # same first-user turn + profile -> one conversation lineage; the
         # longer (DUP) trace wins, the shorter one is a dedup reject.
@@ -3937,7 +3937,7 @@ def test_funnel_dedup_rejects_counted_on_dup_fixture(home__test_wp9_analytics):
 
 
 def test_funnel_api_returns_history_and_latest_diff(app__test_wp9_analytics, home__test_wp9_analytics):
-    store = TraceStore(home__test_wp9_analytics / "buffer" / "sable.db")
+    store = TraceStore(home__test_wp9_analytics / "buffer" / "toaster_loop.db")
     try:
         seed_trace__test_wp9_analytics(store, home__test_wp9_analytics, trace_id="x1", messages=OK_MSGS)
         Curater(store, home__test_wp9_analytics).curate(CurationConfig(), name="r1")
@@ -3996,7 +3996,7 @@ def test_validation_api_merges_promotion_events_chronologically(app__test_wp9_an
             _fake_gate_report(2, 2, True), "v1")})
 
     # registry: v1 validated -> promoted (ledger records both ops)
-    reg = ModelRegistry(home__test_wp9_analytics / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_wp9_analytics / "buffer" / "toaster_loop.db")
     try:
         reg.register_model("base-a", dataset_id=None)
         reg.set_validation("v1", {"ok": True}, passed=True, actor="test")
@@ -4024,7 +4024,7 @@ def _metrics_text__test_wp9_analytics(app) -> str:
 
 def test_metrics_exposition_parses_back_with_help_type(app__test_wp9_analytics, home__test_wp9_analytics):
     # seed one trace so counters are non-trivial
-    store = TraceStore(home__test_wp9_analytics / "buffer" / "sable.db")
+    store = TraceStore(home__test_wp9_analytics / "buffer" / "toaster_loop.db")
     try:
         seed_trace__test_wp9_analytics(store, home__test_wp9_analytics, trace_id="m1", messages=OK_MSGS)
     finally:
@@ -4072,7 +4072,7 @@ def test_metrics_label_escaping_quotes_backslash(app__test_wp9_analytics, home__
     for line in text.splitlines():
         if 'a\\"b' in line:
             assert re.fullmatch(
-                r'sable_instances_up\{id="(?:[^"\\]|\\.)*"\} [0-9]+', line), line
+                r'toaster_loop_instances_up\{id="(?:[^"\\]|\\.)*"\} [0-9]+', line), line
             break
     else:
         pytest.fail("escaped instance sample not found")
@@ -4081,12 +4081,12 @@ def test_metrics_label_escaping_quotes_backslash(app__test_wp9_analytics, home__
 def test_metrics_vllm_mirrors_only_where_semantics_match(app__test_wp9_analytics, home__test_wp9_analytics):
     # one scored trace so the WP2c coverage ratio family is emitted at all,
     # and one promotion decision so the pass-rate denominator pair exists
-    store = TraceStore(home__test_wp9_analytics / "buffer" / "sable.db")
+    store = TraceStore(home__test_wp9_analytics / "buffer" / "toaster_loop.db")
     try:
         seed_trace__test_wp9_analytics(store, home__test_wp9_analytics, trace_id="mm1", messages=OK_MSGS, score=0.5)
     finally:
         store.close()
-    reg = ModelRegistry(home__test_wp9_analytics / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_wp9_analytics / "buffer" / "toaster_loop.db")
     try:
         reg.register_model("base-a")
         reg.set_validation("v1", {"ok": True}, passed=True, actor="test")
@@ -4102,20 +4102,20 @@ def test_metrics_vllm_mirrors_only_where_semantics_match(app__test_wp9_analytics
     assert "vllm:num_requests_total" not in fams
     assert "vllm:time_to_first_token_seconds" not in fams
     assert "vllm:num_requests_waiting" not in fams
-    # canonical sable families intact (WP2 honest variants included)
-    for fam in ("sable_traces_total", "sable_traces_scored_total",
-                "sable_score_coverage_ratio", "sable_promotion_decisions_total",
-                "sable_instance_up_strength", "sable_requests_total",
-                "sable_jobs_queued"):
+    # canonical toaster_loop families intact (WP2 honest variants included)
+    for fam in ("toaster_loop_traces_total", "toaster_loop_traces_scored_total",
+                "toaster_loop_score_coverage_ratio", "toaster_loop_promotion_decisions_total",
+                "toaster_loop_instance_up_strength", "toaster_loop_requests_total",
+                "toaster_loop_jobs_queued"):
         assert fam in fams, f"missing family {fam}"
 
 
 def test_metrics_token_auth_parity_on_metrics_route(home__test_wp9_analytics):
     """GET /metrics enforces the dashboard token exactly like /api/metrics —
     no unauthenticated backdoor on the scrape alias."""
-    from sable.dashboard.server import BIND_HOST, make_server
+    from toaster_loop.dashboard.server import BIND_HOST, make_server
 
-    httpd = make_server(SableConfig(), port=0, home=home__test_wp9_analytics, token="scr4pe")
+    httpd = make_server(ToasterLoopConfig(), port=0, home=home__test_wp9_analytics, token="scr4pe")
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     base = f"http://{BIND_HOST}:{httpd.server_address[1]}"
@@ -4123,7 +4123,7 @@ def test_metrics_token_auth_parity_on_metrics_route(home__test_wp9_analytics):
         import httpx
         assert httpx.get(base + "/metrics", timeout=5).status_code == 401
         r = httpx.get(base + "/metrics", timeout=5,
-                      headers={"X-Sable-Token": "scr4pe"})
+                      headers={"X-Toaster-Loop-Token": "scr4pe"})
         assert r.status_code == 200
         assert r.headers["content-type"] == "text/plain; version=0.0.4"
         assert "# HELP" in r.text
@@ -4141,9 +4141,9 @@ def test_metrics_token_auth_parity_on_metrics_route(home__test_wp9_analytics):
 
 def test_metrics_route_200_content_type_unauth_disabled(home__test_wp9_analytics):
     """HTTP-level happy path: token disabled -> /metrics is scrapeable."""
-    from sable.dashboard.server import BIND_HOST, make_server
+    from toaster_loop.dashboard.server import BIND_HOST, make_server
 
-    httpd = make_server(SableConfig(), port=0, home=home__test_wp9_analytics, token="")
+    httpd = make_server(ToasterLoopConfig(), port=0, home=home__test_wp9_analytics, token="")
     t = threading.Thread(target=httpd.serve_forever, daemon=True)
     t.start()
     base = f"http://{BIND_HOST}:{httpd.server_address[1]}"
@@ -4167,8 +4167,8 @@ def test_metrics_no_rate_without_denominator(app__test_wp9_analytics):
     text = _metrics_text__test_wp9_analytics(app__test_wp9_analytics)
     fams = {l.split()[2] for l in text.splitlines() if l.startswith("# TYPE")}
     pairs = {
-        "sable_score_coverage_ratio": "sable_traces_scored_total",
-        "sable_promotion_pass_rate": "sable_promotion_decisions_total",
+        "toaster_loop_score_coverage_ratio": "toaster_loop_traces_scored_total",
+        "toaster_loop_promotion_pass_rate": "toaster_loop_promotion_decisions_total",
     }
     for rate, denom in pairs.items():
         if rate in text:  # only emitted when non-empty

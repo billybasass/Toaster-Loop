@@ -5,13 +5,13 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from sable.core.config import SableConfig, load_config
+from toaster_loop.core.config import ToasterLoopConfig, load_config
 
 
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "cfg-home"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
@@ -41,7 +41,7 @@ def test_full_plans_section_loads(home):
 
 def test_plans_keys_registered_in_strict_mode(home, monkeypatch):
     """Every documented plans key loads IDENTICALLY under strict unknowns."""
-    monkeypatch.setenv("SABLE_CONFIG_STRICT", "1")
+    monkeypatch.setenv("TOASTER_LOOP_CONFIG_STRICT", "1")
     data = {"home": str(home),
             "plans": {"enabled": True, "inject_summary": True,
                       "max_inject_chars": 800,
@@ -53,9 +53,9 @@ def test_plans_keys_registered_in_strict_mode(home, monkeypatch):
 
 
 def test_unknown_plans_subkey_flagged_in_strict_mode(home, monkeypatch):
-    from sable.core.config import ConfigError
+    from toaster_loop.core.config import ConfigError
 
-    monkeypatch.setenv("SABLE_CONFIG_STRICT", "1")
+    monkeypatch.setenv("TOASTER_LOOP_CONFIG_STRICT", "1")
     with pytest.raises(ConfigError) as e:
         load_config(_write(home, {"home": str(home),
                                   "plans": {"enabled": True,
@@ -64,13 +64,13 @@ def test_unknown_plans_subkey_flagged_in_strict_mode(home, monkeypatch):
 
 
 def test_mistyped_plans_scalar_reported(home, monkeypatch):
-    from sable.core.config import ConfigError
+    from toaster_loop.core.config import ConfigError
 
-    monkeypatch.setenv("SABLE_CONFIG_STRICT", "1")
+    monkeypatch.setenv("TOASTER_LOOP_CONFIG_STRICT", "1")
     with pytest.raises(ConfigError):
         load_config(_write(home, {"home": str(home),
                                   "plans": {"enabled": "yes-please"}}))
 
 
-def test_sable_config_dataclass_default():
-    assert SableConfig().plans == {}
+def test_toaster_loop_config_dataclass_default():
+    assert ToasterLoopConfig().plans == {}

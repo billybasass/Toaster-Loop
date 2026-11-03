@@ -1,4 +1,4 @@
-# AGENTS.md — rules for AI agents working on sable
+# AGENTS.md — rules for AI agents working on Toaster Loop
 
 ## The two cardinal rules
 
@@ -7,9 +7,9 @@
    reproduce the old path exactly (see `serve.watchdog_enabled: false`,
    `routing.enabled: false`, `playbooks.enabled: false`, `serve.calibration: off`).
 2. **No performance or quality claims without measurement.** Effects below the
-   measured noise floor (`sable bench --noise-floor`) must be reported as
+   measured noise floor (`toaster-loop bench --noise-floor`) must be reported as
    **noise, not wins**. Speed comparisons run at temperature 0; if generated
-   tokens diverge, the comparison is INVALID (`sable bench --compare` says so).
+   tokens diverge, the comparison is INVALID (`toaster-loop bench --compare` says so).
 
 ## Licensing boundary (D-12) — non-negotiable
 
@@ -23,23 +23,23 @@ passing. See [`docs/DECISIONS.md`](docs/DECISIONS.md) (D-3, D-12).
 
 - Core: **pyyaml + httpx** (+ Pillow, lazily imported) — nothing else at module level.
 - Training stack (torch/transformers/peft/trl/datasets/accelerate/bitsandbytes):
-  `[training]` extra, imported **lazily inside `sable/training/worker.py` only**.
+  `[training]` extra, imported **lazily inside `toaster-loop/training/worker.py` only**.
 - Dashboard, MCP server and the doctor are **stdlib-only** — no new dependencies there.
 
 ## Test & lint commands (run before finishing any change)
 
 ```bash
 python -m pytest tests/ -q      # full suite must be green
-ruff check sable tests        # must report "All checks passed!"
+ruff check toaster-loop tests        # must report "All checks passed!"
 ```
 
-Hermetic-test conventions: tmp `SABLE_HOME`, injected probes / monkeypatched
+Hermetic-test conventions: tmp `TOASTER_LOOP_HOME`, injected probes / monkeypatched
 hardware readers (see [`tests/test_serving.py`](tests/test_serving.py)),
 no subprocess-dependent unit tests, no network.
 
 ## Exit-code taxonomy
 
-Defined in [`sable/core/exitcodes.py`](sable/core/exitcodes.py), documented
+Defined in [`toaster-loop/core/exitcodes.py`](toaster-loop/core/exitcodes.py), documented
 in README "Exit codes": 0 ok · 1 runtime error · 2 usage (argparse & invocation)
 · 3 invalid config (consolidated stderr report) · 4 finished-but-corrupt artifact
 · 10 update available (`llama update --check`) · 130 interrupt. Never renumber;
@@ -47,7 +47,7 @@ extend additively.
 
 ## How to add a config key
 
-Follow the `serve.*` conventions in [`sable/core/config.py`](sable/core/config.py):
+Follow the `serve.*` conventions in [`toaster-loop/core/config.py`](toaster-loop/core/config.py):
 add the key to the dataclass field's documented section dict (`serve:`, `tools:`,
 …), read it **leniently** (invalid values fall back to the default with a warning)
 or register mistypes in the WP2 validator sets so the consolidated report catches
@@ -59,12 +59,12 @@ stay green (every valid config loads identically).
 
 Install/operate/troubleshoot commands with expected outputs:
 [`docs/AI_SETUP.md`](docs/AI_SETUP.md). Environment measurement doctor:
-`sable doctor --env` ([`sable/doctor.py`](sable/doctor.py)).
+`toaster-loop doctor --env` ([`toaster-loop/doctor.py`](toaster-loop/doctor.py)).
 
 ## Hard constraints (project-wide)
 
 - **Loopback-only, zero cloud, zero API keys.** No listeners off 127.0.0.1;
   nothing downloads except explicit `hub download` / `setup` (git clone).
-- All state under `~/.sable/` (`SABLE_HOME`); uninstall = delete the dir.
-- Ownership rule: sable only ever stops processes it spawned (pid verified via
+- All state under `~/.toaster-loop/` (`TOASTER_LOOP_HOME`); uninstall = delete the dir.
+- Ownership rule: toaster-loop only ever stops processes it spawned (pid verified via
   `serving/runtime.terminate_owned_pid`); foreign/recycled pids are never touched.

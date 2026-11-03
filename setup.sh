@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# sable one-click setup — safe to double-click or run from a terminal:
+# toaster-loop one-click setup — safe to double-click or run from a terminal:
 #
 #   ./setup.sh              # full setup (venv + package + training extras
 #                           #  + llama.cpp build for this GPU + desktop icon)
@@ -9,10 +9,10 @@
 # What it does:
 #   1. Creates ./.venv (uv if installed, else python3 -m venv) with a
 #      Python between 3.11 and 3.13.
-#   2. Installs sable (editable) + dev extras; adds the [training] extra
+#   2. Installs toaster-loop (editable) + dev extras; adds the [training] extra
 #      unless --no-training is passed.
-#   3. Runs `sable setup` — detects the GPU and builds llama.cpp for it.
-#   4. Installs a desktop icon ("sable") that launches the dashboard, and
+#   3. Runs `toaster-loop setup` — detects the GPU and builds llama.cpp for it.
+#   4. Installs a desktop icon ("toaster-loop") that launches the dashboard, and
 #      prints how to launch from the terminal (./launch.sh).
 #   5. Reports which screen-capture backends are present so you know up
 #      front whether the take_screenshot tool will work (and what to install
@@ -71,7 +71,7 @@ fi
 echo "interpreter: $PY ($("$PY" --version 2>&1))"
 
 # ------------------------------------------------------------------- 2. venv
-say "2/5 creating venv + installing sable"
+say "2/5 creating venv + installing toaster-loop"
 EXTRAS="dev"
 [ "$TRAINING" = 1 ] && EXTRAS="dev,training"
 if command -v uv >/dev/null 2>&1; then
@@ -83,17 +83,17 @@ fi
 
 # torch build flavor must match THIS machine's accelerator: plain PyPI
 # ships the CUDA wheel on Linux, which silently CPU-trains on AMD/MPS
-# boxes (see sable/core/torchenv.py). Install torch from the right index
+# boxes (see toaster-loop/core/torchenv.py). Install torch from the right index
 # FIRST so the [training] extras resolve against it; then the editable
 # install (whose torch>=2.4 pin is already satisfied) won't touch it.
 if [ "$TRAINING" = 1 ]; then
     # torchenv is stdlib-only (its runtime import is lazy), so a bare
-    # PYTHONPATH probe works before sable itself is installed.
+    # PYTHONPATH probe works before toaster-loop itself is installed.
     FLAVOR_NAME="$(PYTHONPATH="$REPO" "$VENV/bin/python" -c \
-        "from sable.core.torchenv import detect_flavor; print(detect_flavor().flavor)" \
+        "from toaster_loop.core.torchenv import detect_flavor; print(detect_flavor().flavor)" \
         2>/dev/null || echo default)"
     FLAVOR_IDX="$(PYTHONPATH="$REPO" "$VENV/bin/python" -c \
-        "from sable.core.torchenv import detect_flavor; print(detect_flavor().index_url or '')" \
+        "from toaster_loop.core.torchenv import detect_flavor; print(detect_flavor().index_url or '')" \
         2>/dev/null || true)"
     echo "torch      : $FLAVOR_NAME build for this hardware"
     if command -v uv >/dev/null 2>&1; then
@@ -122,15 +122,15 @@ else
     "$VENV/bin/python" -m pip install -q -e "$REPO[$EXTRAS]" \
         || { warn "package install failed (check network/disk)"; exit 1; }
 fi
-[ -x "$VENV/bin/sable" ] || { echo "error: venv install failed — no .venv/bin/sable" >&2; exit 1; }
-echo "installed  : $("$VENV/bin/sable" --version)"
+[ -x "$VENV/bin/toaster-loop" ] || { echo "error: venv install failed — no .venv/bin/toaster-loop" >&2; exit 1; }
+echo "installed  : $("$VENV/bin/toaster-loop" --version)"
 
 # --------------------------------------------------------------- 3. llama.cpp
 say "3/5 building llama.cpp for this machine (GPU autodetect)"
 if command -v git >/dev/null 2>&1 && command -v cmake >/dev/null 2>&1 \
    && command -v cc >/dev/null 2>&1; then
-    "$VENV/bin/sable" setup ${BACKEND_ARGS[@]+"${BACKEND_ARGS[@]}"} \
-        || warn "llama.cpp setup failed — serving/training may be limited; re-run ./setup.sh or 'sable setup' after fixing the toolchain"
+    "$VENV/bin/toaster-loop" setup ${BACKEND_ARGS[@]+"${BACKEND_ARGS[@]}"} \
+        || warn "llama.cpp setup failed — serving/training may be limited; re-run ./setup.sh or 'toaster-loop setup' after fixing the toolchain"
 else
     warn "git/cmake/compiler missing — skipping llama.cpp build."
     warn "install them (e.g. sudo apt install git build-essential cmake) and re-run ./setup.sh"
@@ -142,20 +142,20 @@ ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
 ICON_PNG_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
 if [ "$(uname)" = "Linux" ]; then
     mkdir -p "$ICON_DIR" "$ICON_PNG_DIR"
-    cp "$REPO/assets/sable.svg" "$ICON_PNG_DIR/sable.svg" 2>/dev/null || true
-    cat > "$ICON_DIR/sable.desktop" <<EOF
+    cp "$REPO/assets/toaster-loop.svg" "$ICON_PNG_DIR/toaster-loop.svg" 2>/dev/null || true
+    cat > "$ICON_DIR/toaster-loop.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=sable
+Name=Toaster Loop
 Comment=Local self-improving agent dashboard
 Exec=$REPO/launch.sh
-Icon=sable
+Icon=toaster-loop
 Terminal=false
 Categories=Development;MachineLearning;
 StartupNotify=true
 EOF
     update-desktop-database "$ICON_DIR" >/dev/null 2>&1 || true
-    echo "icon       : 'sable' added to your applications menu"
+    echo "icon       : 'Toaster Loop' added to your applications menu"
 fi
 
 # ------------------------------------------------ 5. screenshot backends
@@ -197,7 +197,7 @@ case "$(uname)" in
 esac
 
 say "done."
-echo "  launch   : ./launch.sh   (or the sable icon in your apps menu)"
+echo "  launch   : ./launch.sh   (or the toaster-loop icon in your apps menu)"
 echo "  stop     : ./launch.sh --stop"
 echo "  cleanup  : ./cleanup.sh  (fresh-downloaded state)"
 echo "  tests    : .venv/bin/pytest"

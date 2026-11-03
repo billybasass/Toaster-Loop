@@ -24,44 +24,44 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sable.cli import build_parser  # noqa: E402
-from sable.mcp.confirm import ConfirmStore, args_fingerprint  # noqa: E402
-from sable.mcp.schema import validate_args  # noqa: E402
-from sable.mcp.server import PROTOCOL_VERSION, McpServer, serve_stdio  # noqa: E402
+from toaster_loop.cli import build_parser  # noqa: E402
+from toaster_loop.mcp.confirm import ConfirmStore, args_fingerprint  # noqa: E402
+from toaster_loop.mcp.schema import validate_args  # noqa: E402
+from toaster_loop.mcp.server import PROTOCOL_VERSION, McpServer, serve_stdio  # noqa: E402
 from fake_server import FakeOpenAIServer  # noqa: E402
-from sable.core import delegation  # noqa: E402
-from sable.core.config import SableConfig, load_config  # noqa: E402
-from sable.core.tools import TOOL_IMPLS, TOOL_SCHEMAS  # noqa: E402
-from sable.core.config import SableConfig  # noqa: E402
-from sable.dashboard.app import DashboardApp  # noqa: E402
-from sable.registry import ModelRegistry  # noqa: E402
-from sable.training.scheduler import DISPATCH_TICK_S, DispatcherAlreadyRunning, JobDispatcher, Scheduler, TrainingConfig, _dispatcher_lock_path  # noqa: E402
-from sable.core.agent_runner import SableAgentClient, create_runner  # noqa: E402
-from sable.core.failure_types import is_infra_reason  # noqa: E402
-from sable.core.guardrails import IDEMPOTENT_TOOL_NAMES, MUTATING_TOOL_NAMES, REPETITION_MARKER, ToolCallSignature, ToolLoopGuardrails, detect_repetition, find_loop, truncate_repetition  # noqa: E402
-from sable.core import tools  # noqa: E402
-from sable.core.config import load_config  # noqa: E402
-from sable.core.tools import SYNTAX_FAIL_MARK, SYNTAX_OK_MARK, patch, write_file  # noqa: E402
-from sable.core.presets import ENABLE_ALL_SWITCHES, enable_all_diff, enable_all_patches  # noqa: E402
-from sable.store.db import TraceRow, TraceStore  # noqa: E402
+from toaster_loop.core import delegation  # noqa: E402
+from toaster_loop.core.config import ToasterLoopConfig, load_config  # noqa: E402
+from toaster_loop.core.tools import TOOL_IMPLS, TOOL_SCHEMAS  # noqa: E402
+from toaster_loop.core.config import ToasterLoopConfig  # noqa: E402
+from toaster_loop.dashboard.app import DashboardApp  # noqa: E402
+from toaster_loop.registry import ModelRegistry  # noqa: E402
+from toaster_loop.training.scheduler import DISPATCH_TICK_S, DispatcherAlreadyRunning, JobDispatcher, Scheduler, TrainingConfig, _dispatcher_lock_path  # noqa: E402
+from toaster_loop.core.agent_runner import ToasterLoopAgentClient, create_runner  # noqa: E402
+from toaster_loop.core.failure_types import is_infra_reason  # noqa: E402
+from toaster_loop.core.guardrails import IDEMPOTENT_TOOL_NAMES, MUTATING_TOOL_NAMES, REPETITION_MARKER, ToolCallSignature, ToolLoopGuardrails, detect_repetition, find_loop, truncate_repetition  # noqa: E402
+from toaster_loop.core import tools  # noqa: E402
+from toaster_loop.core.config import load_config  # noqa: E402
+from toaster_loop.core.tools import SYNTAX_FAIL_MARK, SYNTAX_OK_MARK, patch, write_file  # noqa: E402
+from toaster_loop.core.presets import ENABLE_ALL_SWITCHES, enable_all_diff, enable_all_patches  # noqa: E402
+from toaster_loop.store.db import TraceRow, TraceStore  # noqa: E402
 from fake_server import FakeOpenAIServer, make_message_handler  # noqa: E402
-from sable.core.agent_runner import SableAgentClient  # noqa: E402
-from sable.core.batch import BatchInputError, checkpoint_path, load_checkpoint, load_tasks, run_batch, scan_completed, task_key  # noqa: E402
-from sable.store.recorder import TraceRecorder  # noqa: E402
+from toaster_loop.core.agent_runner import ToasterLoopAgentClient  # noqa: E402
+from toaster_loop.core.batch import BatchInputError, checkpoint_path, load_checkpoint, load_tasks, run_batch, scan_completed, task_key  # noqa: E402
+from toaster_loop.store.recorder import TraceRecorder  # noqa: E402
 from fake_server import FakeOpenAIServer, make_scripted_handler  # noqa: E402
-from sable.curate import CurationConfig  # noqa: E402
-from sable.training.pipeline import run_iterate  # noqa: E402
-from sable.training.scheduler import Scheduler, TrainingConfig  # noqa: E402
-from sable.training.validate import ValidationConfig  # noqa: E402
-from sable.core.verification import VerificationLedger, is_code_path  # noqa: E402
-from sable.evaluation.shadow import ShadowError, no_replay_set_for, run_shadow_eval  # noqa: E402
-from sable.registry.registry import TRANSFERS_CAP  # noqa: E402
+from toaster_loop.curate import CurationConfig  # noqa: E402
+from toaster_loop.training.pipeline import run_iterate  # noqa: E402
+from toaster_loop.training.scheduler import Scheduler, TrainingConfig  # noqa: E402
+from toaster_loop.training.validate import ValidationConfig  # noqa: E402
+from toaster_loop.core.verification import VerificationLedger, is_code_path  # noqa: E402
+from toaster_loop.evaluation.shadow import ShadowError, no_replay_set_for, run_shadow_eval  # noqa: E402
+from toaster_loop.registry.registry import TRANSFERS_CAP  # noqa: E402
 
 # ------------------------------------------------------------------------
 # from tests/test_mcp_wp6.py
 # ------------------------------------------------------------------------
 
-MCP_SRC = Path(__file__).resolve().parents[1] / "sable" / "mcp"
+MCP_SRC = Path(__file__).resolve().parents[1] / "toaster_loop" / "mcp"
 
 
 # ------------------------------------------------------------------ helpers
@@ -128,7 +128,7 @@ def call_tool(srv: McpServer, n: int, name: str,
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "uf-mcp"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
@@ -139,7 +139,7 @@ def test_initialize_handshake(home):
     resp = init(srv)
     result = resp["result"]
     assert result["protocolVersion"] == PROTOCOL_VERSION
-    assert result["serverInfo"]["name"] == "sable"
+    assert result["serverInfo"]["name"] == "toaster_loop"
     assert "tools" in result["capabilities"]
 
 
@@ -392,7 +392,7 @@ def test_train_enqueue_conflict_surfaces_as_error(home, monkeypatch):
     ApiResponse; the fake reproduces exactly that contract for the train
     route (submit_train raises HttpError 409 already_running while busy).
     """
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
     a = DashboardApp.__new__(DashboardApp)  # do not construct threads etc.
 
@@ -431,7 +431,7 @@ def test_curate_enqueue_queues_via_api(home):
 
 def test_curate_enqueue_project_passthrough(home):
     """WP12: curate_enqueue accepts the optional project id filter (mirrors
-    `sable curate --project`) and forwards it to POST /api/curate."""
+    `toaster_loop curate --project`) and forwards it to POST /api/curate."""
     srv, app = make_server(home)
     init(srv)
     out = call_tool(srv, 78, "curate_enqueue",
@@ -449,7 +449,7 @@ def test_curate_enqueue_project_passthrough(home):
 # ---------------------------------------------------------- no-shell rules
 
 def test_no_shell_execution_anywhere_in_mcp():
-    """No subprocess/shell/os.system anywhere in sable/mcp/**."""
+    """No subprocess/shell/os.system anywhere in toaster_loop/mcp/**."""
     offenders = []
     pat = re.compile(r"shell\s*=\s*True|os\.system|subprocess|\bos\.popen\b|"
                      r"pty\.spawn|eval\(|exec\(")
@@ -462,10 +462,10 @@ def test_no_shell_execution_anywhere_in_mcp():
 
 
 def test_mcp_package_is_stdlib_only():
-    """The MCP package imports only stdlib + sable (no MCP SDK)."""
+    """The MCP package imports only stdlib + toaster_loop (no MCP SDK)."""
     import ast
 
-    allowed_roots = set(sys.stdlib_module_names) | {"sable", "yaml", "httpx"}
+    allowed_roots = set(sys.stdlib_module_names) | {"toaster_loop", "yaml", "httpx"}
     offenders = []
     for py in sorted(MCP_SRC.rglob("*.py")):
         tree = ast.parse(py.read_text())
@@ -517,7 +517,7 @@ def test_stdio_banishes_nothing_to_stdout_on_diagnostics(home, capsys):
     serve_stdio(stdin=stdin, stdout=stdout)
     # The banner went to stderr (capsys), stdout holds exactly one JSON line.
     assert len(stdout.getvalue().strip().splitlines()) == 1
-    assert "sable mcp" in capsys.readouterr().err
+    assert "toaster_loop mcp" in capsys.readouterr().err
 
 # ------------------------------------------------------------------------
 # from tests/test_delegation.py
@@ -533,12 +533,12 @@ def _clean_registry():
 @pytest.fixture()
 def home__test_delegation(tmp_path, monkeypatch):
     h = tmp_path / "uf-deleg"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 def _cfg(profiles=None, project=None, home=None, **kw):
-    cfg = SableConfig(home=str(home) if home else None, **kw)
+    cfg = ToasterLoopConfig(home=str(home) if home else None, **kw)
     cfg.profiles = profiles or []
     return cfg
 
@@ -613,9 +613,9 @@ def test_delegate_task_records_linked_child_trace_and_completes(home__test_deleg
     assert child_trace
 
     # child trace header carries the delegation linkage + project (v3 column)
-    from sable.store.db import TraceStore
+    from toaster_loop.store.db import TraceStore
 
-    store = TraceStore(Path(home__test_delegation) / "buffer" / "sable.db")
+    store = TraceStore(Path(home__test_delegation) / "buffer" / "toaster_loop.db")
     try:
         row = store.get_trace(child_trace)
     finally:
@@ -635,7 +635,7 @@ def test_delegate_task_records_linked_child_trace_and_completes(home__test_deleg
 
 def test_delegate_child_trace_stamped_with_profile_in_easy_loop(home__test_delegation, _clean_registry):
     """Audit §3: when easy training covers the CHILD profile, its trace is
-    stamped agent_profile=<child name> (not the backend "sable") so scoped
+    stamped agent_profile=<child name> (not the backend "toaster_loop") so scoped
     curation/readiness count it — same rule as the dashboard chat path."""
     pid = _make_project(home__test_delegation, ["coder"])
     cfg = _cfg(PROFILES, home=home__test_delegation)
@@ -646,9 +646,9 @@ def test_delegate_child_trace_stamped_with_profile_in_easy_loop(home__test_deleg
             _ctx=_ctx(cfg, srv.base_url, profile="researcher", project=pid)))
     assert payload["status"] == "completed", payload
 
-    from sable.store.db import TraceStore
+    from toaster_loop.store.db import TraceStore
 
-    store = TraceStore(Path(home__test_delegation) / "buffer" / "sable.db")
+    store = TraceStore(Path(home__test_delegation) / "buffer" / "toaster_loop.db")
     try:
         row = store.get_trace(payload["child_trace_id"])
     finally:
@@ -668,14 +668,14 @@ def test_delegate_child_trace_keeps_backend_when_profile_outside_easy_loop(home_
             _ctx=_ctx(cfg, srv.base_url, profile="researcher", project=pid)))
     assert payload["status"] == "completed", payload
 
-    from sable.store.db import TraceStore
+    from toaster_loop.store.db import TraceStore
 
-    store = TraceStore(Path(home__test_delegation) / "buffer" / "sable.db")
+    store = TraceStore(Path(home__test_delegation) / "buffer" / "toaster_loop.db")
     try:
         row = store.get_trace(payload["child_trace_id"])
     finally:
         store.close()
-    assert row is not None and row.agent_profile == "sable"
+    assert row is not None and row.agent_profile == "toaster_loop"
 
 
 def test_run_child_passes_recorder_profile(monkeypatch, home__test_delegation):
@@ -687,7 +687,7 @@ def test_run_child_passes_recorder_profile(monkeypatch, home__test_delegation):
         seen["profile"] = kw.get("profile")
         raise RuntimeError("stop-after-recorder")
 
-    monkeypatch.setattr("sable.store.recorder.make_recorder", spy_recorder)
+    monkeypatch.setattr("toaster_loop.store.recorder.make_recorder", spy_recorder)
     cfg = _cfg(PROFILES, home=home__test_delegation)
     cfg.easy_training = {"enabled": True, "profile": "coder"}
     with pytest.raises(RuntimeError, match="stop-after-recorder"):
@@ -735,9 +735,9 @@ def test_delegate_peer_name_resolves_via_peers(home__test_delegation,
         calls.append(full_name)
         return dict(REMOTE_PROF)
 
-    monkeypatch.setattr("sable.dashboard.peers.resolve_remote_agent",
+    monkeypatch.setattr("toaster_loop.dashboard.peers.resolve_remote_agent",
                         fake_resolve)
-    monkeypatch.setattr("sable.serving.supervisor.healthcheck",
+    monkeypatch.setattr("toaster_loop.serving.supervisor.healthcheck",
                         lambda *a, **k: True)
     monkeypatch.setattr(delegation, "_run_child", _fake_run_child(seen))
     cfg = _cfg(PROFILES, home=home__test_delegation)
@@ -761,21 +761,21 @@ def test_delegate_peer_unreachable_error_leaves_no_record(
         home__test_delegation, monkeypatch, _clean_registry):
     """Resolved peer that fails the gateway healthcheck -> peer_unreachable
     payload with chat's not-serving sentence, and NO phantom registry record."""
-    monkeypatch.setattr("sable.dashboard.peers.resolve_remote_agent",
+    monkeypatch.setattr("toaster_loop.dashboard.peers.resolve_remote_agent",
                         lambda h, n: dict(REMOTE_PROF))
-    monkeypatch.setattr("sable.serving.supervisor.healthcheck",
+    monkeypatch.setattr("toaster_loop.serving.supervisor.healthcheck",
                         lambda *a, **k: False)
     cfg = _cfg(PROFILES, home=home__test_delegation)
     payload = json.loads(delegation.execute_delegation(
         "tim@192.0.2.9", "render", _ctx=_ctx(cfg, "http://127.0.0.1:1/v1")))
     assert payload["status"] == "failed"
     assert payload["code"] == "peer_unreachable"
-    assert "remote sable at 192.0.2.9:55429 is not serving right now" \
+    assert "remote toaster_loop at 192.0.2.9:55429 is not serving right now" \
         in payload["error"]
     assert len(delegation._delegations) == 0  # no phantom running record
 
     # unresolvable peer name (offline / never probed / agent gone)
-    monkeypatch.setattr("sable.dashboard.peers.resolve_remote_agent",
+    monkeypatch.setattr("toaster_loop.dashboard.peers.resolve_remote_agent",
                         lambda h, n: None)
     out = json.loads(delegation.execute_delegation(
         "tim@192.0.2.9", "render", _ctx=_ctx(cfg, "http://127.0.0.1:1/v1")))
@@ -874,7 +874,7 @@ def test_list_agents_shows_peer_serving_state(home__test_delegation,
                                               _clean_registry):
     """Peer agent lines carry a serving state built ONLY from cached probe
     snapshots in peers.json (no network calls): serving / idle / unknown."""
-    from sable.dashboard import peers as peers_mod
+    from toaster_loop.dashboard import peers as peers_mod
 
     home = home__test_delegation
     pid = _make_project(home, ["coder", "tim@192.0.2.9", "ana@192.0.2.10",
@@ -909,8 +909,8 @@ def test_list_agents_shows_peer_serving_state(home__test_delegation,
 
 def test_run_child_remote_wiring(home__test_delegation, monkeypatch):
     """_run_child overrides the parent endpoint for remote profiles: peer
-    gateway base_url / token / model + X-Sable-Instance header."""
-    from sable.core.agent_runner import AgentResult
+    gateway base_url / token / model + X-Toaster-Loop-Instance header."""
+    from toaster_loop.core.agent_runner import AgentResult
 
     captured = {}
 
@@ -927,10 +927,10 @@ def test_run_child_remote_wiring(home__test_delegation, monkeypatch):
                 {"role": "assistant", "content": "ok"}],
                 backend="stub", tokens_in=1, tokens_out=1)
 
-    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
+    monkeypatch.setattr("toaster_loop.core.agent_runner.create_runner", StubRunner)
     pushed = []
     monkeypatch.setattr(
-        "sable.dashboard.peers.push_remote_trace",
+        "toaster_loop.dashboard.peers.push_remote_trace",
         lambda prof, task, res, t0: pushed.append((prof["name"], task)))
 
     cfg = _cfg(PROFILES, home=home__test_delegation)
@@ -941,7 +941,7 @@ def test_run_child_remote_wiring(home__test_delegation, monkeypatch):
     assert captured["base_url"] == "http://192.0.2.9:55429/remote/v1"
     assert captured["api_key"] == "peer-tok"
     assert captured["model"] == "Qwen3-27B"
-    assert captured["extra_headers"] == {"X-Sable-Instance": "tim"}
+    assert captured["extra_headers"] == {"X-Toaster-Loop-Instance": "tim"}
     assert out["completed"] is True
     # trace flow-back fired once for the remote child
     assert pushed == [("tim@192.0.2.9", "render")]
@@ -949,7 +949,7 @@ def test_run_child_remote_wiring(home__test_delegation, monkeypatch):
 
 def test_run_child_local_wiring_unchanged(home__test_delegation, monkeypatch):
     """Local children keep the parent-inherited endpoint and never push."""
-    from sable.core.agent_runner import AgentResult
+    from toaster_loop.core.agent_runner import AgentResult
 
     captured = {}
 
@@ -962,10 +962,10 @@ def test_run_child_local_wiring_unchanged(home__test_delegation, monkeypatch):
             return AgentResult(final_response="ok", messages=[],
                                backend="stub", tokens_in=1, tokens_out=1)
 
-    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
+    monkeypatch.setattr("toaster_loop.core.agent_runner.create_runner", StubRunner)
     pushed = []
     monkeypatch.setattr(
-        "sable.dashboard.peers.push_remote_trace",
+        "toaster_loop.dashboard.peers.push_remote_trace",
         lambda *a, **k: pushed.append(a))
     cfg = _cfg(PROFILES, home=home__test_delegation)
     delegation._run_child(cfg, {"name": "coder"}, "task",
@@ -979,7 +979,7 @@ def test_run_child_local_wiring_unchanged(home__test_delegation, monkeypatch):
 def test_run_child_flowback_failure_never_breaks_child(home__test_delegation,
                                                        monkeypatch):
     """A raising trace push leaves the child's terminal state untouched."""
-    from sable.core.agent_runner import AgentResult
+    from toaster_loop.core.agent_runner import AgentResult
 
     class StubRunner:
         def __init__(self, cfg, base_url, model, api_key=None, **kwargs):
@@ -992,8 +992,8 @@ def test_run_child_flowback_failure_never_breaks_child(home__test_delegation,
     def boom(*a, **k):
         raise RuntimeError("peer is down")
 
-    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
-    monkeypatch.setattr("sable.dashboard.peers.push_remote_trace", boom)
+    monkeypatch.setattr("toaster_loop.core.agent_runner.create_runner", StubRunner)
+    monkeypatch.setattr("toaster_loop.dashboard.peers.push_remote_trace", boom)
     cfg = _cfg(PROFILES, home=home__test_delegation)
     out = {}
     delegation._run_child(cfg, dict(REMOTE_PROF), "render",
@@ -1098,11 +1098,11 @@ def test_delegate_parent_cancel_stops_child_and_settles_cancelled(
     def looping_child(cfg_, prof, task, ctx, delegation_id, out,
                       plan_task=None, cancel_event=None):
         # Emulates a runner polling cancel_event at loop boundaries: exits
-        # with failure_reason="cancelled" exactly like SableAgentClient does.
+        # with failure_reason="cancelled" exactly like ToasterLoopAgentClient does.
         for _ in range(200):  # cap: never outlive the test
             seen["loops"] += 1
             if cancel_event is not None and cancel_event.is_set():
-                from sable.core.failure_types import FAILURE_CANCELLED
+                from toaster_loop.core.failure_types import FAILURE_CANCELLED
                 out["completed"] = False
                 out["failure_reason"] = FAILURE_CANCELLED
                 out["result"] = "(stopped: cancelled by user)"
@@ -1161,7 +1161,7 @@ def test_cancel_delegation_stops_running_child(home__test_delegation,
                       plan_task=None, cancel_event=None):
         for _ in range(200):
             if cancel_event is not None and cancel_event.is_set():
-                from sable.core.failure_types import FAILURE_CANCELLED
+                from toaster_loop.core.failure_types import FAILURE_CANCELLED
                 out["completed"] = False
                 out["failure_reason"] = FAILURE_CANCELLED
                 return
@@ -1293,7 +1293,7 @@ def test_guardrails_apply_to_child_runs(home__test_delegation, monkeypatch, _cle
 # ------------------------------------------------- registration / config glue
 
 def test_tools_registered_and_in_known_tools(_clean_registry):
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
     names = {s["function"]["name"] for s in TOOL_SCHEMAS}
     assert {"list_agents", "delegate_task", "check_delegation"} <= names
@@ -1304,13 +1304,13 @@ def test_tools_registered_and_in_known_tools(_clean_registry):
 
 
 def test_recorder_metadata_and_nullrecorder_passthrough(home__test_delegation, _clean_registry):
-    from sable.store.recorder import make_recorder
+    from toaster_loop.store.recorder import make_recorder
 
     cfg = _cfg(home=home__test_delegation)
     rec = make_recorder(cfg, project="p9",
                         metadata={"delegation_id": "d1", "parent_run_id": "r1"})
     row = rec.record(task="t", messages=[{"role": "user", "content": "t"}],
-                     backend="sable", model_alias="m", base_url="",
+                     backend="toaster_loop", model_alias="m", base_url="",
                      completed=True)
     header = json.loads(Path(row.jsonl_path).read_text().splitlines()[0])
     assert header["delegation"]["delegation_id"] == "d1"
@@ -1318,7 +1318,7 @@ def test_recorder_metadata_and_nullrecorder_passthrough(home__test_delegation, _
     # plain runs keep the key nullable/absent-safe
     rec2 = make_recorder(cfg)
     row2 = rec2.record(task="t", messages=[{"role": "user", "content": "t"}],
-                       backend="sable", model_alias="m", base_url="",
+                       backend="toaster_loop", model_alias="m", base_url="",
                        completed=True)
     header2 = json.loads(Path(row2.jsonl_path).read_text().splitlines()[0])
     assert header2.get("delegation") is None
@@ -1327,15 +1327,15 @@ def test_recorder_metadata_and_nullrecorder_passthrough(home__test_delegation, _
 def test_config_section_and_env_overrides(tmp_path, monkeypatch, _clean_registry):
     cfg_file = tmp_path / "c.yaml"
     cfg_file.write_text("delegation:\n  enabled: false\n")
-    monkeypatch.delenv("SABLE_DELEGATION", raising=False)
+    monkeypatch.delenv("TOASTER_LOOP_DELEGATION", raising=False)
     cfg = load_config(str(cfg_file))
     assert cfg.delegation_enabled is False
 
-    monkeypatch.setenv("SABLE_DELEGATION", "true")
+    monkeypatch.setenv("TOASTER_LOOP_DELEGATION", "true")
     cfg2 = load_config(str(cfg_file))
     assert cfg2.delegation_enabled is True
 
-    defaults = SableConfig()
+    defaults = ToasterLoopConfig()
     assert defaults.delegation_enabled is True
     # D-18: no timeout knob anymore.
     assert not hasattr(defaults, "delegation_timeout_seconds")
@@ -1344,9 +1344,9 @@ def test_config_section_and_env_overrides(tmp_path, monkeypatch, _clean_registry
 def test_chat_stream_passes_delegation_context_and_thread(home__test_delegation, monkeypatch, _clean_registry):
     """h_chat/stream threads {thread, run_id, project...} into create_runner
     and h_thread_put keeps server-written delegations on client saves."""
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
-    app = DashboardApp(SableConfig(home=home__test_delegation), home=home__test_delegation)
+    app = DashboardApp(ToasterLoopConfig(home=home__test_delegation), home=home__test_delegation)
     seen: dict = {}
 
     class StubRunner:
@@ -1358,12 +1358,12 @@ def test_chat_stream_passes_delegation_context_and_thread(home__test_delegation,
             self.recorder = recorder
 
         def run(self, task, history=None, previous_summary=None):
-            from sable.core.agent_runner import AgentResult
+            from toaster_loop.core.agent_runner import AgentResult
             return AgentResult(final_response="ok", messages=[
                 {"role": "user", "content": task},
                 {"role": "assistant", "content": "ok"}], backend="stub")
 
-    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
+    monkeypatch.setattr("toaster_loop.core.agent_runner.create_runner", StubRunner)
 
     # a serving target is required to reach the runner (attach-mode state,
     # same shape as tests/test_dashboard.py::_fake_serve_state)
@@ -1440,13 +1440,13 @@ else:
 @pytest.fixture()
 def home__test_dispatcher(tmp_path, monkeypatch):
     h = tmp_path / "ufdisp"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 @pytest.fixture()
 def registry(home__test_dispatcher):
-    reg = ModelRegistry(home__test_dispatcher / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_dispatcher / "buffer" / "toaster_loop.db")
     yield reg
     reg.close()
 
@@ -1466,7 +1466,7 @@ def _reset_slot_bookkeeping():
     _reset_runtime_counters): a daemon execution thread from an earlier test
     can still hold slot 0 briefly; without this reset the next test's claim
     would refuse against a phantom in-flight owner."""
-    import sable.training.scheduler as sched_mod
+    import toaster_loop.training.scheduler as sched_mod
 
     with sched_mod._SLOT_LOCK:
         sched_mod._INFLIGHT_CLAIMS.clear()
@@ -1509,7 +1509,7 @@ def test_drain_queue_runs_every_queued_job(registry, stub, _reset_slot_bookkeepi
 def test_dispatcher_loop_drains_without_submit_thread(home__test_dispatcher, registry, stub, _reset_slot_bookkeeping):
     """A JobDispatcher tick picks up a queued job nobody is waiting on."""
     def factory():
-        return make_sched(ModelRegistry(home__test_dispatcher / "buffer" / "sable.db"), stub)
+        return make_sched(ModelRegistry(home__test_dispatcher / "buffer" / "toaster_loop.db"), stub)
 
     j = registry.enqueue_job("sft")
     d = JobDispatcher(db_path=registry.db_path, scheduler_factory=factory,
@@ -1525,8 +1525,8 @@ def test_dispatcher_loop_drains_without_submit_thread(home__test_dispatcher, reg
 def test_two_rapid_submits_both_execute(home__test_dispatcher, monkeypatch, stub, _reset_slot_bookkeeping):
     """(a) POST /api/train twice fast with two slots: both jobs execute,
     neither strands in `queued`."""
-    monkeypatch.setenv("SABLE_WORKER_COMMAND", f"{sys.executable} {stub}")
-    app = DashboardApp(SableConfig(training={"max_parallel_jobs": 2}),
+    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND", f"{sys.executable} {stub}")
+    app = DashboardApp(ToasterLoopConfig(training={"max_parallel_jobs": 2}),
                        home=home__test_dispatcher)
     for ds in ("ds-a", "ds-b"):
         d = home__test_dispatcher / "datasets" / ds
@@ -1538,7 +1538,7 @@ def test_two_rapid_submits_both_execute(home__test_dispatcher, monkeypatch, stub
     assert r1.status == 202 and r2.status == 202
     ids = [r1.body["job_id"], r2.body["job_id"]]
 
-    reg = ModelRegistry(home__test_dispatcher / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_dispatcher / "buffer" / "toaster_loop.db")
 
     def _state(job_id):
         cur = reg.get_job(job_id)
@@ -1564,7 +1564,7 @@ def test_phantom_running_row_reaped_at_startup(home__test_dispatcher, registry, 
     j = registry.enqueue_job("sft")
     registry.mark_running(j.job_id, pid=999_999)  # dead pid -> phantom
 
-    app = DashboardApp(SableConfig(), home=home__test_dispatcher)
+    app = DashboardApp(ToasterLoopConfig(), home=home__test_dispatcher)
     try:
         d = app.startup_dispatcher()
         assert d is not None
@@ -1578,11 +1578,11 @@ def test_phantom_running_row_reaped_at_startup(home__test_dispatcher, registry, 
 def test_phantom_row_no_longer_returns_409(home__test_dispatcher, registry, monkeypatch, stub, _reset_slot_bookkeeping):
     """(b) With the phantom reaped by the submit-path pre-check, POST /api/train
     is accepted instead of 409 already_running forever."""
-    monkeypatch.setenv("SABLE_WORKER_COMMAND", f"{sys.executable} {stub}")
+    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND", f"{sys.executable} {stub}")
     j = registry.enqueue_job("sft")
     registry.mark_running(j.job_id, pid=999_999)
 
-    app = DashboardApp(SableConfig(), home=home__test_dispatcher)
+    app = DashboardApp(ToasterLoopConfig(), home=home__test_dispatcher)
     ds = home__test_dispatcher / "datasets" / "ds-p"
     ds.mkdir(parents=True)
     (ds / "train.yaml").write_text("model: base\ndata: {}\n")
@@ -1596,7 +1596,7 @@ def test_phantom_row_no_longer_returns_409(home__test_dispatcher, registry, monk
 def test_live_running_row_still_returns_409(home__test_dispatcher, registry, _reset_slot_bookkeeping):
     """The reap must not weaken the real single-flight guard: a LIVE running
     row (our own pid) still refuses with 409 already_running."""
-    app = DashboardApp(SableConfig(), home=home__test_dispatcher)
+    app = DashboardApp(ToasterLoopConfig(), home=home__test_dispatcher)
     j = registry.enqueue_job("sft")
     registry.mark_running(j.job_id, os.getpid())  # alive -> not reaped
 
@@ -1610,14 +1610,14 @@ def test_live_running_row_still_returns_409(home__test_dispatcher, registry, _re
 def test_concurrent_claimers_never_double_claim(home__test_dispatcher, _reset_slot_bookkeeping):
     """(c) N threads racing claim_next_queued over M rows: every row claimed at
     most once (guarded UPDATE + IMMEDIATE transaction)."""
-    reg_a = ModelRegistry(home__test_dispatcher / "buffer" / "sable.db")
+    reg_a = ModelRegistry(home__test_dispatcher / "buffer" / "toaster_loop.db")
     ids = [reg_a.enqueue_job("sft").job_id for _ in range(12)]
 
     claimed: list = []
     claim_lock = threading.Lock()
 
     def racer():
-        reg = ModelRegistry(home__test_dispatcher / "buffer" / "sable.db")
+        reg = ModelRegistry(home__test_dispatcher / "buffer" / "toaster_loop.db")
         try:
             while True:
                 job = reg.claim_next_queued(os.getpid())
@@ -1636,7 +1636,7 @@ def test_concurrent_claimers_never_double_claim(home__test_dispatcher, _reset_sl
 
     assert sorted(claimed) == sorted(ids), "every row claimed exactly once"
     # all rows landed running under the claim
-    reg_b = ModelRegistry(home__test_dispatcher / "buffer" / "sable.db")
+    reg_b = ModelRegistry(home__test_dispatcher / "buffer" / "toaster_loop.db")
     try:
         for i in ids:
             cur = reg_b.get_job(i)
@@ -1686,7 +1686,7 @@ def test_gate_blocked_job_retried_when_gate_passes(registry, stub, monkeypatch, 
     """(d) A job blocked by the VRAM gate stays queued with its _gate_reason;
     once the gate passes, a later drain runs it. The gate itself is never
     weakened — while it fails, the claim is simply released back to queued."""
-    import sable.training.scheduler as sched_mod
+    import toaster_loop.training.scheduler as sched_mod
 
     monkeypatch.setattr(sched_mod, "gpu_free_mib", lambda: 100)
     sched = Scheduler(registry=registry,
@@ -1715,11 +1715,11 @@ def test_gate_block_events_dedup_per_episode(registry, stub, monkeypatch, _reset
     """Gate-block events are cumulative but episode-deduped: repeated blocked
     drain attempts (the dispatcher retries a queued job every tick) with the
     SAME reason record ONE event; unblocking and re-blocking records a second.
-    This is what makes sable_gate_blocks_total a true counter while the
+    This is what makes toaster_loop_gate_blocks_total a true counter while the
     jobs-side _gate_reason stays a cleared-on-unblock gauge."""
     import sqlite3
 
-    import sable.training.scheduler as sched_mod
+    import toaster_loop.training.scheduler as sched_mod
 
     def gate_events():
         conn = sqlite3.connect(str(registry.db_path))
@@ -1759,7 +1759,7 @@ def test_gate_block_events_dedup_per_episode(registry, stub, monkeypatch, _reset
 def test_run_claimed_releases_gate_refusal(registry, stub, monkeypatch, _reset_slot_bookkeeping):
     """run_claimed turns a SchedulerError (gate/slot busy) into a requeued job
     owned by nobody, so the next tick can retry it."""
-    import sable.training.scheduler as sched_mod
+    import toaster_loop.training.scheduler as sched_mod
 
     monkeypatch.setattr(sched_mod, "gpu_free_mib", lambda: 100)
     sched = Scheduler(registry=registry,
@@ -1780,7 +1780,7 @@ def test_second_dispatcher_refuses_while_lock_held(home__test_dispatcher, regist
     """(e) Contention fails loudly naming the holder pid and lock path; after
     the holder stops, a new dispatcher starts."""
     def factory():
-        return make_sched(ModelRegistry(home__test_dispatcher / "buffer" / "sable.db"), stub)
+        return make_sched(ModelRegistry(home__test_dispatcher / "buffer" / "toaster_loop.db"), stub)
 
     d1 = JobDispatcher(db_path=registry.db_path, scheduler_factory=factory,
                        tick_s=0.2)
@@ -1813,7 +1813,7 @@ def test_stale_lock_from_dead_pid_is_reclaimed(home__test_dispatcher, registry, 
     """A lockfile left behind by a dead process (no flock held) never wedges
     the queue: start succeeds and rewrites the recorded pid."""
     def factory():
-        return make_sched(ModelRegistry(home__test_dispatcher / "buffer" / "sable.db"), stub)
+        return make_sched(ModelRegistry(home__test_dispatcher / "buffer" / "toaster_loop.db"), stub)
 
     lock_path = _dispatcher_lock_path(registry.db_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1832,8 +1832,8 @@ def test_stale_lock_from_dead_pid_is_reclaimed(home__test_dispatcher, registry, 
 def test_app_ensure_dispatcher_contention(home__test_dispatcher, _reset_slot_bookkeeping):
     """Two DashboardApps over one home: the second ensure_dispatcher raises,
     and succeeds again once the first app stops its dispatcher."""
-    app1 = DashboardApp(SableConfig(), home=home__test_dispatcher)
-    app2 = DashboardApp(SableConfig(), home=home__test_dispatcher)
+    app1 = DashboardApp(ToasterLoopConfig(), home=home__test_dispatcher)
+    app2 = DashboardApp(ToasterLoopConfig(), home=home__test_dispatcher)
     try:
         assert app1.ensure_dispatcher() is not None
         with pytest.raises(DispatcherAlreadyRunning):
@@ -1851,9 +1851,9 @@ def test_app_ensure_dispatcher_contention(home__test_dispatcher, _reset_slot_boo
 def test_workspace_root_fallback_logged(caplog, home__test_dispatcher, _reset_slot_bookkeeping):
     """agent.workspace_root unset -> the cwd fallback (often $HOME) is logged
     loudly at WARNING on the startup path."""
-    app = DashboardApp(SableConfig(), home=home__test_dispatcher)
+    app = DashboardApp(ToasterLoopConfig(), home=home__test_dispatcher)
     try:
-        with caplog.at_level(logging.WARNING, logger="sable.dashboard"):
+        with caplog.at_level(logging.WARNING, logger="toaster_loop.dashboard"):
             app.startup_dispatcher()
         assert any(
             "workspace root" in r.getMessage()
@@ -1869,9 +1869,9 @@ def test_workspace_root_explicit_logged_at_info(caplog, home__test_dispatcher, _
     fallback warning."""
     ws = home__test_dispatcher / "ws"
     ws.mkdir(parents=True)
-    app = DashboardApp(SableConfig(agent={"workspace_root": str(ws)}),
+    app = DashboardApp(ToasterLoopConfig(agent={"workspace_root": str(ws)}),
                        home=home__test_dispatcher)
-    with caplog.at_level(logging.INFO, logger="sable.dashboard"):
+    with caplog.at_level(logging.INFO, logger="toaster_loop.dashboard"):
         app._log_workspace_root()
     msgs = [r for r in caplog.records if "workspace root" in r.getMessage()]
     assert any(str(ws) in r.getMessage() and r.levelno == logging.INFO
@@ -1881,11 +1881,11 @@ def test_workspace_root_explicit_logged_at_info(caplog, home__test_dispatcher, _
 
 def test_workspace_root_null_warns_containment_disabled(caplog, home__test_dispatcher, _reset_slot_bookkeeping):
     """Explicit null (UNSET sentinel) -> containment-disabled warning."""
-    from sable.core.config import UNSET
+    from toaster_loop.core.config import UNSET
 
-    app = DashboardApp(SableConfig(agent={"workspace_root": UNSET}),
+    app = DashboardApp(ToasterLoopConfig(agent={"workspace_root": UNSET}),
                        home=home__test_dispatcher)
-    with caplog.at_level(logging.WARNING, logger="sable.dashboard"):
+    with caplog.at_level(logging.WARNING, logger="toaster_loop.dashboard"):
         app._log_workspace_root()
     assert any("DISABLED" in r.getMessage() for r in caplog.records
                if "workspace root" in r.getMessage())
@@ -1903,9 +1903,9 @@ def test_dispatch_tick_constant_sane(_reset_slot_bookkeeping):
 # ------------------------------------------------------------------------
 
 @pytest.fixture()
-def sable_home(tmp_path, monkeypatch):
+def toaster_loop_home(tmp_path, monkeypatch):
     home = tmp_path / "uf-home"
-    monkeypatch.setenv("SABLE_HOME", str(home))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
     return home
 
 
@@ -2046,7 +2046,7 @@ def test_detect_repetition_flags_loop(_reset_handler_counters):
 
 
 def test_detect_repetition_ignores_normal_text(_reset_handler_counters):
-    normal = "sable records traces to ~/.sable/buffer. " * 3
+    normal = "toaster_loop records traces to ~/.toaster-loop/buffer. " * 3
     assert detect_repetition(normal) is False
     assert detect_repetition("short loop loop loop") is False
     assert detect_repetition("") is False
@@ -2137,11 +2137,11 @@ def _reset_handler_counters():
     yield
 
 
-def test_run_halts_before_max_iterations_with_guardrail_reason(sable_home, _reset_handler_counters):
-    from sable.store.recorder import TraceRecorder
-    rec = TraceRecorder(home=sable_home)
+def test_run_halts_before_max_iterations_with_guardrail_reason(toaster_loop_home, _reset_handler_counters):
+    from toaster_loop.store.recorder import TraceRecorder
+    rec = TraceRecorder(home=toaster_loop_home)
     with FakeOpenAIServer(handler_cls=AlwaysFailingPatchHandler__test_guardrails) as srv:
-        client = SableAgentClient(base_url=srv.base_url, model="m",
+        client = ToasterLoopAgentClient(base_url=srv.base_url, model="m",
                                     tool_impls={"patch": failing_patch_impl},
                                     max_iterations=12, recorder=rec)
         result = client.run("fix the file")
@@ -2151,14 +2151,14 @@ def test_run_halts_before_max_iterations_with_guardrail_reason(sable_home, _rese
     assert AlwaysFailingPatchHandler__test_guardrails.n < 12  # halted before max_iterations
     assert result.trace_id is not None
 
-    footer = _footer_for(sable_home, result.trace_id)
+    footer = _footer_for(toaster_loop_home, result.trace_id)
     assert footer["failure_reason"] == "guardrail_halt:same_tool_failure_halt"
     assert footer["completed"] is False
 
 
 def test_run_warn_and_block_surfaced_in_tool_results(_reset_handler_counters):
     with FakeOpenAIServer(handler_cls=IdenticalFailingPatchHandler) as srv:
-        client = SableAgentClient(base_url=srv.base_url, model="m",
+        client = ToasterLoopAgentClient(base_url=srv.base_url, model="m",
                                     tool_impls={"patch": failing_patch_impl},
                                     max_iterations=8)
         result = client.run("fix the file")
@@ -2199,7 +2199,7 @@ def test_final_answer_repetition_truncated(_reset_handler_counters):
             self.wfile.write(body)
 
     with FakeOpenAIServer(handler_cls=LoopAnswerHandler) as srv:
-        client = SableAgentClient(base_url=srv.base_url, model="m")
+        client = ToasterLoopAgentClient(base_url=srv.base_url, model="m")
         result = client.run("tell me a story")
     assert result.completed is True
     assert result.final_response.endswith(REPETITION_MARKER)
@@ -2228,16 +2228,16 @@ def test_summarize_output_repetition_truncated(_reset_handler_counters):
             self.wfile.write(body)
 
     with FakeOpenAIServer(handler_cls=LoopSummaryHandler) as srv:
-        client = SableAgentClient(base_url=srv.base_url, model="m")
+        client = ToasterLoopAgentClient(base_url=srv.base_url, model="m")
         out = client._summarize("summarize please")
     assert out is not None
     assert out.endswith(REPETITION_MARKER)
     assert len(out) < len(loop)
 
 
-def test_guardrails_off_runs_to_max_iterations(sable_home, _reset_handler_counters):
+def test_guardrails_off_runs_to_max_iterations(toaster_loop_home, _reset_handler_counters):
     with FakeOpenAIServer(handler_cls=AlwaysFailingPatchHandler__test_guardrails) as srv:
-        client = SableAgentClient(base_url=srv.base_url, model="m",
+        client = ToasterLoopAgentClient(base_url=srv.base_url, model="m",
                                     tool_impls={"patch": failing_patch_impl},
                                     max_iterations=4, guardrails_enabled=False)
         result = client.run("fix the file")
@@ -2246,10 +2246,10 @@ def test_guardrails_off_runs_to_max_iterations(sable_home, _reset_handler_counte
 
 
 def test_create_runner_config_knob(_reset_handler_counters):
-    cfg_on = SableConfig()
+    cfg_on = ToasterLoopConfig()
     assert create_runner(cfg_on, base_url="http://127.0.0.1:9/v1",
                          model="m").guardrails_enabled is True
-    cfg_off = SableConfig(agent={"guardrails": False})
+    cfg_off = ToasterLoopConfig(agent={"guardrails": False})
     assert create_runner(cfg_off, base_url="http://127.0.0.1:9/v1",
                          model="m").guardrails_enabled is False
 
@@ -2484,8 +2484,8 @@ def test_lsp_probe_never_outlives_its_timeout(tmp_path, stub_server):
 # ------------------------------------------------------------ config plumbing
 
 def test_config_parses_tools_lint_and_lsp(tmp_path, monkeypatch):
-    monkeypatch.delenv("SABLE_LINT_ON_WRITE", raising=False)
-    monkeypatch.delenv("SABLE_LSP", raising=False)
+    monkeypatch.delenv("TOASTER_LOOP_LINT_ON_WRITE", raising=False)
+    monkeypatch.delenv("TOASTER_LOOP_LSP", raising=False)
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(yaml.safe_dump({
         "tools": {"lint_on_write": False,
@@ -2497,8 +2497,8 @@ def test_config_parses_tools_lint_and_lsp(tmp_path, monkeypatch):
 
 
 def test_config_defaults_lint_on_true_lsp_absent(tmp_path, monkeypatch):
-    monkeypatch.delenv("SABLE_LINT_ON_WRITE", raising=False)
-    monkeypatch.delenv("SABLE_LSP", raising=False)
+    monkeypatch.delenv("TOASTER_LOOP_LINT_ON_WRITE", raising=False)
+    monkeypatch.delenv("TOASTER_LOOP_LSP", raising=False)
     cfg = load_config()
     assert "lint_on_write" not in cfg.tools  # default applied at read site
     assert bool((cfg.tools.get("lsp") or {}).get("enabled")) is False
@@ -2507,15 +2507,15 @@ def test_config_defaults_lint_on_true_lsp_absent(tmp_path, monkeypatch):
 def test_env_override_lint_on_write(tmp_path, monkeypatch):
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(yaml.safe_dump({"tools": {"lint_on_write": True}}))
-    monkeypatch.setenv("SABLE_LINT_ON_WRITE", "false")
+    monkeypatch.setenv("TOASTER_LOOP_LINT_ON_WRITE", "false")
     assert load_config(str(cfg_file)).tools["lint_on_write"] is False
-    monkeypatch.setenv("SABLE_LINT_ON_WRITE", "1")
+    monkeypatch.setenv("TOASTER_LOOP_LINT_ON_WRITE", "1")
     assert load_config(str(cfg_file)).tools["lint_on_write"] is True
 
 
 def test_env_override_lsp_enabled(tmp_path, monkeypatch):
-    monkeypatch.delenv("SABLE_LINT_ON_WRITE", raising=False)
-    monkeypatch.setenv("SABLE_LSP", "true")
+    monkeypatch.delenv("TOASTER_LOOP_LINT_ON_WRITE", raising=False)
+    monkeypatch.setenv("TOASTER_LOOP_LSP", "true")
     cfg = load_config()
     assert cfg.tools["lsp"]["enabled"] is True
 
@@ -2523,10 +2523,10 @@ def test_env_override_lsp_enabled(tmp_path, monkeypatch):
 def test_create_runner_binds_lint_flags(tmp_path, monkeypatch):
     """create_runner must thread tools.lint_on_write/lsp into write_file/patch
     (bound invisibly; the model cannot toggle them)."""
-    from sable.core.agent_runner import create_runner
+    from toaster_loop.core.agent_runner import create_runner
 
-    monkeypatch.delenv("SABLE_LINT_ON_WRITE", raising=False)
-    monkeypatch.delenv("SABLE_LSP", raising=False)
+    monkeypatch.delenv("TOASTER_LOOP_LINT_ON_WRITE", raising=False)
+    monkeypatch.delenv("TOASTER_LOOP_LSP", raising=False)
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text(yaml.safe_dump({"tools": {"lint_on_write": False}}))
     cfg = load_config(str(cfg_file))
@@ -2541,14 +2541,14 @@ def test_create_runner_binds_lint_flags(tmp_path, monkeypatch):
 
 @pytest.fixture()
 def home__test_presets_enable_all(tmp_path, monkeypatch):
-    h = tmp_path / "sable-presets"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    h = tmp_path / "toaster_loop-presets"
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 @pytest.fixture()
 def app(home__test_presets_enable_all):
-    a = DashboardApp(SableConfig(), home=home__test_presets_enable_all)
+    a = DashboardApp(ToasterLoopConfig(), home=home__test_presets_enable_all)
     yield a
 
 
@@ -2572,12 +2572,12 @@ def test_easy_training_and_janitor_never_in_preset():
 def test_conditional_switches_off_without_env(home__test_presets_enable_all, monkeypatch):
     # No language server on PATH, no calibration profile => neither appears.
     monkeypatch.setattr("shutil.which", lambda *a, **k: None)
-    sections = [p["section"] for p in enable_all_patches(SableConfig(), home=str(home__test_presets_enable_all))]
-    tools = [p for p in enable_all_patches(SableConfig(), home=str(home__test_presets_enable_all))
+    sections = [p["section"] for p in enable_all_patches(ToasterLoopConfig(), home=str(home__test_presets_enable_all))]
+    tools = [p for p in enable_all_patches(ToasterLoopConfig(), home=str(home__test_presets_enable_all))
              if p["section"] == "tools"]
     assert not tools  # lsp patch absent
     # serve only ever carries watchdog (a plain switch), never calibration here
-    for p in enable_all_patches(SableConfig(), home=str(home__test_presets_enable_all)):
+    for p in enable_all_patches(ToasterLoopConfig(), home=str(home__test_presets_enable_all)):
         if p["section"] == "serve":
             assert set(p["patch"]) == {"watchdog_enabled"}
     assert "serve" in sections  # watchdog itself is unconditional
@@ -2587,13 +2587,13 @@ def test_lsp_included_when_server_on_path(home__test_presets_enable_all, monkeyp
     monkeypatch.setattr("shutil.which",
                         lambda name, **k: "/usr/bin/" + name
                         if name == "pyright-langserver" else None)
-    tools = [p for p in enable_all_patches(SableConfig(), home=str(home__test_presets_enable_all))
+    tools = [p for p in enable_all_patches(ToasterLoopConfig(), home=str(home__test_presets_enable_all))
              if p["section"] == "tools"]
     assert tools and tools[0]["patch"]["lsp"]["enabled"] is True
 
 
 def test_diff_reports_only_differing_keys():
-    cfg = SableConfig()
+    cfg = ToasterLoopConfig()
     cfg.skills = {"enabled": True}  # already on => absent from diff
     d = {(x["section"], x["key"]): x for x in enable_all_diff(cfg)}
     assert ("skills", "enabled") not in d
@@ -2604,7 +2604,7 @@ def test_diff_reports_only_differing_keys():
 # ---------------------------------------------------------------- endpoints
 
 def test_preview_writes_nothing(app, home__test_presets_enable_all):
-    cfg_file = home__test_presets_enable_all / "sable.yaml"
+    cfg_file = home__test_presets_enable_all / "toaster_loop.yaml"
     assert not cfg_file.exists()
     r = app.handle("POST", "/api/features/enable_all", body={"preview": True})
     assert r.status == 200
@@ -2621,7 +2621,7 @@ def test_apply_flips_switches_and_preserves_unrelated_keys(app, home__test_prese
         "section": "easy_training", "patch": {"enabled": False}})
     r = app.handle("POST", "/api/features/enable_all", body={})
     assert r.status == 200, r.body
-    cfg = load_config(str(home__test_presets_enable_all / "sable.yaml"))
+    cfg = load_config(str(home__test_presets_enable_all / "toaster_loop.yaml"))
     assert (cfg.skills or {}).get("enabled") is True
     assert (cfg.skills or {}).get("index_total_cap_chars") == 999  # merge kept it
     assert (cfg.playbooks or {}).get("enabled") is True
@@ -2654,7 +2654,7 @@ def test_rollback_on_failed_patch(app, home__test_presets_enable_all, monkeypatc
         if method == "PUT" and path == "/api/config":
             called["n"] += 1
             if called["n"] == 2:
-                from sable.dashboard.app import ApiResponse
+                from toaster_loop.dashboard.app import ApiResponse
                 return ApiResponse(500, {"error": {
                     "code": "test", "message": "boom"}})
         return orig(self, method, path, query, body)
@@ -2668,7 +2668,7 @@ def test_rollback_on_failed_patch(app, home__test_presets_enable_all, monkeypatc
     # After rollback neither the live config nor the file has any switch on.
     assert not (app.cfg.skills or {}).get("enabled")
     assert not (app.cfg.playbooks or {}).get("enabled")
-    cfg_file = home__test_presets_enable_all / "sable.yaml"
+    cfg_file = home__test_presets_enable_all / "toaster_loop.yaml"
     if cfg_file.is_file():
         cfg = load_config(str(cfg_file))
         assert not (cfg.skills or {}).get("enabled")
@@ -2678,19 +2678,19 @@ def test_rollback_on_failed_patch(app, home__test_presets_enable_all, monkeypatc
 # from tests/test_profiles_schedule.py
 # ------------------------------------------------------------------------
 
-STATIC = Path(__file__).resolve().parents[1] / "sable" / "dashboard" / "static"
+STATIC = Path(__file__).resolve().parents[1] / "toaster_loop" / "dashboard" / "static"
 
 
 @pytest.fixture()
 def home__test_profiles_schedule(tmp_path, monkeypatch):
     h = tmp_path / "uf-5e"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 @pytest.fixture()
 def app__test_profiles_schedule(home__test_profiles_schedule):
-    return DashboardApp(SableConfig(), home=home__test_profiles_schedule)
+    return DashboardApp(ToasterLoopConfig(), home=home__test_profiles_schedule)
 
 
 def seed_trace(store: TraceStore, tid: str, score=0.8, curated=False):
@@ -2733,7 +2733,7 @@ def test_profiles_crud_and_default(app__test_profiles_schedule, home__test_profi
     assert r.status == 200 and r.body["profile"]["name"] == "coder"
 
     # persisted to the config file (profiles: section)
-    raw = (home__test_profiles_schedule / "sable.yaml").read_text()
+    raw = (home__test_profiles_schedule / "toaster_loop.yaml").read_text()
     assert "coder" in raw and "careful coder" in raw
 
     # upsert same name updates in place
@@ -2848,14 +2848,14 @@ def test_chat_stream_honors_profile(app__test_profiles_schedule, home__test_prof
 
 def test_config_patch_null_unsets_key(app__test_profiles_schedule, home__test_profiles_schedule):
     home__test_profiles_schedule.mkdir(parents=True, exist_ok=True)
-    (home__test_profiles_schedule / "sable.yaml").write_text(
+    (home__test_profiles_schedule / "toaster_loop.yaml").write_text(
         "attach_url: http://127.0.0.1:9/v1\nport: 1234\n")
     r = app__test_profiles_schedule.handle("PUT", "/api/config", body={
         "section": "root", "patch": {"attach_url": None}})
     assert r.status == 200
     import yaml
 
-    data = yaml.safe_load((home__test_profiles_schedule / "sable.yaml").read_text())
+    data = yaml.safe_load((home__test_profiles_schedule / "toaster_loop.yaml").read_text())
     assert "attach_url" not in data and data["port"] == 1234
 
 
@@ -2880,10 +2880,10 @@ if a.log_path:
 
 
 def _run_auto_check(monkeypatch, home, trigger=False, dry_run=False):
-    import sable.cli as cli
+    import toaster_loop.cli as cli
 
-    monkeypatch.setenv("SABLE_HOME", str(home))
-    monkeypatch.setenv("SABLE_CONFIG", str(home / "sable.yaml"))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
+    monkeypatch.setenv("TOASTER_LOOP_CONFIG", str(home / "toaster_loop.yaml"))
     argv = ["train", "auto-check"]
     if trigger:
         argv.append("--trigger")
@@ -2895,11 +2895,11 @@ def _run_auto_check(monkeypatch, home, trigger=False, dry_run=False):
 def test_auto_check_trigger_only_when_gate_ok(monkeypatch, home__test_profiles_schedule, tmp_path, capsys):
     # thresholds low enough that a couple of good traces suffice
     home__test_profiles_schedule.mkdir(parents=True, exist_ok=True)
-    (home__test_profiles_schedule / "sable.yaml").write_text(
+    (home__test_profiles_schedule / "toaster_loop.yaml").write_text(
         "training:\n  auto_min_traces: 2\n  auto_min_score: 0.5\n")
     stub = tmp_path / "stub_worker.py"
     stub.write_text(STUB_WORKER__test_profiles_schedule)
-    monkeypatch.setenv("SABLE_WORKER_COMMAND", f"{sys.executable} {stub}")
+    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND", f"{sys.executable} {stub}")
 
     # 1) not enough traces -> no trigger, exit 0 with --trigger, no jobs
     rc = _run_auto_check(monkeypatch, home__test_profiles_schedule, trigger=True, dry_run=True)
@@ -2908,7 +2908,7 @@ def test_auto_check_trigger_only_when_gate_ok(monkeypatch, home__test_profiles_s
     assert "no trigger" in out and "iterate" not in out.lower().split("no trigger")[1]
 
     # 2) enough good traces -> --trigger runs iterate (dry-run, stub worker)
-    store = TraceStore(home__test_profiles_schedule / "buffer" / "sable.db")
+    store = TraceStore(home__test_profiles_schedule / "buffer" / "toaster_loop.db")
     seed_trace(store, "t1", score=0.9)
     seed_trace(store, "t2", score=0.8)
     seed_trace(store, "t3", score=0.7)
@@ -2918,9 +2918,9 @@ def test_auto_check_trigger_only_when_gate_ok(monkeypatch, home__test_profiles_s
     assert rc == 0 and "starting iterate loop" in out
     assert '"stage": "train"' in out or "train" in out  # pipeline report printed
     # an iterate job actually ran through the scheduler/registry
-    from sable.registry import ModelRegistry
+    from toaster_loop.registry import ModelRegistry
 
-    reg = ModelRegistry(home__test_profiles_schedule / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_profiles_schedule / "buffer" / "toaster_loop.db")
     try:
         kinds = [j.kind for j in reg.list_jobs()]
         states = [j.state for j in reg.list_jobs()]
@@ -2929,12 +2929,12 @@ def test_auto_check_trigger_only_when_gate_ok(monkeypatch, home__test_profiles_s
     assert "sft" in kinds and "done" in states
 
     # 3) resource gate blocked -> trigger reports and exits without running
-    (home__test_profiles_schedule / "sable.yaml").write_text(
+    (home__test_profiles_schedule / "toaster_loop.yaml").write_text(
         "training:\n  auto_min_traces: 2\n  auto_min_score: 0.5\n"
         "  min_free_vram_mib: 999999999\n")
-    monkeypatch.setattr("sable.training.scheduler.gpu_free_mib",
+    monkeypatch.setattr("toaster_loop.training.scheduler.gpu_free_mib",
                         lambda: 1, raising=True)
-    store = TraceStore(home__test_profiles_schedule / "buffer" / "sable.db")
+    store = TraceStore(home__test_profiles_schedule / "buffer" / "toaster_loop.db")
     seed_trace(store, "t4", score=0.9)
     seed_trace(store, "t5", score=0.9)
     # unclaim the earlier ones so curation has material again
@@ -2980,8 +2980,8 @@ def test_profiles_routes_registered(app__test_profiles_schedule):
 @pytest.fixture()
 def _no_sleeps(monkeypatch):
     """Retry backoff must not slow the suite down (cf. test_resilience)."""
-    from sable.core import agent_runner as ar
-    monkeypatch.setattr(ar.SableAgentClient, "_sleep",
+    from toaster_loop.core import agent_runner as ar
+    monkeypatch.setattr(ar.ToasterLoopAgentClient, "_sleep",
                         staticmethod(lambda s: None))
 
 
@@ -2995,7 +2995,7 @@ def make_run_fn(home: Path, base_url: str, max_iterations: int = 3):
 
     def run_fn(task):
         rec = TraceRecorder(home=home)
-        client = SableAgentClient(base_url=base_url, model="fake-model",
+        client = ToasterLoopAgentClient(base_url=base_url, model="fake-model",
                                     recorder=rec, max_iterations=max_iterations)
         result = client.run(task)
         return getattr(result, "trace_id", None), result.failure_reason
@@ -3012,7 +3012,7 @@ def seed_trace__test_batch_run(home: Path, task: str, failure_reason):
     """Record one trace with a given failure_reason (no server involved)."""
     rec = TraceRecorder(home=home)
     row = rec.record(task=task, messages=[{"role": "user", "content": task}],
-                     backend="sable", model_alias="m",
+                     backend="toaster_loop", model_alias="m",
                      base_url="http://127.0.0.1:1/v1", completed=False,
                      failure_reason=failure_reason)
     assert row is not None
@@ -3061,28 +3061,28 @@ def test_load_tasks_missing_file(_no_sleeps):
 
 # ------------------------------------------------------------------ happy path
 
-def test_batch_happy_path_traces_and_incremental_checkpoint(sable_home, _no_sleeps):
+def test_batch_happy_path_traces_and_incremental_checkpoint(toaster_loop_home, _no_sleeps):
     tasks = ["task alpha", "task beta", "task gamma"]
     handler = make_message_handler({"*": OK_MSG})
     counts = []  # checkpoint record count observed after each task
 
     def run_fn(task):
-        tid, reason = make_run_fn(sable_home, srv.base_url)(task)
-        counts.append(len(cp_tasks(sable_home, "run1")))
+        tid, reason = make_run_fn(toaster_loop_home, srv.base_url)(task)
+        counts.append(len(cp_tasks(toaster_loop_home, "run1")))
         return tid, reason
 
     with FakeOpenAIServer(handler_cls=handler) as srv:
         lines = []
-        rc = run_batch(tasks, home=sable_home, run_name="run1",
+        rc = run_batch(tasks, home=toaster_loop_home, run_name="run1",
                        run_fn=run_fn, print_fn=lambda *a: lines.append(a[0]))
 
     assert rc == 0
     # traces: three ordinary buffer records, one per task
-    traces = list((sable_home / "buffer").rglob("*.jsonl"))
+    traces = list((toaster_loop_home / "buffer").rglob("*.jsonl"))
     assert len(traces) == 3
     # checkpoint grew incrementally: 1, 2, 3 (written AFTER each task)
     assert counts == [0, 1, 2]  # observed before this task's own save
-    final = cp_tasks(sable_home, "run1")
+    final = cp_tasks(toaster_loop_home, "run1")
     assert len(final) == 3
     assert {r["task"] for r in final} == set(tasks)
     assert all(r["trace_id"] and not r["failure_reason"] for r in final)
@@ -3092,15 +3092,15 @@ def test_batch_happy_path_traces_and_incremental_checkpoint(sable_home, _no_slee
         in lines[-1]
 
 
-def test_batch_no_resume_ignores_prior_traces(sable_home, _no_sleeps):
-    seed_trace__test_batch_run(sable_home, "already done", None)
+def test_batch_no_resume_ignores_prior_traces(toaster_loop_home, _no_sleeps):
+    seed_trace__test_batch_run(toaster_loop_home, "already done", None)
     seen = []
 
     def run_fn(task):
         seen.append(task)
         return "t1", None
 
-    rc = run_batch(["already done"], home=sable_home, run_name="r",
+    rc = run_batch(["already done"], home=toaster_loop_home, run_name="r",
                    resume=False, run_fn=run_fn, print_fn=lambda *a: None)
     assert rc == 0
     assert seen == ["already done"]  # fresh intent: nothing skipped
@@ -3108,27 +3108,27 @@ def test_batch_no_resume_ignores_prior_traces(sable_home, _no_sleeps):
 
 # ------------------------------------------------------------------- resume
 
-def test_resume_after_crash_skips_completed_by_content(sable_home, _no_sleeps):
+def test_resume_after_crash_skips_completed_by_content(toaster_loop_home, _no_sleeps):
     tasks = ["crash one", "crash two", "crash three"]
     handler = make_message_handler({"*": OK_MSG})
 
     def crashy_run_fn(task):
         if task == "crash three":
             raise SystemExit(9)  # simulate process death mid-task
-        return make_run_fn(sable_home, srv.base_url)(task)
+        return make_run_fn(toaster_loop_home, srv.base_url)(task)
 
     with FakeOpenAIServer(handler_cls=handler) as srv:
         with pytest.raises(SystemExit):
-            run_batch(tasks, home=sable_home, run_name="crashrun",
+            run_batch(tasks, home=toaster_loop_home, run_name="crashrun",
                       run_fn=crashy_run_fn, print_fn=lambda *a: None)
         # crash left exactly the two finished tasks checkpointed
-        assert len(cp_tasks(sable_home, "crashrun")) == 2
+        assert len(cp_tasks(toaster_loop_home, "crashrun")) == 2
 
         handler.requests.clear()
         lines = []
-        rc = run_batch(tasks, home=sable_home, run_name="crashrun",
+        rc = run_batch(tasks, home=toaster_loop_home, run_name="crashrun",
                        resume=True,
-                       run_fn=make_run_fn(sable_home, srv.base_url),
+                       run_fn=make_run_fn(toaster_loop_home, srv.base_url),
                        print_fn=lambda *a: lines.append(a[0]))
 
     assert rc == 0
@@ -3141,22 +3141,22 @@ def test_resume_after_crash_skips_completed_by_content(sable_home, _no_sleeps):
     assert last_users == ["crash three"]
     assert any("skipped(resume)" in l and "crash one" in l for l in lines)
     assert any("skipped(resume)" in l and "crash two" in l for l in lines)
-    assert len(cp_tasks(sable_home, "crashrun")) == 3
+    assert len(cp_tasks(toaster_loop_home, "crashrun")) == 3
 
 
-def test_resume_matches_reordered_and_duplicated_lines(sable_home, _no_sleeps):
+def test_resume_matches_reordered_and_duplicated_lines(toaster_loop_home, _no_sleeps):
     handler = make_message_handler({"*": OK_MSG})
     with FakeOpenAIServer(handler_cls=handler) as srv:
-        run_batch(["task A", "task B"], home=sable_home, run_name="ord",
-                  run_fn=make_run_fn(sable_home, srv.base_url),
+        run_batch(["task A", "task B"], home=toaster_loop_home, run_name="ord",
+                  run_fn=make_run_fn(toaster_loop_home, srv.base_url),
                   print_fn=lambda *a: None)
 
         handler.requests.clear()
         # reordered + duplicated input; content matching, not index
         lines = []
-        rc = run_batch(["task B", "task A", "task B"], home=sable_home,
+        rc = run_batch(["task B", "task A", "task B"], home=toaster_loop_home,
                        run_name="ord", resume=True,
-                       run_fn=make_run_fn(sable_home, srv.base_url),
+                       run_fn=make_run_fn(toaster_loop_home, srv.base_url),
                        print_fn=lambda *a: lines.append(a[0]))
     assert rc == 0
     assert sum("skipped(resume)" in l for l in lines) == 3
@@ -3164,9 +3164,9 @@ def test_resume_matches_reordered_and_duplicated_lines(sable_home, _no_sleeps):
     assert handler.requests == []
 
 
-def test_infra_failure_retried_on_resume(sable_home, _no_sleeps):
-    seed_trace__test_batch_run(sable_home, "flaky task", "backend_error:connection")
-    completed = scan_completed(sable_home)
+def test_infra_failure_retried_on_resume(toaster_loop_home, _no_sleeps):
+    seed_trace__test_batch_run(toaster_loop_home, "flaky task", "backend_error:connection")
+    completed = scan_completed(toaster_loop_home)
     assert task_key("flaky task") not in completed  # infra != done
 
     seen = []
@@ -3175,30 +3175,30 @@ def test_infra_failure_retried_on_resume(sable_home, _no_sleeps):
         seen.append(task)
         return "t-new", None
 
-    rc = run_batch(["flaky task"], home=sable_home, run_name="infra",
+    rc = run_batch(["flaky task"], home=toaster_loop_home, run_name="infra",
                    resume=True, run_fn=ok_run_fn, print_fn=lambda *a: None)
     assert seen == ["flaky task"]  # re-run, not skipped
     assert rc == 0
 
 
-def test_infra_failure_exits_1_and_is_not_checkpointed_done(sable_home, _no_sleeps):
+def test_infra_failure_exits_1_and_is_not_checkpointed_done(toaster_loop_home, _no_sleeps):
     def dead_run_fn(task):
-        return make_run_fn(sable_home, "http://127.0.0.1:9/v1")(task)
+        return make_run_fn(toaster_loop_home, "http://127.0.0.1:9/v1")(task)
 
     lines = []
-    rc = run_batch(["will fail infra"], home=sable_home, run_name="dead",
+    rc = run_batch(["will fail infra"], home=toaster_loop_home, run_name="dead",
                    resume=False, run_fn=dead_run_fn,
                    print_fn=lambda *a: lines.append(a[0]))
     assert rc == 1  # infra failure remaining -> exit 1
     assert any("failed(backend_error:connection)" in l for l in lines)
     # the trace exists but is infra-marked -> a resume scan sees it as undone
-    assert task_key("will fail infra") not in scan_completed(sable_home)
+    assert task_key("will fail infra") not in scan_completed(toaster_loop_home)
 
 
-def test_model_failure_counts_as_done_not_retried(sable_home, _no_sleeps):
+def test_model_failure_counts_as_done_not_retried(toaster_loop_home, _no_sleeps):
     for reason in ("guardrail_halt", "max_iterations"):
-        seed_trace__test_batch_run(sable_home, f"model-ish {reason}", reason)
-    completed = scan_completed(sable_home)
+        seed_trace__test_batch_run(toaster_loop_home, f"model-ish {reason}", reason)
+    completed = scan_completed(toaster_loop_home)
     assert task_key("model-ish guardrail_halt") in completed
     assert task_key("model-ish max_iterations") in completed
 
@@ -3210,14 +3210,14 @@ def test_model_failure_counts_as_done_not_retried(sable_home, _no_sleeps):
 
     lines = []
     rc = run_batch(["model-ish guardrail_halt", "model-ish max_iterations"],
-                   home=sable_home, run_name="modelfail", resume=True,
+                   home=toaster_loop_home, run_name="modelfail", resume=True,
                    run_fn=run_fn, print_fn=lambda *a: lines.append(a[0]))
     assert seen == []  # signal, not transport noise -> done
     assert rc == 0
     assert sum("skipped(resume)" in l for l in lines) == 2
 
 
-def test_model_failure_via_real_runner_skipped_on_resume(sable_home, _no_sleeps):
+def test_model_failure_via_real_runner_skipped_on_resume(toaster_loop_home, _no_sleeps):
     """End-to-end: a never-converging server yields max_iterations; resume
     treats the task as done."""
     handler = make_message_handler(
@@ -3228,8 +3228,8 @@ def test_model_failure_via_real_runner_skipped_on_resume(sable_home, _no_sleeps)
     tasks = ["loop task"]
     with FakeOpenAIServer(handler_cls=handler) as srv:
         lines = []
-        rc = run_batch(tasks, home=sable_home, run_name="looprun",
-                       run_fn=make_run_fn(sable_home, srv.base_url,
+        rc = run_batch(tasks, home=toaster_loop_home, run_name="looprun",
+                       run_fn=make_run_fn(toaster_loop_home, srv.base_url,
                                           max_iterations=2),
                        print_fn=lambda *a: lines.append(a[0]))
         assert rc == 0  # model failure is terminal, not an error exit
@@ -3237,9 +3237,9 @@ def test_model_failure_via_real_runner_skipped_on_resume(sable_home, _no_sleeps)
 
         handler.requests.clear()
         lines = []
-        rc = run_batch(tasks, home=sable_home, run_name="looprun",
+        rc = run_batch(tasks, home=toaster_loop_home, run_name="looprun",
                        resume=True,
-                       run_fn=make_run_fn(sable_home, srv.base_url),
+                       run_fn=make_run_fn(toaster_loop_home, srv.base_url),
                        print_fn=lambda *a: lines.append(a[0]))
     assert rc == 0
     assert handler.requests == []
@@ -3248,14 +3248,14 @@ def test_model_failure_via_real_runner_skipped_on_resume(sable_home, _no_sleeps)
 
 # --------------------------------------------------------------- checkpoint
 
-def test_checkpoint_atomic_write_and_schema(sable_home, _no_sleeps):
+def test_checkpoint_atomic_write_and_schema(toaster_loop_home, _no_sleeps):
     def run_fn(task):
         return "trace-xyz", None
 
-    run_batch(["one"], home=sable_home, run_name="cp", resume=False,
+    run_batch(["one"], home=toaster_loop_home, run_name="cp", resume=False,
               run_fn=run_fn, input_path="/tmp/tasks.jsonl",
               print_fn=lambda *a: None)
-    cp_file = checkpoint_path(sable_home, "cp")
+    cp_file = checkpoint_path(toaster_loop_home, "cp")
     data = json.loads(cp_file.read_text())
     assert data["schema_version"] == 1
     assert data["run_name"] == "cp"
@@ -3270,11 +3270,11 @@ def test_checkpoint_atomic_write_and_schema(sable_home, _no_sleeps):
     assert not list(cp_file.parent.glob("*.tmp"))  # tmp file replaced
 
 
-def test_corrupt_checkpoint_degrades_to_content_scan(sable_home, _no_sleeps):
-    cp = checkpoint_path(sable_home, "bad")
+def test_corrupt_checkpoint_degrades_to_content_scan(toaster_loop_home, _no_sleeps):
+    cp = checkpoint_path(toaster_loop_home, "bad")
     cp.parent.mkdir(parents=True, exist_ok=True)
     cp.write_text("{not json", encoding="utf-8")
-    seed_trace__test_batch_run(sable_home, "seeded task", None)
+    seed_trace__test_batch_run(toaster_loop_home, "seeded task", None)
 
     seen = []
 
@@ -3282,18 +3282,18 @@ def test_corrupt_checkpoint_degrades_to_content_scan(sable_home, _no_sleeps):
         seen.append(task)
         return "t", None
 
-    rc = run_batch(["seeded task"], home=sable_home, run_name="bad",
+    rc = run_batch(["seeded task"], home=toaster_loop_home, run_name="bad",
                    resume=True, run_fn=run_fn, print_fn=lambda *a: None)
     assert rc == 0
     assert seen == []  # scan still wins: content is truth
 
 
-def test_resume_bounds_scan_to_checkpoint_started_at(sable_home, _no_sleeps):
+def test_resume_bounds_scan_to_checkpoint_started_at(toaster_loop_home, _no_sleeps):
     """An old trace (pre-batch) with identical text must not suppress a fresh
     batch task when a checkpoint bounds the scan window."""
-    row = seed_trace__test_batch_run(sable_home, "classic task", None)
+    row = seed_trace__test_batch_run(toaster_loop_home, "classic task", None)
     # backdate the seeded trace header by a year
-    path = next((sable_home / "buffer").rglob(f"{row.trace_id}.jsonl"))
+    path = next((toaster_loop_home / "buffer").rglob(f"{row.trace_id}.jsonl"))
     lines = path.read_text().splitlines()
     header = json.loads(lines[0])
     header["timestamp"] = "2020-01-01T00:00:00+00:00"
@@ -3301,8 +3301,8 @@ def test_resume_bounds_scan_to_checkpoint_started_at(sable_home, _no_sleeps):
     path.write_text("\n".join(lines) + "\n")
 
     # checkpoint claiming a recent started_at -> old trace out of window
-    from sable.core.batch import save_checkpoint
-    save_checkpoint(checkpoint_path(sable_home, "win"), {
+    from toaster_loop.core.batch import save_checkpoint
+    save_checkpoint(checkpoint_path(toaster_loop_home, "win"), {
         "schema_version": 1, "run_name": "win", "input": None,
         "started_at": "2025-01-01T00:00:00+00:00", "tasks": [],
     })
@@ -3313,7 +3313,7 @@ def test_resume_bounds_scan_to_checkpoint_started_at(sable_home, _no_sleeps):
         seen.append(task)
         return "t2", None
 
-    rc = run_batch(["classic task"], home=sable_home, run_name="win",
+    rc = run_batch(["classic task"], home=toaster_loop_home, run_name="win",
                    resume=True, run_fn=run_fn, print_fn=lambda *a: None)
     assert rc == 0
     assert seen == ["classic task"]  # re-run: prior trace predates the run
@@ -3371,7 +3371,7 @@ emit("done")
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     home = tmp_path / "uf-iterate"
-    monkeypatch.setenv("SABLE_HOME", str(home))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
     stub = tmp_path / "stub.py"
     stub.write_text(STUB)
     fixture_gguf = tmp_path / "tiny.gguf"
@@ -3447,8 +3447,8 @@ def run_loop(home, stub, registry, store, kind="sft", dataset_id=None,
 
 def test_iterate_full_loop_v1_then_v2_then_rollback(env):
     home, stub, fixture = env
-    store = TraceStore(home / "buffer" / "sable.db")
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     for i in range(3):
         seed_trace__test_iterate(store, home, i, good_trace(i))
 
@@ -3493,8 +3493,8 @@ def test_iterate_full_loop_v1_then_v2_then_rollback(env):
 
 def test_iterate_validation_failure_blocks_promotion(env, tmp_path):
     home, stub, fixture = env
-    store = TraceStore(home / "buffer" / "sable.db")
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     for i in range(2):
         seed_trace__test_iterate(store, home, i, good_trace(i))
 
@@ -3522,8 +3522,8 @@ def test_iterate_validation_failure_blocks_promotion(env, tmp_path):
 
 def test_iterate_train_failure_keeps_candidate_unpromoted(env):
     home, stub, fixture = env
-    store = TraceStore(home / "buffer" / "sable.db")
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     for i in range(2):
         seed_trace__test_iterate(store, home, i, good_trace(i))
     fail = tmp_marker = home / "FAIL"
@@ -3540,8 +3540,8 @@ def test_iterate_train_failure_keeps_candidate_unpromoted(env):
 
 def test_iterate_export_failure_keeps_adapter(env, monkeypatch):
     home, stub, fixture = env
-    store = TraceStore(home / "buffer" / "sable.db")
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     for i in range(2):
         seed_trace__test_iterate(store, home, i, good_trace(i))
 
@@ -3572,8 +3572,8 @@ def test_iterate_export_failure_keeps_adapter(env, monkeypatch):
 
 def test_iterate_dry_run_stops_before_training_artifacts(env):
     home, stub, fixture = env
-    store = TraceStore(home / "buffer" / "sable.db")
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     for i in range(2):
         seed_trace__test_iterate(store, home, i, good_trace(i))
     sched = Scheduler(registry=reg, cfg=TrainingConfig(base_model="B/M"),
@@ -3710,7 +3710,7 @@ def _client(script, tmp_path, monkeypatch, **kw):
     ReplySequenceHandler.requests = []
     fs = FakeOpenAIServer(handler_cls=ReplySequenceHandler)
     fs.start()
-    client = SableAgentClient(
+    client = ToasterLoopAgentClient(
         fs.base_url, "m",
         tools=[{"type": "function", "function": {
             "name": "write_file", "description": "w",
@@ -3800,7 +3800,7 @@ def test_nudge_disabled_by_flag(tmp_path):
 @pytest.fixture()
 def home__test_transfer(tmp_path, monkeypatch):
     h = tmp_path / "uf-transfer"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     (h / "buffer").mkdir(parents=True)
     return h
 
@@ -3842,8 +3842,8 @@ def _stub_judge_client_for(score_map):
 def test_transfer_probe_stores_entry_with_active_baseline(home__test_transfer):
     """Baseline default = the registry's CURRENT active model; improvement math
     and per-profile storage on transfers_json (not shadow_json)."""
-    store = TraceStore(home__test_transfer / "buffer" / "sable.db")
-    reg = ModelRegistry(home__test_transfer / "buffer" / "sable.db")
+    store = TraceStore(home__test_transfer / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home__test_transfer / "buffer" / "toaster_loop.db")
     seed_trace__test_transfer(store, home__test_transfer, "w1", ts="2026-09-01T00:00:00+00:00")
     seed_trace__test_transfer(store, home__test_transfer, "w2", ts="2026-09-02T00:00:00+00:00")
 
@@ -3900,8 +3900,8 @@ def test_transfer_probe_stores_entry_with_active_baseline(home__test_transfer):
 
 
 def test_transfer_probe_explicit_baseline_and_regression(home__test_transfer):
-    store = TraceStore(home__test_transfer / "buffer" / "sable.db")
-    reg = ModelRegistry(home__test_transfer / "buffer" / "sable.db")
+    store = TraceStore(home__test_transfer / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home__test_transfer / "buffer" / "toaster_loop.db")
     seed_trace__test_transfer(store, home__test_transfer, "w1", ts="2026-09-01T00:00:00+00:00")
     base = reg.register_model("Base/Model")          # v1 (NOT active)
     cand = reg.register_model("Base/Model")          # v2
@@ -3935,8 +3935,8 @@ def test_transfer_probe_explicit_baseline_and_regression(home__test_transfer):
 def test_transfer_probe_candidate_only_when_no_active(home__test_transfer):
     """No active model -> run candidate, store absolute scores with
     baseline_id null and is_regression null — no fabricated comparison."""
-    store = TraceStore(home__test_transfer / "buffer" / "sable.db")
-    reg = ModelRegistry(home__test_transfer / "buffer" / "sable.db")
+    store = TraceStore(home__test_transfer / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home__test_transfer / "buffer" / "toaster_loop.db")
     seed_trace__test_transfer(store, home__test_transfer, "w1", ts="2026-09-01T00:00:00+00:00")
     cand = reg.register_model("Base/Model")  # never promoted -> no active
 
@@ -3967,8 +3967,8 @@ def test_transfer_probe_candidate_only_when_no_active(home__test_transfer):
 
 def test_transfer_probe_candidate_skips_self_as_active(home__test_transfer):
     """The candidate itself being active proves nothing -> candidate-only."""
-    store = TraceStore(home__test_transfer / "buffer" / "sable.db")
-    reg = ModelRegistry(home__test_transfer / "buffer" / "sable.db")
+    store = TraceStore(home__test_transfer / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home__test_transfer / "buffer" / "toaster_loop.db")
     seed_trace__test_transfer(store, home__test_transfer, "w1", ts="2026-09-01T00:00:00+00:00")
     m = reg.register_model("Base/Model")
     reg.set_validation(m.model_id, {"ok": True}, passed=True)
@@ -3994,8 +3994,8 @@ def test_transfer_probe_candidate_skips_self_as_active(home__test_transfer):
 def test_transfer_probe_honest_empty_fails_and_stores_nothing(home__test_transfer):
     """Profile with no replay set -> job failure 'no replay set for profile P',
     nothing stored (a probe asked a question; silence would hide the answer)."""
-    store = TraceStore(home__test_transfer / "buffer" / "sable.db")
-    reg = ModelRegistry(home__test_transfer / "buffer" / "sable.db")
+    store = TraceStore(home__test_transfer / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home__test_transfer / "buffer" / "toaster_loop.db")
     m = reg.register_model("Base/Model")
 
     with pytest.raises(ShadowError) as ei:
@@ -4025,8 +4025,8 @@ def test_transfer_probe_honest_empty_fails_and_stores_nothing(home__test_transfe
 
 
 def test_transfer_probe_rejects_bad_baseline(home__test_transfer):
-    store = TraceStore(home__test_transfer / "buffer" / "sable.db")
-    reg = ModelRegistry(home__test_transfer / "buffer" / "sable.db")
+    store = TraceStore(home__test_transfer / "buffer" / "toaster_loop.db")
+    reg = ModelRegistry(home__test_transfer / "buffer" / "toaster_loop.db")
     seed_trace__test_transfer(store, home__test_transfer, "w1", ts="2026-09-01T00:00:00+00:00")
     cand = reg.register_model("Base/Model")
     with pytest.raises(ShadowError, match="no model v9"):
@@ -4044,7 +4044,7 @@ def test_transfer_probe_rejects_bad_baseline(home__test_transfer):
 # ------------------------------------------------------------------ cap
 
 def test_record_transfer_cap_evicts_oldest(home__test_transfer):
-    reg = ModelRegistry(home__test_transfer / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_transfer / "buffer" / "toaster_loop.db")
     m = reg.register_model("Base/Model")
     for i in range(TRANSFERS_CAP + 1):
         reg.record_transfer(m.model_id, {
@@ -4064,7 +4064,7 @@ def test_record_transfer_cap_evicts_oldest(home__test_transfer):
 
 
 def test_transfers_json_tolerant_on_read(home__test_transfer):
-    reg = ModelRegistry(home__test_transfer / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_transfer / "buffer" / "toaster_loop.db")
     m = reg.register_model("Base/Model")
     reg.record_transfer(m.model_id, {"profile": "a", "n": 1})
     # corrupt the blob behind the API's back — hydration must never crash
@@ -4086,7 +4086,7 @@ def test_transfers_json_tolerant_on_read(home__test_transfer):
 # -------------------------------------------------------------- migration
 
 def test_transfers_migration_on_old_db(home__test_transfer):
-    db = home__test_transfer / "buffer" / "sable.db"
+    db = home__test_transfer / "buffer" / "toaster_loop.db"
     reg = ModelRegistry(db)
     reg.register_model("B/M")
     reg.close()
@@ -4111,15 +4111,15 @@ def test_transfers_migration_on_old_db(home__test_transfer):
 # ------------------------------------------------------------------ CLI smoke
 
 def test_cli_evaluate_transfer_smoke(home__test_transfer, monkeypatch, capsys):
-    """`sable evaluate transfer v2 --profile writer` queues the reused
+    """`toaster_loop evaluate transfer v2 --profile writer` queues the reused
     shadow_eval job with store_as=transfer and reports the stored entry."""
-    import sable.cli as cli_mod
-    import sable.evaluation.shadow as sh
-    from sable.training import scheduler as sched_mod
+    import toaster_loop.cli as cli_mod
+    import toaster_loop.evaluation.shadow as sh
+    from toaster_loop.training import scheduler as sched_mod
 
     monkeypatch.setattr(sched_mod, "gpu_free_mib", lambda: 10**7)
 
-    reg = ModelRegistry(home__test_transfer / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_transfer / "buffer" / "toaster_loop.db")
     m = reg.register_model("Base/Model")
     reg.close()
 
@@ -4150,7 +4150,7 @@ def test_cli_evaluate_transfer_smoke(home__test_transfer, monkeypatch, capsys):
     assert "transfer probe on 'writer'" in out
     assert "candidate-only" in out
 
-    reg = ModelRegistry(home__test_transfer / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_transfer / "buffer" / "toaster_loop.db")
     row = reg.get_model(m.model_id)
     assert row is not None
     assert row.transfers and row.transfers[0]["profile"] == "writer"
@@ -4158,7 +4158,7 @@ def test_cli_evaluate_transfer_smoke(home__test_transfer, monkeypatch, capsys):
 
 
 def test_cli_evaluate_transfer_unknown_model(home__test_transfer, capsys):
-    from sable.cli import main as cli_main
+    from toaster_loop.cli import main as cli_main
 
     rc = cli_main(["evaluate", "transfer", "v9", "--profile", "writer"])
     assert rc == 1
@@ -4166,9 +4166,9 @@ def test_cli_evaluate_transfer_unknown_model(home__test_transfer, capsys):
 
 
 def test_cli_evaluate_transfer_unknown_baseline(home__test_transfer, capsys):
-    from sable.cli import main as cli_main
+    from toaster_loop.cli import main as cli_main
 
-    reg = ModelRegistry(home__test_transfer / "buffer" / "sable.db")
+    reg = ModelRegistry(home__test_transfer / "buffer" / "toaster_loop.db")
     m = reg.register_model("Base/Model")
     reg.close()
     rc = cli_main(["evaluate", "transfer", m.model_id, "--profile", "writer",

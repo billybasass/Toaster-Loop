@@ -1,11 +1,11 @@
 # WP12 Context Document — "Plans" (persistent per-project task graphs)
 
-READ-ONLY reconnaissance of the sable repo at `/run/media/sumo/backup/sable`.
-Package root: `sable/sable/` (import as `sable.*`). Tests: `sable/tests/`.
+READ-ONLY reconnaissance of the toaster-loop repo at `/run/media/sumo/backup/toaster-loop`.
+Package root: `toaster-loop/toaster-loop/` (import as `toaster_loop.*`). Tests: `toaster-loop/tests/`.
 All line numbers are from the files as of this pass. Every excerpt is verbatim.
 
 **Surprises / deltas vs. typical WP12 assumptions — read first:**
-1. **`sable run --project` ALREADY EXISTS** (`cli.py:165-172`, wired in `cmd_run` at `cli.py:1759-1774`). Only a `--task <id>`-style flag would be new. Do not re-add `--project`.
+1. **`toaster-loop run --project` ALREADY EXISTS** (`cli.py:165-172`, wired in `cmd_run` at `cli.py:1759-1774`). Only a `--task <id>`-style flag would be new. Do not re-add `--project`.
 2. **The tool-name sets WP12 asked about are NOT all in `core/tools.py`.** Mutating/read-only sets live in `core/guardrails.py:34-38` (`IDEMPOTENT_TOOL_NAMES`, `MUTATING_TOOL_NAMES`). `core/tools.py` has `DELEGATION_TOOL_NAMES` (line 1398) and `CAPABILITY_TOOLS`/`CAPABILITY_KEYS` (1556-1566); `agent_runner.py` has `_CONTAINED_TOOLS` (100-101) and `SKILL_TOOL_NAMES` (216-217). A new plan-mutating tool must be added to `MUTATING_TOOL_NAMES` in guardrails or the loop guard will treat it conservatively (unknown ⇒ mutating ⇒ never no-progress-blocked — safe default, but statuses repeat-loop unflagged).
 3. **The MCP inline validator has NO array support** (`mcp/schema.py` `_TYPES` dict = string/integer/number/boolean/object only). An array-extension implementer must add an `"array"` predicate AND recursion into `items`, plus decide minItems/maxItems handling. See §7.
 4. **Judge calls record NOTHING to the buffer themselves.** The verdict is returned as a dict; the *caller* writes it as a feedback row `source="judge"` via `TraceStore.add_feedback` (`cli.py:2583-2586`). Judge transport is an injected `client_fn(messages, model) -> str` — tests pass a lambda; no server needed.
@@ -17,7 +17,7 @@ All line numbers are from the files as of this pass. Every excerpt is verbatim.
 
 ## 1. core/tools.py — the todo pattern to copy
 
-File: `sable/sable/core/tools.py`
+File: `toaster-loop/toaster-loop/core/tools.py`
 
 ### 1a. Storage helpers (per-run binding via private kwarg)
 
@@ -25,13 +25,13 @@ File: `sable/sable/core/tools.py`
 # lines 889-897
 def _todo_path(bound: Optional[str] = None) -> Path:
     """Todo file for a run. The runner binds a per-run path under
-    ``SABLE_HOME/todos/`` via partial (private kwarg, invisible to the
+    ``TOASTER_LOOP_HOME/todos/`` via partial (private kwarg, invisible to the
     model); unbound callers keep the historical global ``todos.json``."""
     if bound:
         return Path(bound)
-    from ..store.paths import resolve_sable_home
+    from ..store.paths import resolve_toaster_loop_home
 
-    return resolve_sable_home() / "todos.json"
+    return resolve_toaster_loop_home() / "todos.json"
 ```
 
 Atomic write idiom (`_todo_write_raw`, lines 912-918):
@@ -111,7 +111,7 @@ if allowed_args is not None and impl is not None:
 
 - `TOOL_SCHEMAS: list[dict]` — module-level list built with helper `_schema(name, description, properties, required)` (lines 1524-1537); OpenAI function shape. `todo_write` schema at 1606-1633 (array of `{id,content,status}` objects, `required: ["todos"]`).
 - `TOOL_IMPLS: dict[str, Callable[..., str]]` — lines 1760-1787; plain name→function map. Capability schemas deliberately live OUTSIDE TOOL_SCHEMAS in `CAPABILITY_TOOL_SCHEMAS` (1793+).
-- There is **no build_tools() in core/tools.py** — the "registry" IS these two module dicts, consumed by `SableAgentClient.__init__` defaults (`tools if tools is not None else TOOL_SCHEMAS`, line 339; `dict(TOOL_IMPLS)`, line 340). (build_tools() exists only in `mcp/tools.py` — §7.)
+- There is **no build_tools() in core/tools.py** — the "registry" IS these two module dicts, consumed by `ToasterLoopAgentClient.__init__` defaults (`tools if tools is not None else TOOL_SCHEMAS`, line 339; `dict(TOOL_IMPLS)`, line 340). (build_tools() exists only in `mcp/tools.py` — §7.)
 
 ### 1e. Tool-name sets relevant to WP12
 
@@ -151,12 +151,12 @@ MUTATING_TOOL_NAMES = frozenset({"write_file", "patch", "todo_write"})
 
 ## 2. core/agent_runner.py — create_runner, injection idiom, workspace, footer
 
-File: `sable/sable/core/agent_runner.py` (2040 lines)
+File: `toaster-loop/toaster-loop/core/agent_runner.py` (2040 lines)
 
 ### 2a. create_runner full signature (lines 1811-1824)
 
 ```python
-def create_runner(cfg: SableConfig, base_url: str, model: str,
+def create_runner(cfg: ToasterLoopConfig, base_url: str, model: str,
                   api_key: Optional[str] = None, recorder: Any = None,
                   system_prompt: Optional[str] = None,
                   enabled_tool_names: Optional[List[str]] = None,
@@ -169,16 +169,16 @@ def create_runner(cfg: SableConfig, base_url: str, model: str,
                   capabilities: Optional[Dict[str, Any]] = None,
                   profile_name: Optional[str] = None,
                   cancel_event: Optional[Any] = None,
-                  ) -> SableAgentClient:
+                  ) -> ToasterLoopAgentClient:
 ```
 
-Body highlights: resolves capabilities (1881), containment roots via `resolve_workspace_roots` (1631-1690; precedence profile > project_workspace_dir > config > cwd, always + SABLE_HOME + tempdir), deny-writes for `sable.yaml`, `<home>/buffer`, `<home>/index` (1888-1898), then the prompt-append chain and the big `SableAgentClient(...)` construction (1914-2010).
+Body highlights: resolves capabilities (1881), containment roots via `resolve_workspace_roots` (1631-1690; precedence profile > project_workspace_dir > config > cwd, always + TOASTER_LOOP_HOME + tempdir), deny-writes for `toaster_loop.yaml`, `<home>/buffer`, `<home>/index` (1888-1898), then the prompt-append chain and the big `ToasterLoopAgentClient(...)` construction (1914-2010).
 
 ### 2b. Never-fail bounded-injection idiom (copy this for a `## Plan` section)
 
 ```python
 # lines 1719-1741
-def _with_playbooks(cfg: SableConfig, system_prompt: Optional[str],
+def _with_playbooks(cfg: ToasterLoopConfig, system_prompt: Optional[str],
                     profile_name: Optional[str]) -> Optional[str]:
     """Append the capped '## Playbooks' section to a run's system prompt.
     ... Disabled (the default) => returns ``system_prompt``
@@ -243,11 +243,11 @@ def _bind_run_todos(tool_impls: Dict[str, Callable[..., str]]) -> None:
         logger.debug("per-run todo binding failed (global file): %s", e)
 ```
 
-Called from `SableAgentClient.__init__` line 366. Same-shape bindings: `block_sensitive` for read tools (354-359), `lint_on_write`/`lsp_config` for write tools (372-379), `_ctx` for delegation (573-580), `_project_id`/`_workspace_dir`/`_cfg` for search_codebase (589-597).
+Called from `ToasterLoopAgentClient.__init__` line 366. Same-shape bindings: `block_sensitive` for read tools (354-359), `lint_on_write`/`lsp_config` for write tools (372-379), `_ctx` for delegation (573-580), `_project_id`/`_workspace_dir`/`_cfg` for search_codebase (589-597).
 
 ### 2e. workspace_dir usage for runs
 
-`resolve_workspace_roots(cfg, workspace_root_override, project_workspace_dir)` — lines 1631-1690. `project_workspace_dir` becomes the containment root between profile override and config; SABLE_HOME + tempdir always appended (so a plan file under SABLE_HOME is writable even when the project workspace is the primary root). Containment wrapper applied per-tool at `SableAgentClient.__init__` 394-402 via `contain(roots, deny_writes=..., read_only=...)`.
+`resolve_workspace_roots(cfg, workspace_root_override, project_workspace_dir)` — lines 1631-1690. `project_workspace_dir` becomes the containment root between profile override and config; TOASTER_LOOP_HOME + tempdir always appended (so a plan file under TOASTER_LOOP_HOME is writable even when the project workspace is the primary root). Containment wrapper applied per-tool at `ToasterLoopAgentClient.__init__` 394-402 via `contain(roots, deny_writes=..., read_only=...)`.
 
 ### 2f. Runner footer / result object + failure_reason values
 
@@ -284,7 +284,7 @@ Trace recording point `_finish` (1588-1624) calls `self._recorder.record(task=..
 
 ## 3. dashboard/api/projects.py + routing + SSE bus
 
-### 3a. Atomic save idiom (`sable/sable/dashboard/api/projects.py:53-59`)
+### 3a. Atomic save idiom (`toaster-loop/toaster-loop/dashboard/api/projects.py:53-59`)
 
 ```python
     def _save_project(self, project: Dict[str, Any]) -> None:
@@ -309,7 +309,7 @@ Trace recording point `_finish` (1588-1624) calls `self._recorder.record(task=..
 
 Ids minted `uuid.uuid4().hex[:12]` (line 145). Duplicate names rejected case-insensitively with `HttpError(409, ..., code="duplicate_project_name")` (`_validate_project_body`, 61-128). Tolerant load returns None on any parse failure (`_load_project`, 40-51).
 
-### 3c. ROUTES table + dispatch (`sable/sable/dashboard/app.py`)
+### 3c. ROUTES table + dispatch (`toaster-loop/toaster-loop/dashboard/app.py`)
 
 Table shape — `List[Tuple[str, str, str]]` of (method, path-pattern-with-<params>, handler attr name); static paths MUST precede `<param>` ones. Projects block (lines 342-346):
 
@@ -370,7 +370,7 @@ Handlers take `(self, q, b, **path_params)`; return dict (→200) or `ApiRespons
 
 ### 3e. SSE bus
 
-`sable/sable/dashboard/events.py`:
+`toaster-loop/toaster-loop/dashboard/events.py`:
 
 ```python
 # line 112
@@ -453,7 +453,7 @@ Execution model: sync-with-timeout on a 1-worker `ThreadPoolExecutor` (397-408);
 
 ## 5. store/recorder.py — tolerant additive "project" field pattern
 
-File: `sable/sable/store/recorder.py`
+File: `toaster-loop/toaster-loop/store/recorder.py`
 
 Header write (`_record`, lines 269-287):
 
@@ -474,7 +474,7 @@ Header write (`_record`, lines 269-287):
 
 Recorder constructor takes `project: Optional[str] = None` etc. (100-138); `make_recorder(cfg, on_record=None, project=None, metadata=None, profile=None)` at 362-370 honors `recording.enabled` → NullRecorder. Footer written after messages (294-310). JSONL path: `<home>/buffer/YYYY/MM/<trace_id>.jsonl` (`jsonl_path_for`, 162-163); file opened with mode `"x"`.
 
-SQLite column-add migration (`sable/sable/store/db.py`, `SCHEMA_VERSION = 9` at line 60; `_migrate` 292-338):
+SQLite column-add migration (`toaster-loop/toaster-loop/store/db.py`, `SCHEMA_VERSION = 9` at line 60; `_migrate` 292-338):
 
 ```python
         if "traces" in tables:
@@ -493,7 +493,7 @@ SQLite column-add migration (`sable/sable/store/db.py`, `SCHEMA_VERSION = 9` at 
 Migration is shape-detected & idempotent (PRAGMA schema_version explicitly NOT trusted, docstring 293-298). `insert_trace` uses an explicit column list + `ON CONFLICT(trace_id) DO NOTHING` (349-384) — a new column must be added to: `_SCHEMA` CREATE TABLE, `_migrate`, the INSERT column list + tuple, and the `TraceRow` dataclass (~line 244).
 
 Readers/rendering:
-- CLI `sable traces show` prints `json.dumps(row.to_dict(), ...)` (cli.py:1946) — new TraceRow fields appear automatically; `traces list` prints fixed columns (cli.py:1924-1930).
+- CLI `toaster-loop traces show` prints `json.dumps(row.to_dict(), ...)` (cli.py:1946) — new TraceRow fields appear automatically; `traces list` prints fixed columns (cli.py:1924-1930).
 - Dashboard JS: `panels/traces.js` detail row `["project", trace.project]` (line 474); filter dropdown populated from `/api/projects`, travels as `?project=<id>` (lines 151-159, 296-297).
 
 **Pattern for a WP12 "plan" field on traces:** add nullable key to header dict + TraceRow + `_migrate` ADD COLUMN + insert list; readers use `.get()`/NULL tolerance. No data migration.
@@ -502,7 +502,7 @@ Readers/rendering:
 
 ## 6. curate/judge.py — bounded single-shot LLM seam
 
-File: `sable/sable/curate/judge.py`
+File: `toaster-loop/toaster-loop/curate/judge.py`
 
 ### Seam function (the one to reuse for any bounded completion call)
 
@@ -554,7 +554,7 @@ Precedence user > judge > heuristic in `curate/curater.py:213-223`. Bounded cont
 
 ### tests/fake_server.py usage
 
-`sable/tests/fake_server.py`: stdlib `ThreadingHTTPServer` classes.
+`toaster-loop/tests/fake_server.py`: stdlib `ThreadingHTTPServer` classes.
 - `FakeOpenAIServer(handler_cls=None)` — context manager, `.base_url` = `http://127.0.0.1:<port>/v1`; default `_Handler` emits one native `read_file` tool_call then a final answer; supports `stream=true` SSE.
 - `make_scripted_handler(script)` — dict {substring-of-last-user-message → reply string}, `"*"` default, callables allowed.
 - `make_message_handler(script)` — values are full assistant message dicts (`{"content":..., "tool_calls":...}` or `payload -> msg`); records every payload in class attr `requests`.
@@ -566,7 +566,7 @@ Representative wire-capture test (system prompts asserted): `tests/test_mcp.py:2
 
 ## 7. mcp/ — build_tools, read tool, mutating plan-then-confirm tool, validator, envelopes
 
-### 7a. build_tools() signature (`sable/sable/mcp/tools.py:332-333`)
+### 7a. build_tools() signature (`toaster-loop/toaster-loop/mcp/tools.py:332-333`)
 
 ```python
 def build_tools() -> List[Tool]:
@@ -601,7 +601,7 @@ def build_tools() -> List[Tool]:
 ```python
         Tool(
             name="instance_stop",
-            description=("Stop one managed instance (only processes sable "
+            description=("Stop one managed instance (only processes toaster-loop "
                          "owns are ever stopped) — mirrors POST "
                          "/api/servers/<id>/stop. Plan-then-confirm."),
             input_schema=_obj({**{"id": _ID_SCHEMA}, **_CONFIRM_ARG},
@@ -713,7 +713,7 @@ def validate_args(schema: Dict[str, Any], args: Any) -> Optional[str]:
             return f"missing required argument {name!r}"
 
     # additionalProperties:false is the ONLY supported shape here — every
-    # sable tool schema sets it (no free-form bags).
+    # toaster-loop tool schema sets it (no free-form bags).
     for key, value in args.items():
         if key not in props:
             known = ", ".join(sorted(props)) or "(none)"
@@ -766,9 +766,9 @@ For arrays: add `"array": lambda v: isinstance(v, list)` to `_TYPES`, then per-e
 
 ## 8. core/config.py — sections + WP2 strict validator + doc-comment style
 
-File: `sable/sable/core/config.py`
+File: `toaster-loop/toaster-loop/core/config.py`
 
-Sections are **dataclass fields on `SableConfig`** (`@dataclass class SableConfig:` at line 280). Scalar keys are flat fields; raw nested YAML sections are `dict[str, Any] = field(default_factory=dict)` fields (e.g. `curation`, `training`, `validation`, `dashboard` at 343-355; `agent:`/`tools:` documented inline in field comments from 356). A new WP12 `plans:` section ⇒ add `plans: dict[str, Any] = field(default_factory=dict)` to the dataclass (that alone registers it as known — see below) and read leniently.
+Sections are **dataclass fields on `ToasterLoopConfig`** (`@dataclass class ToasterLoopConfig:` at line 280). Scalar keys are flat fields; raw nested YAML sections are `dict[str, Any] = field(default_factory=dict)` fields (e.g. `curation`, `training`, `validation`, `dashboard` at 343-355; `agent:`/`tools:` documented inline in field comments from 356). A new WP12 `plans:` section ⇒ add `plans: dict[str, Any] = field(default_factory=dict)` to the dataclass (that alone registers it as known — see below) and read leniently.
 
 Known-key registration + strict gate (WP2):
 
@@ -785,19 +785,19 @@ def _validate_config(data: Dict[str, Any], *, strict_unknown: bool,
                      ) -> List[str]:
     ...
     problems: List[str] = []
-    known = set(SableConfig.__dataclass_fields__) | set(_NESTED_SECTIONS)
+    known = set(ToasterLoopConfig.__dataclass_fields__) | set(_NESTED_SECTIONS)
 ```
 
-- Unknown top-level keys: warn-only by default; in strict mode (`SABLE_CONFIG_STRICT=1` env or `load_config(strict_unknown=True)`, gate `_strict_unknown_default()` at 274) they join the consolidated `ConfigError` report (load_config lines 835-848). Mistyped values are ALWAYS errors.
-- Sub-key filtering for dict sections happens in load_config via `known = set(SableConfig.__dataclass_fields__) | {"recording", "delegation"}` + warning (lines 856-861). **If WP12 adds a nested section whose sub-keys need type validation, register it in `_NESTED_SECTIONS`; a plain dict-section field needs no other registration.**
+- Unknown top-level keys: warn-only by default; in strict mode (`TOASTER_LOOP_CONFIG_STRICT=1` env or `load_config(strict_unknown=True)`, gate `_strict_unknown_default()` at 274) they join the consolidated `ConfigError` report (load_config lines 835-848). Mistyped values are ALWAYS errors.
+- Sub-key filtering for dict sections happens in load_config via `known = set(ToasterLoopConfig.__dataclass_fields__) | {"recording", "delegation"}` + warning (lines 856-861). **If WP12 adds a nested section whose sub-keys need type validation, register it in `_NESTED_SECTIONS`; a plain dict-section field needs no other registration.**
 - AGENTS.md convention: read leniently (invalid → default + warning) or register types in the validator; document in config.example.yaml; keep defaults byte-identical.
 
-Nested-section doc-comment style example (`sable/config.example.yaml:533-542`):
+Nested-section doc-comment style example (`toaster-loop/config.example.yaml:533-542`):
 
 ```yaml
 # Playbooks (pass 4 #38, core/playbooks.py) — distilled markdown recipes from
 # recurring successful tool chains, injected into profile system prompts.
-# Manage with `sable playbooks scan|candidates|promote|retire|show|export`.
+# Manage with `toaster-loop playbooks scan|candidates|promote|retire|show|export`.
 playbooks:
   enabled: false           # master switch — OFF means ZERO behavior change:
                            # no store access, prompts byte-identical to before
@@ -809,7 +809,7 @@ playbooks:
 
 ---
 
-## 9. CLI conventions (sable/cli.py + core/exitcodes.py)
+## 9. CLI conventions (toaster-loop/cli.py + core/exitcodes.py)
 
 ### Subparser pattern (traces example, cli.py:176-222)
 
@@ -827,7 +827,7 @@ playbooks:
 
 Every subparser calls `_add_common(p)` (--config/--verbose etc.) and `set_defaults(func=cmd_x)`. `datasets` follows the identical shape (lines 269-331). A `plans` command = `sub.add_parser("plans", ...)`, `psub = plans.add_subparsers(dest="plans_command", required=True)`, one parser per verb.
 
-### Where `sable run` is implemented
+### Where `toaster-loop run` is implemented
 
 Parser: lines 127-173 — note `--project PROJECT_ID` **already exists** (165-172). Implementation: `cmd_run(args)` at line 1754:
 - resolves project via `from .core.delegation import load_project`; unknown id → print error + `return 1` (1765-1774);
@@ -837,7 +837,7 @@ Parser: lines 127-173 — note `--project PROJECT_ID` **already exists** (165-17
 
 To add `--task <plan-task-id>`: new arg on the `run` parser + resolution in `cmd_run` before `_resolve_endpoint` (fail fast like `--project`), injecting the task text into the run prompt and/or a plan context kwarg.
 
-### Exit codes (`sable/core/exitcodes.py:35-41`)
+### Exit codes (`toaster-loop/core/exitcodes.py:35-41`)
 
 ```python
 EXIT_OK = 0
@@ -855,7 +855,7 @@ Never renumber; extend additively. Note `cmd_run` returns raw literals today (`r
 
 ## 10. Dashboard JS idioms
 
-All under `sable/sable/dashboard/static/js/`. ES modules, no build step; CSP forbids inline handlers built from strings — everything goes through `el()`.
+All under `toaster-loop/toaster-loop/dashboard/static/js/`. ES modules, no build step; CSP forbids inline handlers built from strings — everything goes through `el()`.
 
 ### Helpers
 
@@ -928,13 +928,13 @@ skey usage idiom (chat.js): `let activeProject = sget(skey("ui", "", "active-pro
 
 ### tests/test_hygiene.py mechanism (stdlib scan)
 
-AST-based import scan over `sable/**/*.py`:
+AST-based import scan over `toaster-loop/**/*.py`:
 ```python
 ALLOWED_THIRD_PARTY = {"yaml", "httpx", "PIL"}          # line 21
 HEAVY = {"torch", "transformers", "peft", ...}          # 31-32, lazy-only in worker.py/streamed
 STDLIB = set(sys.stdlib_module_names)                   # 38
 ```
-`test_only_allowed_third_party_imports` walks `ast.Import`/`ast.ImportFrom(level==0)` roots; anything not stdlib/allowed/`sable*` fails. Plus `test_no_orphan_modules` (156-243): every module must be statically reachable from ROOTS = {sable, sable.cli, sable.__main__, sable.dashboard.server, sable.training.worker} — **a new WP12 module that nothing imports will fail CI**.
+`test_only_allowed_third_party_imports` walks `ast.Import`/`ast.ImportFrom(level==0)` roots; anything not stdlib/allowed/`toaster-loop*` fails. Plus `test_no_orphan_modules` (156-243): every module must be statically reachable from ROOTS = {toaster-loop, toaster_loop.cli, toaster_loop.__main__, toaster_loop.dashboard.server, toaster_loop.training.worker} — **a new WP12 module that nothing imports will fail CI**.
 
 ---
 
@@ -1020,20 +1020,20 @@ This is the closest template for a WP12 plan-execution loop: per-run JSON record
 
 ## 12. Tests conventions
 
-### conftest.py (whole file, `sable/tests/conftest.py`)
+### conftest.py (whole file, `toaster-loop/tests/conftest.py`)
 
 ```python
 @pytest.fixture(autouse=True)
-def _isolate_sable_home(tmp_path, monkeypatch):
-    monkeypatch.setenv("SABLE_HOME", str(tmp_path / ".sable-test-home"))
+def _isolate_toaster_loop_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(tmp_path / ".toaster-loop-test-home"))
     yield
 
 
 @pytest.fixture(autouse=True)
 def _reset_runtime_counters():
     """Per-test isolation for in-process reliability state (pass 4 #28). ..."""
-    from sable.core import circuit
-    from sable.serving import supervisor
+    from toaster_loop.core import circuit
+    from toaster_loop.serving import supervisor
 
     def _clear():
         with circuit._registry_lock:
@@ -1051,7 +1051,7 @@ Per-module `home` fixtures override the env to a named dir (test_mcp.py:128-132)
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "uf-mcp"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 ```
 
@@ -1143,16 +1143,16 @@ Wrong-tool / wrong-args binding refusals (348-361) and unknown-token refusal (36
 
 ## AGENTS.md hard rules relevant to WP12 (+ ruff config)
 
-From `sable/AGENTS.md`:
+From `toaster-loop/AGENTS.md`:
 1. **Byte-identical default behavior**: "New features are opt-in. With no config changes, every existing command's observable output stays **byte-identical**." Ship the plan feature behind a default-off knob (`plans.enabled: false` pattern — mirror playbooks/skills: knob off ⇒ zero store/filesystem access, prompts unchanged).
-2. No perf/quality claims below the `sable bench --noise-floor` noise floor.
+2. No perf/quality claims below the `toaster-loop bench --noise-floor` noise floor.
 3. **D-12 licensing boundary**: re-implement inline; NEVER import Strata/airllm/kimi-k3-in-c/sparse_transformers — enforced by `tests/test_hygiene.py` allowlist (`ALLOWED_THIRD_PARTY = {"yaml", "httpx", "PIL"}`; dashboard/MCP stdlib-only).
-4. Loopback-only, zero cloud, zero API keys; all state under `~/.sable/` (`SABLE_HOME`).
+4. Loopback-only, zero cloud, zero API keys; all state under `~/.toaster-loop/` (`TOASTER_LOOP_HOME`).
 5. Exit-code taxonomy in `core/exitcodes.py` — never renumber, extend additively.
 6. Config keys: follow `serve.*` conventions — lenient reads or register in the WP2 validator sets; document in config.example.yaml; keep default byte-identical; `test_core.py` must stay green.
-7. Commands before finishing: `python -m pytest tests/ -q` and `ruff check sable tests`.
+7. Commands before finishing: `python -m pytest tests/ -q` and `ruff check toaster-loop tests`.
 
-From `sable/pyproject.toml`:
+From `toaster-loop/pyproject.toml`:
 ```toml
 [tool.ruff]
 target-version = "py311"
@@ -1163,7 +1163,7 @@ select = ["E4", "E9", "F"]
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F841", "E402", "F811"]
 ```
-BLE001 intentionally NOT enabled repo-wide; broad excepts are the house resilience pattern, annotated `# noqa: BLE001 - <reason>`. mypy gates only `sable/store`, `sable/registry`, `sable/core/config.py` (WP12 touching config must be mypy-clean).
+BLE001 intentionally NOT enabled repo-wide; broad excepts are the house resilience pattern, annotated `# noqa: BLE001 - <reason>`. mypy gates only `toaster-loop/store`, `toaster-loop/registry`, `toaster-loop/core/config.py` (WP12 touching config must be mypy-clean).
 
 ---
 
@@ -1180,4 +1180,4 @@ BLE001 intentionally NOT enabled repo-wide; broad excepts are the house resilien
 | delegate_task task id | extend schema (tools.py:1681) + wrapper (1409) + `execute_delegation` kwargs (delegation.py:317) → `_run_child`/`full_task` (388, 257-314) |
 | CLI | new arg on existing `run` parser (cli.py:127; `--project` already at 165); new `plans` subcommand via nested `add_subparsers(dest="plans_command", required=True)`; exit codes from `core/exitcodes.py` |
 | MCP array args | extend `_TYPES` + items recursion in `mcp/schema.py:21-75`; mutating plan tool = `Tool(mutating=True, effect=..., risks=[...], target_arg=...)` merged with `_CONFIRM_ARG` (tools.py:316) |
-| Config section | `plans: dict[str, Any] = field(default_factory=dict)` on SableConfig; optional sub-key types in `_NESTED_SECTIONS` (config.py:211); example block in config.example.yaml with `enabled: false` doc-comment style |
+| Config section | `plans: dict[str, Any] = field(default_factory=dict)` on ToasterLoopConfig; optional sub-key types in `_NESTED_SECTIONS` (config.py:211); example block in config.example.yaml with `enabled: false` doc-comment style |

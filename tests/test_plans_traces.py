@@ -11,16 +11,16 @@ import sqlite3
 
 import pytest
 
-from sable.core.config import SableConfig
-from sable.store.db import TraceRow, TraceStore
-from sable.store.recorder import make_recorder
+from toaster_loop.core.config import ToasterLoopConfig
+from toaster_loop.store.db import TraceRow, TraceStore
+from toaster_loop.store.recorder import make_recorder
 
 
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     (h / "buffer").mkdir(parents=True)
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
@@ -31,8 +31,8 @@ MSGS = [{"role": "user", "content": "do it"},
 # ------------------------------------------------------------- recorder
 
 def test_recorder_stamps_plan_task_header_and_row(home):
-    rec = make_recorder(SableConfig(), plan_task="t7")
-    row = rec.record(task="do it", messages=MSGS, backend="sable",
+    rec = make_recorder(ToasterLoopConfig(), plan_task="t7")
+    row = rec.record(task="do it", messages=MSGS, backend="toaster_loop",
                      model_alias="m", base_url="http://127.0.0.1:9/v1",
                      completed=True)
     assert row is not None
@@ -44,7 +44,7 @@ def test_recorder_stamps_plan_task_header_and_row(home):
     assert first["kind"] == "trace_header"
     assert first["plan_task"] == "t7"
     # index row carries it too
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     try:
         r = store.get_trace(trace_id)
         assert r is not None and r.plan_task == "t7"
@@ -55,13 +55,13 @@ def test_recorder_stamps_plan_task_header_and_row(home):
 
 
 def test_recorder_without_plan_task_is_null(home):
-    rec = make_recorder(SableConfig())
-    row = rec.record(task="plain", messages=MSGS, backend="sable",
+    rec = make_recorder(ToasterLoopConfig())
+    row = rec.record(task="plain", messages=MSGS, backend="toaster_loop",
                      model_alias="m", base_url="http://127.0.0.1:9/v1",
                      completed=True)
     assert row is not None
     trace_id = row.trace_id
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     try:
         r = store.get_trace(trace_id)
         assert r is not None and r.plan_task is None
@@ -74,7 +74,7 @@ def test_tolerant_read_of_old_header_without_key(home):
     old = home / "buffer" / "old-trace.jsonl"
     header = {"kind": "trace_header", "schema_version": 1,
               "trace_id": "old-1", "timestamp": "2024-01-01T00:00:00+00:00",
-              "agent_profile": "sable", "model_alias": "m",
+              "agent_profile": "toaster_loop", "model_alias": "m",
               "task": "legacy"}          # no plan_task key at all
     footer = {"kind": "trace_footer", "schema_version": 1,
               "status": "success", "completed": True}
@@ -116,12 +116,12 @@ def test_legacy_db_migrates_plan_task_column(home):
 
 
 def test_list_and_query_filter_project(home):
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     try:
         for i, proj in enumerate(["p1", "p1", None]):
             store.insert_trace(TraceRow(
                 trace_id=f"tr{i}", session_id=None, timestamp="2025-01-01",
-                agent_profile="sable", model_alias="m", model_version=None,
+                agent_profile="toaster_loop", model_alias="m", model_version=None,
                 endpoint_label=None, task_summary="s", status="success",
                 outcome_score=0.5, num_tool_calls=0, tokens_in=None,
                 tokens_out=None, duration_s=None, jsonl_path="/x.jsonl",

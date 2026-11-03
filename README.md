@@ -1,4 +1,4 @@
-# sable (Phase 6 — multi-model serving on top of the closed loop)
+# Toaster Loop (Phase 6 — multi-model serving on top of the closed loop)
 
 Local, self-improving agent system: built-in agent orchestration against
 locally served models, with LoRA fine-tuning (SFT/DPO) and GGUF export built
@@ -7,32 +7,32 @@ calls**.
 
 Phase 1 delivered:
 
-- `sable serve` — Serving Supervisor v0: spawn a supervised `llama-server`
-  (GGUF, loopback, dynamic port; built for your GPU by `sable setup`) or
+- `toaster-loop serve` — Serving Supervisor v0: spawn a supervised `llama-server`
+  (GGUF, loopback, dynamic port; built for your GPU by `toaster-loop setup`) or
   optionally attach to any OpenAI-compatible server you point at with
-  `--attach`. sable is fully standalone — it never requires or auto-connects
+  `--attach`. toaster-loop is fully standalone — it never requires or auto-connects
   to any other local program.
-- `sable doctor [--env]` / `sable setup` — any-GPU runtime: detect the accelerator
+- `toaster-loop doctor [--env]` / `toaster-loop setup` — any-GPU runtime: detect the accelerator
   (NVIDIA CUDA / AMD ROCm / Apple Metal / Vulkan / CPU-only), report which
   llama-server would be used and how it launches (`-ngl` offload auto-sized to
   the hardware), and — when no llama.cpp exists anywhere — clone + build one
-  automatically for the detected backend into `<SABLE_HOME>/llama.cpp`
-  (opt out with `llama_auto_setup: false` / `SABLE_NO_AUTO_SETUP=1`).
+  automatically for the detected backend into `<TOASTER_LOOP_HOME>/llama.cpp`
+  (opt out with `llama_auto_setup: false` / `TOASTER_LOOP_NO_AUTO_SETUP=1`).
   `--repo/--ref/--backend` (or config `llama_repo`/`llama_ref`/`llama_backend`)
   choose the source — e.g. a vendor fork like
-  `Lychee-Technology/llama-cpp-for-strix-halo` — and `sable update [--check]`
+  `Lychee-Technology/llama-cpp-for-strix-halo` — and `toaster-loop update [--check]`
   is the llama.cpp update system (remote-commit diff + rebuild in place).
   `doctor --env` (WP7) MEASURES the environment instead of assuming: free disk
   on the filesystems export writes to, MemAvailable → serve/train presets with
   printed formulas, nvidia-smi VRAM tiers when present, config parse, ports,
   stale instance state (`--fix` removes only verified-dead entries), and prints
-  THE exact next command per finding ([`sable/doctor.py`](sable/doctor.py)).
-- `sable launch [--stop]` — one-click program launcher: detached dashboard +
+  THE exact next command per finding ([`toaster-loop/doctor.py`](toaster-loop/doctor.py)).
+- `toaster-loop launch [--stop]` — one-click program launcher: detached dashboard +
   browser, idempotent, stops only what it launched.
-- `sable reset --yes [--keep-models]` — cleanup back to a fresh state: wipes
-  SABLE_HOME (buffer, datasets, registry, logs, managed llama.cpp); dry-run
+- `toaster-loop reset --yes [--keep-models]` — cleanup back to a fresh state: wipes
+  TOASTER_LOOP_HOME (buffer, datasets, registry, logs, managed llama.cpp); dry-run
   without `--yes`; never touches foreign installs or system paths.
-- `sable run` — boot the built-in agent (OpenAI-compatible chat loop with
+- `toaster-loop run` — boot the built-in agent (OpenAI-compatible chat loop with
   native tool calling: read_file/list_dir/write_file/patch/search_files) and
   run a one-shot task or interactive REPL.
 
@@ -40,20 +40,20 @@ Phase 2 adds the **experience buffer**: every agent execution is recorded as a
 durable trace (append-only JSONL + SQLite index) with an automatic heuristic
 outcome score, plus CLI for feedback and inspection:
 
-- `sable traces list|show|stats` — browse the buffer.
-- `sable feedback <trace_id>|--last [--score -1..1|--fail|--ok] [--note ...]`
+- `toaster-loop traces list|show|stats` — browse the buffer.
+- `toaster-loop feedback <trace_id>|--last [--score -1..1|--fail|--ok] [--note ...]`
   — attach explicit feedback; syncs the trace's outcome score for curation.
 
 Phase 3 adds the **dataset curater**: select high-value traces (score/time/
 profile filters), dedup prefix-overlapping REPL conversations, and export
 training-ready datasets (ShareGPT + TRL formats):
 
-- `sable curate [--name N] [--min-score F] [--since DATE] [--profile P]
+- `toaster-loop curate [--name N] [--min-score F] [--since DATE] [--profile P]
   [--include-failures] [--limit N] [--format sft|dpo|both] [--rebuild ID]
   [--judge N]` — create a dataset under `<home>/datasets/<id>/`; `--judge N`
   opts in to LLM-as-judge scoring of borderline traces (biased tiebreaker —
   see [Dataset curation](#dataset-curation-phase-3)).
-- `sable datasets list|show <id>|export <id> --to <dir>|import <file>`.
+- `toaster-loop datasets list|show <id>|export <id> --to <dir>|import <file>`.
 
 Phase 4 closes the **train → deploy → iterate loop**: a model registry with
 lineage + active pointer, a single-GPU FIFO training scheduler that runs SFT
@@ -61,7 +61,7 @@ lineage + active pointer, a single-GPU FIFO training scheduler that runs SFT
 a GGUF export step, a golden-task validation gate gating promotion, promote/rollback, and
 hot-swap of the running server:
 
-- `sable iterate [--name run1] [--kind sft|dpo|grpo] [--dry-run] [--config-key k=v]`
+- `toaster-loop iterate [--name run1] [--kind sft|dpo|grpo] [--dry-run] [--config-key k=v]`
   — one call: curate → train → export → validate → promote-or-keep-previous.
   `grpo` is reinforcement fine-tuning (TRL GRPOTrainer) with built-in rule
   rewards (format / length / reference-overlap; pick a subset via
@@ -69,12 +69,12 @@ hot-swap of the running server:
   (`training.max_parallel_jobs` + `gpu_ids`; each worker is pinned to one
   device), and export supports GGUF (default) or AWQ/GPTQ HF checkpoints
   (`training.export_format: awq|gptq`, optional autoawq/auto-gptq packages).
-- `sable train start --dataset <id> [--kind sft|dpo] [--dry-run] [--config-key k=v]`,
-  `sable train status [job_id] [--tail N]`, `sable train cancel <job_id>`,
-  `sable train auto-check [--trigger]` (≥N unclaimed traces with mean score
+- `toaster-loop train start --dataset <id> [--kind sft|dpo] [--dry-run] [--config-key k=v]`,
+  `toaster-loop train status [job_id] [--tail N]`, `toaster-loop train cancel <job_id>`,
+  `toaster-loop train auto-check [--trigger]` (≥N unclaimed traces with mean score
   ≥ threshold; `--trigger` runs the full iterate loop when the check **and**
   the resource gate pass — the cron entrypoint for autonomous retraining).
-- `sable models list|show <id>|promote <id>|rollback` — plus the
+- `toaster-loop models list|show <id>|promote <id>|rollback` — plus the
   archive-don't-delete lifecycle: `models archive <id>` / `models restore <id>`
   (recoverable; artifacts move under `<home>/archive/<id>/` and back),
   `models pin <id>` / `models unpin <id>` (pinned models bypass automation) and
@@ -88,15 +88,15 @@ typed (`true`/`false`, int, float, JSON list/object, else string), applied to
 the resolved `train.yaml` copy after the pipeline's own injections (so explicit
 flags win), and recorded in the job log for provenance. See
 `config.example.yaml` for every knob the worker honors today and its default.
-- `sable deploy <model_id>` — stop the sable-owned llama-server, start one
+- `toaster-loop deploy <model_id>` — stop the toaster-loop-owned llama-server, start one
   on the model's GGUF, re-point live runners via `switch_model`.
-- `sable serve --auto` — serve the ACTIVE promoted GGUF from the registry.
+- `toaster-loop serve --auto` — serve the ACTIVE promoted GGUF from the registry.
 
 Phase 5 adds the **dashboard**: a loopback-only web UI over the whole loop,
-served by sable itself (stdlib HTTP server + vanilla JS — no new
+served by toaster-loop itself (stdlib HTTP server + vanilla JS — no new
 dependencies, no external CDN assets, works fully offline):
 
-- `sable dashboard [--port N]` — serve the control UI on
+- `toaster-loop dashboard [--port N]` — serve the control UI on
   `http://127.0.0.1:<port>/` (dynamic port by default; Ctrl-C stops cleanly).
 
 ### Dashboard tour (current panel set)
@@ -118,21 +118,21 @@ header; when the pill is grey, reconnecting EventSource retries automatically.
     assistant message. Threads live in a **project tree**: a project carries a
     name, a `workspace_dir` (the agents' containment root for its runs), a
     free-text **description** and one **job line per attached agent** — every
-    agent run on that project (chat, delegated children, `sable run --project`)
+    agent run on that project (chat, delegated children, `toaster-loop run --project`)
     gets a `## Project` section with the description and the full roster, each
     agent's own line marked "that's you". Project nodes expose **edit** (✎) and
     **delete** (✕); deleting removes the record + its codebase index and moves
     its threads to Unfiled, and NEVER touches the workspace directory or the
     files the agents wrote.
 - **Serving**
-  - **Serve** — start/stop the sable-owned llama-server (model picker from
+  - **Serve** — start/stop the toaster-loop-owned llama-server (model picker from
     local GGUFs), attach to an external OpenAI endpoint, live state via
     `serve_state.json` + pid liveness. Phase 6 adds a **server instances**
     table: N named servers (spawn a GGUF or attach a loopback endpoint) run
     concurrently with per-row start/stop, role tags
     (`orchestrator|coding|embedding|custom`) and an autostart flag; spawns
     consult free VRAM and warn (never block) on over-commit. Definitions live
-    under `<SABLE_HOME>/serving/instances/<id>.json`; the reserved
+    under `<TOASTER_LOOP_HOME>/serving/instances/<id>.json`; the reserved
     `default` instance mirrors the legacy single-server setup. On multi-GPU
     boxes an instance may pin itself to device(s) with `"gpu_id": 1` or
     `[0, 1]` (spawn then carries `CUDA/HIP_VISIBLE_DEVICES`, Vulkan gets
@@ -143,18 +143,18 @@ header; when the pill is grey, reconnecting EventSource retries automatically.
     **rollback** buttons (confirmation-gated).
   - **Model Hub** — search Hugging Face, browse GGUF quant variants and
     download models into the models folder in the background (mirrors the
-    `sable hub` CLI; gated repos need `HF_TOKEN`).
+    `toaster-loop hub` CLI; gated repos need `HF_TOKEN`).
 - **Data**
   - **Traces** — list/filter, detail drawer with transcript + feedback,
     inline 👍/👎 (same store the CLI writes), sortable columns + pager.
   - **Datasets** — curated manifests (sft/dpo counts, base model), export
-    (contained to `SABLE_HOME` unless forced).
+    (contained to `TOASTER_LOOP_HOME` unless forced).
 - **Training**
   - **Easy** — one-profile turnkey loop (`easy_training:` config): pick an
     agent profile bound to a managed instance and one click runs the full
     iterate pipeline with a documented optimal preset, optionally hot-deploying
     the promoted model back onto that profile's server. See
-    [`sable/training/easy.py`](sable/training/easy.py).
+    [`toaster-loop/training/easy.py`](toaster-loop/training/easy.py).
   - **Train** — readiness gauges + dataset picker + dry-run; single-flight
     (`409 already_running` links to the live job).
   - **Iterate** — full loop (curate → train → export → validate → promote)
@@ -197,7 +197,7 @@ iterate) execute on background threads; the UI polls `/api/jobs` for progress.
   line `{"event":"done","job":<id>,"result":{dataset_id,sft_count,dpo_count,
   claimed,warnings}}`. Invalid filter bodies still fail fast with `400`.
 - **Dataset export containment guard**: `POST /api/datasets/export` refuses
-  destinations outside `SABLE_HOME` with `409 {code:"outside_home"}` unless
+  destinations outside `TOASTER_LOOP_HOME` with `409 {code:"outside_home"}` unless
   the body also contains `"force": true`. The Datasets panel surfaces a
   confirm dialog in that case before re-sending with force.
 - **Per-route body caps**: generic `/api/*` request bodies cap at 1 MB
@@ -251,8 +251,8 @@ iterate) execute on background threads; the UI polls `/api/jobs` for progress.
   instance is either a GGUF spawn (`gguf`) or an attach target
   (`attach_url`, **loopback-only** — enforced, matching the project's
   loopback constraint); never both. Definitions persist as
-  `<SABLE_HOME>/serving/instances/<id>.json` (atomic writes), runtime state
-  as `<SABLE_HOME>/serving/state/<id>.json`. Duplicate names → `409
+  `<TOASTER_LOOP_HOME>/serving/instances/<id>.json` (atomic writes), runtime state
+  as `<TOASTER_LOOP_HOME>/serving/state/<id>.json`. Duplicate names → `409
   duplicate_name`; ports claimed by other managed servers (including the
   indexer's embed server) → `409 port_conflict`.
 - **Reserved `default`**: synthesized from the legacy config keys
@@ -269,7 +269,7 @@ iterate) execute on background threads; the UI polls `/api/jobs` for progress.
   field when the GGUF estimate exceeds currently free VRAM (accounting for
   other running servers). Warning only — the spawn proceeds; re-send with
   `{force: true}` to skip the estimate. No GPU telemetry → no warning.
-- **Ownership**: sable only ever terminates llama-server processes it
+- **Ownership**: toaster-loop only ever terminates llama-server processes it
   spawned itself (in-process registry + per-instance state verified via pid
   ownership); attach instances and foreign processes are never killed, on
   stop *and* on shutdown (`stop_all_servers` also covers the Phase 5 embed
@@ -284,50 +284,50 @@ iterate) execute on background threads; the UI polls `/api/jobs` for progress.
 The dashboard deliberately contains **no scheduler thread** — firing training
 from a web process is fragile and surprising. Instead the threshold rule
 (`training.auto_enabled`, `auto_min_traces`, `auto_min_score`) is consumed by
-`sable train auto-check`:
+`toaster-loop train auto-check`:
 
 ```bash
 # crontab -e  — check nightly at 03:15; runs iterate only when thresholds
 # AND the resource gate (free VRAM, disk) pass; exits 0 silently otherwise.
-15 3 * * * cd ~ && sable train auto-check --trigger >> $HOME/.sable/auto_iterate.log 2>&1
+15 3 * * * cd ~ && toaster-loop train auto-check --trigger >> $HOME/.toaster-loop/auto_iterate.log 2>&1
 ```
 
 `--trigger` runs the full loop in-process (curate → train → export → validate
-→ promote, same as `sable iterate`) and honors `--dry-run`. The Schedule
+→ promote, same as `toaster-loop iterate`) and honors `--dry-run`. The Schedule
 panel shows this exact line with copy-to-clipboard plus a trigger-now button.
 
 ### Self-improvement toolset (passes 3–4)
 
 Commands that grew on top of the closed loop:
 
-- `sable hub search|variants|download|list|delete` — Hugging Face model hub:
+- `toaster-loop hub search|variants|download|list|delete` — Hugging Face model hub:
   text search, GGUF quant-variant browsing and resumable downloads into the
   models folder (HF hub-cache layout; gated repos need `HF_TOKEN`). Mirrored
   by the dashboard Model Hub panel.
-- `sable history [--limit N] [--verify] [--intents]` — append-only,
+- `toaster-loop history [--limit N] [--verify] [--intents]` — append-only,
   SHA-256 hash-chained operation ledger over registry mutations (promotes,
   rollbacks, archives, pins, job transitions). `--intents` pairs recorded
   promotion/rollback intents (`promote --intent`, `iterate --intent`) with
   observed score deltas.
-- `sable evaluate shadow <model_id> [--profile P] [--n 8]` — replay a
+- `toaster-loop evaluate shadow <model_id> [--profile P] [--n 8]` — replay a
   candidate against the active model on recent high-feedback traces,
   judge-scored; warn-only regression flag stored on the registry.
   `evaluate transfer <model_id> --profile P` probes a candidate adapter
   against *another* profile's replay set before pointing that profile at it.
-- `sable evolve <profile> [--goldens FILE] [--k 3 --generations 2]` —
+- `toaster-loop evolve <profile> [--goldens FILE] [--k 3 --generations 2]` —
   GEPA-style prompt evolution on golden tasks: deterministic golden checks
   first, judge scoring for passers. Output is **always a gated diff
-  proposal**; `sable evolve apply|dismiss <job_id>` is the explicit
+  proposal**; `toaster-loop evolve apply|dismiss <job_id>` is the explicit
   follow-up (`evolution:` config section).
-- `sable rft [--seeds ...] [--goldens FILE] [--k 4]` — rejection-sampling
+- `toaster-loop rft [--seeds ...] [--goldens FILE] [--k 4]` — rejection-sampling
   fine-tuning data (STaR): sample K completions per prompt from the served
   model, keep only deterministically-verified ones, emit a ShareGPT SFT
   dataset (`rft.enabled: true`; job kind `rft`).
-- `sable mine-goldens [--max 8] [--use-judge]` — distill 👍-thumbed traces
+- `toaster-loop mine-goldens [--max 8] [--use-judge]` — distill 👍-thumbed traces
   into golden validation tasks with self-checked deterministic verifiers;
   mined goldens join `validation.golden_tasks` and RFT selection
   (`goldens_mine.enabled: true`).
-- `sable playbooks scan|candidates|list|promote|assess|retire|show|export` —
+- `toaster-loop playbooks scan|candidates|list|promote|assess|retire|show|export` —
   trajectory → playbook distillation: recurring successful tool chains become
   candidate playbooks, promotion is gated (optionally by a judge replay),
   `assess` correlationally checks for regressions and auto-retires
@@ -346,7 +346,7 @@ Commands that grew on top of the closed loop:
    │                                                                        ▼
    └───── serve --auto / deploy ◀── active pointer ◀── promote ◀────────────┘
                      (fail → model marked failed; previous stays live;
-                      `sable models rollback` reverts one step anytime)
+                      `toaster-loop models rollback` reverts one step anytime)
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
@@ -362,7 +362,7 @@ One-click from a fresh clone — creates the venv, installs everything
 desktop launcher icon:
 
 ```bash
-cd sable
+cd toaster-loop
 ./setup.sh            # add --no-training to skip the torch/transformers/trl extras
 ./launch.sh           # start front+back end + browser (or click the icon)
 ./cleanup.sh          # back to a freshly-downloaded state
@@ -374,8 +374,8 @@ run them from PowerShell). `bitsandbytes` is Linux-only, so pass
 equivalently, every script command has a pure-CLI form that works on any OS:
 
 ```powershell
-cd sable
-.\setup.ps1 --no-training      # or: python -m sable launch (no scripts at all)
+cd toaster-loop
+.\setup.ps1 --no-training      # or: python -m toaster-loop launch (no scripts at all)
 .\launch.ps1                   # start front+back end + browser
 .\cleanup.ps1                  # back to a freshly-downloaded state
 ```
@@ -384,7 +384,7 @@ cd sable
 --keep-models` keeps trained models. Manual install (equivalent steps):
 
 ```bash
-cd sable
+cd toaster-loop
 uv venv --python 3.13 .venv          # Python >=3.11,<3.14
 source .venv/bin/activate
 uv pip install -e ".[dev]"
@@ -401,7 +401,7 @@ default and grantable per-profile via `capabilities:` (see
 [`docs/BLENDER-AGENT.md`](docs/BLENDER-AGENT.md)); text tool-call recovery for GGUFs
 with flaky function calling; and automatic context compression for long
 threads (`agent:` config section). Oversized tool results are spilled to
-`<SABLE_HOME>/cache/spillover/` behind a small `<persisted-output>` stub
+`<TOASTER_LOOP_HOME>/cache/spillover/` behind a small `<persisted-output>` stub
 the agent can re-read, keeping traces lean (`tools.spill_*` config keys).
 No external agent framework is required.
 For GPU training jobs, install the optional training extra in a GPU-enabled
@@ -416,7 +416,7 @@ uv pip install -e ".[training]"   # torch/transformers/peft/trl/datasets/bnb
 ### Serve a GGUF with a supervised llama-server
 
 ```bash
-sable serve --gguf ~/models/qwen3-8b-q4_k_m.gguf
+toaster-loop serve --gguf ~/models/qwen3-8b-q4_k_m.gguf
 # -> Serving ...
 #    OpenAI-compatible base_url: http://127.0.0.1:41237/v1
 #    model: qwen3-8b-q4_k_m
@@ -433,24 +433,24 @@ terminates the child llama-server cleanly.
 One-shot against a spawned server:
 
 ```bash
-sable run --gguf ~/models/qwen3-8b-q4_k_m.gguf \
+toaster-loop run --gguf ~/models/qwen3-8b-q4_k_m.gguf \
   --task "list files in . and summarize what this project is"
 ```
 
 Against an already-running OpenAI-compatible server (optional attach mode —
-always explicit; sable never scans for or depends on external servers):
+always explicit; toaster-loop never scans for or depends on external servers):
 
 ```bash
-sable run --attach http://127.0.0.1:8888 --task "list files in ~ and summarize"
+toaster-loop run --attach http://127.0.0.1:8888 --task "list files in ~ and summarize"
 ```
 
 If the attach target requires a bearer token (an external server may;
-supervisor-owned llama-server never does), pass it explicitly — sable will
+supervisor-owned llama-server never does), pass it explicitly — toaster-loop will
 never kill or reconfigure an external server on `:8888`:
 
 ```bash
-sable run --attach http://127.0.0.1:8888 --attach-api-key "$SOME_TOKEN" --task "hi"
-# or: export SABLE_ATTACH_API_KEY=...
+toaster-loop run --attach http://127.0.0.1:8888 --attach-api-key "$SOME_TOKEN" --task "hi"
+# or: export TOASTER_LOOP_ATTACH_API_KEY=...
 ```
 
 Interactive REPL (omit `--task`).
@@ -461,8 +461,8 @@ a new profile/base-model without dozens of manual invocations:
 ```bash
 # tasks.jsonl — one JSON value per line: {"task": "..."} or a bare string;
 # blank lines tolerated, extra per-line keys ignored (v0)
-sable run --attach http://127.0.0.1:8888 --batch tasks.jsonl [--run-name boot]
-sable run --attach http://127.0.0.1:8888 --batch tasks.jsonl --run-name boot --resume
+toaster-loop run --attach http://127.0.0.1:8888 --batch tasks.jsonl [--run-name boot]
+toaster-loop run --attach http://127.0.0.1:8888 --batch tasks.jsonl --run-name boot --resume
 ```
 
 Tasks run **sequentially** (single-GPU FIFO) through the same runner and
@@ -485,25 +485,25 @@ and reporting; when it disagrees with the buffer, the traces win.
 
 ### Experience buffer (traces & feedback)
 
-Every `sable run` execution (one-shot or REPL turn) appends a trace record —
+Every `toaster-loop run` execution (one-shot or REPL turn) appends a trace record —
 full conversation incl. tool calls/results, model alias, endpoint label, token
 counts, duration, heuristic outcome score — and prints its id:
 
 ```bash
-sable traces list --limit 10 [--status success|failure|partial] [--since 2026-09-01]
-sable traces show <trace_id>       # index row + feedback + pretty-printed JSONL
-sable traces stats                 # counts by status, avg score, token totals
+toaster-loop traces list --limit 10 [--status success|failure|partial] [--since 2026-09-01]
+toaster-loop traces show <trace_id>       # index row + feedback + pretty-printed JSONL
+toaster-loop traces stats                 # counts by status, avg score, token totals
 
-sable feedback 3fa8c2 --ok --note "summarized correctly"   # id prefix ok
-sable feedback --last --score -0.5                          # most recent trace
-sable feedback --last --fail                                # shorthand for -1
+toaster-loop feedback 3fa8c2 --ok --note "summarized correctly"   # id prefix ok
+toaster-loop feedback --last --score -0.5                          # most recent trace
+toaster-loop feedback --last --fail                                # shorthand for -1
 ```
 
 Recording is **on by default** and best-effort: a trace write failure can never
 break a conversation (tested). Disable via `recording.enabled: false` in config
-or `SABLE_RECORDING=0`.
+or `TOASTER_LOOP_RECORDING=0`.
 
-Heuristic outcome score v0 (documented in `sable/store/recorder.py`):
+Heuristic outcome score v0 (documented in `toaster-loop/store/recorder.py`):
 `+0.5` completed / `-0.5` not completed, `-0.25` per error-looking tool result
 (capped at `-0.75`), clamped to `[-1, 1]`. Explicit user feedback overwrites
 the trace's `outcome_score`; the heuristic is also kept as a `feedback` row
@@ -511,12 +511,12 @@ with `source="heuristic"` for provenance.
 
 ### Insights (buffer analytics)
 
-`sable insights` reads the same SQLite index + JSONL buffer and answers
+`toaster-loop insights` reads the same SQLite index + JSONL buffer and answers
 "what should I curate next / what did training break?" — pure SQL/JSONL, no
 new deps, no cost estimation (loopback-only):
 
 ```bash
-sable insights [--days 30] [--profile sable] [--json]
+toaster-loop insights [--days 30] [--profile toaster-loop] [--json]
 # or: GET /api/insights?days=30&profile=...  -> Overview panel card
 ```
 
@@ -533,8 +533,8 @@ reason). Empty DB returns a well-formed zero structure.
 
 ### Curation & validation analytics (WP9)
 
-Every `sable curate` run appends a funnel snapshot to
-`~/.sable/analytics/curation_funnels.jsonl` (append-only JSONL, one record
+Every `toaster-loop curate` run appends a funnel snapshot to
+`~/.toaster-loop/analytics/curation_funnels.jsonl` (append-only JSONL, one record
 per run): traces scanned → eligible → curated with dedup/quality/limit reject
 counts per stage and a 10-bin score histogram whose `scored`/`unscored`
 denominators travel with the buckets. The training pipeline appends the same
@@ -544,15 +544,15 @@ records.
 
 ```bash
 # API surface (dashboard loopback server, token-auth like every /api/* route):
-curl -H "X-Sable-Token: $TOKEN" \
+curl -H "X-Toaster Loop-Token: $TOKEN" \
   "http://127.0.0.1:PORT/api/analytics/curation?dataset=<id>&limit=50"
-curl -H "X-Sable-Token: $TOKEN" \
+curl -H "X-Toaster Loop-Token: $TOKEN" \
   "http://127.0.0.1:PORT/api/analytics/validation?model=v3"
 ```
 
 `/api/analytics/curation` also returns `latest_diff` (the two newest datasets
 in the filtered history compared with the same logic as
-`sable datasets diff`); `/api/analytics/validation` merges gate runs
+`toaster-loop datasets diff`); `/api/analytics/validation` merges gate runs
 chronologically with promote/rollback events from the registry ledger. The
 dashboard surfaces both: a funnels card on the Datasets panel and a gate-trend
 block in the model drawer.
@@ -561,41 +561,41 @@ block in the model drawer.
 
 The dashboard's loopback server exposes standard Prometheus text exposition at
 two equivalent paths — `GET /metrics` (scrapers' default) and `GET
-/api/metrics` — same TTL-cached body (5 s), same token rules (`X-Sable-Token`
+/api/metrics` — same TTL-cached body (5 s), same token rules (`X-Toaster Loop-Token`
 header or `?token=` on GET; with a dashboard token configured an unauthenticated
 scrape gets 401, never a backdoor):
 
 ```yaml
 # prometheus.yml (loopback scrape)
 scrape_configs:
-  - job_name: sable
+  - job_name: toaster-loop
     static_configs: [{ targets: ["127.0.0.1:PORT"] }]
     authorization: { credentials: "<dashboard token>" }
 ```
 
-Families include the WP2 honest variants (`sable_score_coverage_ratio` beside
-its `sable_traces_scored_total` denominator, `sable_promotion_pass_rate`
-beside `sable_promotion_decisions_total` — no rate ever renders without its
+Families include the WP2 honest variants (`toaster_loop_score_coverage_ratio` beside
+its `toaster_loop_traces_scored_total` denominator, `toaster_loop_promotion_pass_rate`
+beside `toaster_loop_promotion_decisions_total` — no rate ever renders without its
 denominator). vLLM-compatible names appear ONLY where semantics match:
-`vllm:prompt_tokens_total` / `vllm:generation_tokens_total` mirror the sable
+`vllm:prompt_tokens_total` / `vllm:generation_tokens_total` mirror the toaster-loop
 token counters; there is deliberately no `vllm:num_requests_total` (a trace is
 one agent run, not one engine completion), no
 `vllm:time_to_first_token_seconds` (TTFT is never measured — documented
 absence beats fabricated buckets) and no `vllm:num_requests_waiting` (the job
-queue is a different queue; see `sable_jobs_queued`). Mapping table and
+queue is a different queue; see `toaster_loop_jobs_queued`). Mapping table and
 caching design: [`docs/ROADMAP.md`](docs/ROADMAP.md) WP9 entry.
 
 ### Bench (throughput + noise floor)
 
-`sable bench` measures prompt-processing and generation tokens/sec against a
+`toaster-loop bench` measures prompt-processing and generation tokens/sec against a
 supervised llama-server endpoint (spawned via the existing serve machinery or an
-`--attach` loopback target — it never touches processes sable doesn't own):
+`--attach` loopback target — it never touches processes toaster-loop doesn't own):
 
 ```bash
-sable bench [--runs 5] [--max-tokens 64] [--label exp-a] \
+toaster-loop bench [--runs 5] [--max-tokens 64] [--label exp-a] \
               [--prompts-file prompts.txt] [--noise-floor] [--attach URL]
-sable bench --list                       # persisted records
-sable bench --compare base cand          # speedup + token-identity verdict
+toaster-loop bench --list                       # persisted records
+toaster-loop bench --compare base cand          # speedup + token-identity verdict
 ```
 
 N repeated temperature-0 runs over a fixed deterministic prompt set; the report
@@ -603,27 +603,27 @@ shows per-run values plus median / min / max and run-to-run spread
 (`(max-min)/median`). `--noise-floor` persists a baseline record that later tool
 calibration reads as the threshold for real effects — improvements smaller than
 the measured spread are noise, not wins. Every record is written as JSON to
-`~/.sable/bench/` (override with `SABLE_BENCH_DIR`). Token-identity rule: if
+`~/.toaster-loop/bench/` (override with `TOASTER_LOOP_BENCH_DIR`). Token-identity rule: if
 the generated token streams differ between the records being compared, the
 speedup is reported **INVALID** — a speedup that changes tokens is not a speedup.
 
 ### Calibrate (per-machine autotune)
 
-`sable calibrate` sweeps llama-server knobs already mapped in `run_settings`
+`toaster-loop calibrate` sweeps llama-server knobs already mapped in `run_settings`
 (`kv_cache_type`, `flash_attn`, `gpu_memory_pct` → scaled `-ngl`,
 `batch_size`/`ubatch_size`, `parallel` slots, `speculative_type`) against THIS
 machine + model and stores an adopted profile:
 
 ```bash
-sable calibrate [--quick] [--knobs kv_cache_type,flash_attn] [--runs 3] \
+toaster-loop calibrate [--quick] [--knobs kv_cache_type,flash_attn] [--runs 3] \
                   [--model path/or/name]          # spawn-mode sweep
-sable calibrate --list                          # stored profiles
-sable calibrate --show [--model REF]            # active/stored profile
-sable calibrate --clear                         # delete stored profiles
+toaster-loop calibrate --list                          # stored profiles
+toaster-loop calibrate --show [--model REF]            # active/stored profile
+toaster-loop calibrate --clear                         # delete stored profiles
 ```
 
 The sweep is coordinate-wise (baseline → each candidate vs the current best →
-keep winner → next knob); every measurement uses the `sable bench` harness
+keep winner → next knob); every measurement uses the `toaster-loop bench` harness
 (fixed prompt set, temperature 0). **Adoption rule:** a candidate wins only if
 it beats the current best by MORE THAN `max(3%, measured noise floor)` AND
 generates identical tokens (token-identity rule — a faster setting that changes
@@ -634,8 +634,8 @@ skipped; the sweep continues. When `mtp` is requested but no drafter GGUF sits
 next to the model it degrades to ngram and the profile records
 `tested_as: "ngram (mtp unavailable)"` — never a claim that MTP was measured.
 
-Profiles save as JSON under `~/.sable/calibrate/` keyed by machine-id +
-model hash (override with `SABLE_CALIBRATE_DIR`). **Serving honors them only
+Profiles save as JSON under `~/.toaster-loop/calibrate/` keyed by machine-id +
+model hash (override with `TOASTER_LOOP_CALIBRATE_DIR`). **Serving honors them only
 with an explicit opt-in** — add to your config:
 
 ```yaml
@@ -647,12 +647,12 @@ With `auto` and a matching profile, the adopted knob values become defaults for
 that instance's launch; **explicit `run_settings` values in config (or per
 instance) always override calibrated ones**, and with no matching profile
 behavior is exactly as before. No dashboard surface (use
-`sable calibrate --show`).
+`toaster-loop calibrate --show`).
 
-### MCP control plane (`sable mcp`)
+### MCP control plane (`toaster-loop mcp`)
 
-`sable mcp` serves an [MCP](https://modelcontextprotocol.io) (Model Context
-Protocol) server that exposes sable's existing operations as typed tools —
+`toaster-loop mcp` serves an [MCP](https://modelcontextprotocol.io) (Model Context
+Protocol) server that exposes toaster-loop's existing operations as typed tools —
 opt-in: nothing else changes when you don't invoke it, and there is **no MCP
 SDK** (stdlib-only JSON-RPC re-implementation, per the project's D-12 rule;
 the control-plane pattern was inspired by Strata's MCP design).
@@ -669,15 +669,15 @@ Wire it into any MCP client config (the entry point is the module form):
 ```json
 {
   "mcpServers": {
-    "sable": {
+    "toaster-loop": {
       "command": "python",
-      "args": ["-m", "sable", "mcp"]
+      "args": ["-m", "toaster-loop", "mcp"]
     }
   }
 }
 ```
 
-(`python -m sable mcp --config path/to/sable.yaml` also works; the CLI's
+(`python -m toaster-loop mcp --config path/to/toaster_loop.yaml` also works; the CLI's
 standard `--config`/`--verbose` flags apply.)
 
 **Tool table** — tools mirror existing CLI/API code paths exactly and add no
@@ -687,18 +687,18 @@ plan-then-confirm**:
 | tool | class | mirrors |
 |---|---|---|
 | `status` | read | `GET /api/status` (overview chips) |
-| `instances_list` | read | `sable instances status` / `GET /api/servers` |
-| `models_list` | read | `sable models list` / `GET /api/models` |
+| `instances_list` | read | `toaster-loop instances status` / `GET /api/servers` |
+| `models_list` | read | `toaster-loop models list` / `GET /api/models` |
 | `logs_tail` | read | bounded tail of `<home>/logs/server-<id>.log` (≤500 lines) |
 | `instance_start` | **mutating** | `POST /api/servers/<id>/start` |
 | `instance_stop` | **mutating** | `POST /api/servers/<id>/stop` |
 | `instance_load` | **mutating** | `POST /api/servers/<id>/load` (WP5) |
 | `instance_unload` | **mutating** | `POST /api/servers/<id>/unload` (WP5) |
-| `curate_enqueue` | **mutating** | `sable curate` / `POST /api/curate` (queued job) |
-| `train_enqueue` | **mutating** | `sable train start` / `POST /api/train` (single-flight: a busy GPU returns an error, never a silent queue) |
-| `validate` | **mutating** | the golden-suite gate `sable iterate` runs (`training.validate.validate_model`) — classified mutating because it spawns a temporary llama-server and occupies the GPU even though it writes no registry state |
-| `promote` | **mutating** | `sable models promote` / `POST /api/models/promote` |
-| `bench` | **mutating** | `sable bench` measure mode (may spawn a server; persists a record under `<home>/bench/`) |
+| `curate_enqueue` | **mutating** | `toaster-loop curate` / `POST /api/curate` (queued job) |
+| `train_enqueue` | **mutating** | `toaster-loop train start` / `POST /api/train` (single-flight: a busy GPU returns an error, never a silent queue) |
+| `validate` | **mutating** | the golden-suite gate `toaster-loop iterate` runs (`training.validate.validate_model`) — classified mutating because it spawns a temporary llama-server and occupies the GPU even though it writes no registry state |
+| `promote` | **mutating** | `toaster-loop models promote` / `POST /api/models/promote` |
+| `bench` | **mutating** | `toaster-loop bench` measure mode (may spawn a server; persists a record under `<home>/bench/`) |
 
 **Plan/confirm flow.** Call a mutating tool without `confirm_token` and you
 get a PLAN back instead of execution: `{action, target, exact_effect, risks,
@@ -720,23 +720,23 @@ Python functions in-process; a test greps the package for shell/exec
 patterns). No tool accepts a filesystem path — `logs_tail` takes an instance
 id validated against the same pattern `serving/instances.py` enforces, and
 the constructed path is containment-checked with
-[`core/path_security.py`](sable/core/path_security.py) before opening.
+[`core/path_security.py`](toaster-loop/core/path_security.py) before opening.
 Malformed input yields JSON-RPC parse errors, never a crash.
 
 ### Dataset curation (Phase 3)
 
 ```bash
-sable curate --name myrun --min-score 0.5 --since 2026-09-01 \
-  [--profile sable] [--include-failures] [--limit 500] [--format both]
+toaster-loop curate --name myrun --min-score 0.5 --since 2026-09-01 \
+  [--profile toaster-loop] [--include-failures] [--limit 500] [--format both]
 # -> dataset 20260902T011727Z--myrun
-#    dir:     ~/.sable/datasets/20260902T011727Z--myrun
+#    dir:     ~/.toaster-loop/datasets/20260902T011727Z--myrun
 #    sft:     37 rows -> sft.jsonl
 #    dpo:     4 pairs -> dpo.jsonl
 #    claimed: 39 traces (curated=1, dataset_id=...)
 
-sable datasets list
-sable datasets show 20260902T011727Z--myrun     # manifest JSON
-sable datasets export <id> --to ~/exports        # copy out for training
+toaster-loop datasets list
+toaster-loop datasets show 20260902T011727Z--myrun     # manifest JSON
+toaster-loop datasets export <id> --to ~/exports        # copy out for training
 ```
 
 **Selection**: unclaimed traces matching status/time/profile filters pass when
@@ -769,7 +769,7 @@ biased — treat judge scores as a tiebreaker near the threshold, not ground
 truth. Config knobs are limited to `curation.judge_band` and optional
 `curation.judge_model`; no config key enables judging itself.
 
-**Dataset import (`sable datasets import <file> [--format auto|alpaca|sharegpt|chatml] [--name N]`)**:
+**Dataset import (`toaster-loop datasets import <file> [--format auto|alpaca|sharegpt|chatml] [--name N]`)**:
 seeds the loop from external data. Reads `.jsonl` (or a `.json` array) and
 auto-detects per row: `conversations` → sharegpt (`from`/`value` or
 `role`/`content` keys), `instruction`(+`output`) → alpaca (`input` becomes a
@@ -806,12 +806,12 @@ keys seen. (Follows the trainer ecosystem's `format_type` convention.)
 
 ### State layout
 
-Root = `SABLE_HOME` env > config `home:` > `~/.sable`:
+Root = `TOASTER_LOOP_HOME` env > config `home:` > `~/.toaster-loop`:
 
 ```
 <home>/
   buffer/
-    sable.db                  # SQLite index: traces + feedback (WAL)
+    toaster_loop.db                  # SQLite index: traces + feedback (WAL)
     YYYY/MM/<trace_id>.jsonl    # append-only full conversation per trace
                                 # (header / message* / footer, schema_version 1)
   datasets/
@@ -837,22 +837,22 @@ Root = `SABLE_HOME` env > config `home:` > `~/.sable`:
   easy_training/state.json      # Easy-training run state
   skills/<name>/                # agent skills: SKILL.md + scripts dir
                                 # (skills.enabled; see docs/SKILLS.md)
-  logs/dashboard.log            # launched-dashboard log (`sable launch`)
+  logs/dashboard.log            # launched-dashboard log (`toaster-loop launch`)
   janitor_state.json            # disk-janitor last_run_at/run_count/summary
-  serve_state.json              # sable-owned llama-server pid/base_url
+  serve_state.json              # toaster-loop-owned llama-server pid/base_url
                                 # (the reserved "default" instance)
   serving/
     instances/<id>.json         # named server instance definitions (Phase 6)
     state/<id>.json             # per-instance runtime state (pid/base_url)
-  bench/                        # `sable bench` records + noise-floor baselines
-                                # (SABLE_BENCH_DIR overrides)
+  bench/                        # `toaster-loop bench` records + noise-floor baselines
+                                # (TOASTER_LOOP_BENCH_DIR overrides)
   calibrate/                    # per-machine calibration profiles, one JSON
                                 # per machine-id + model hash
-                                # (SABLE_CALIBRATE_DIR overrides)
+                                # (TOASTER_LOOP_CALIBRATE_DIR overrides)
 ```
 
 Registry state (models, jobs, active pointers) lives in
-`buffer/sable.db` alongside the trace index (single-writer SQLite).
+`buffer/toaster_loop.db` alongside the trace index (single-writer SQLite).
 
 **Model status machine**: `candidate → validated → promoted → superseded`;
 validation failure ⇒ `failed`; rollback ⇒ current becomes `rolled_back` and
@@ -861,7 +861,7 @@ New models auto-number `vN`, pin `dataset_id + manifest_hash`, and record
 `parent_adapter` = the active model at registration time (lineage chain).
 
 **Archive lifecycle**: `superseded / failed / rolled_back → archived` via
-`sable models archive <id>` or the disk janitor — never automatically from
+`toaster-loop models archive <id>` or the disk janitor — never automatically from
 any other status, and never for `pinned` models (`models pin/unpin`). Archival
 *never deletes*: GGUF + adapter move under `<home>/archive/<model_id>/` and
 `models restore <id>` moves them back to their exact recorded paths
@@ -871,8 +871,8 @@ archives only terminal (`superseded/failed/rolled_back`) models older than
 `janitor.retention_days` (age = `promoted_at` when the model ever went live,
 else `created_at`), skips pinned rows, records runs in
 `<home>/janitor_state.json`, and runs automatically at
-`sable train auto-check` time only when `janitor.enabled: true`
-(default **false** — opt in; manual runs via `sable models janitor` always
+`toaster-loop train auto-check` time only when `janitor.enabled: true`
+(default **false** — opt in; manual runs via `toaster-loop models janitor` always
 work, `--dry-run` lists what would move without touching anything).
 
 The janitor also prunes aged **operational files** (worker/server logs, chat
@@ -880,7 +880,7 @@ The janitor also prunes aged **operational files** (worker/server logs, chat
 `janitor.disk_retention_days` (default 90; 0 disables). Unlike model
 archives these deletions are final, so only those allow-listed directories
 are ever touched — models, datasets, buffer and archive contents never are.
-Preview with `sable models janitor --dry-run [--disk-days N]`.
+Preview with `toaster-loop models janitor --dry-run [--disk-days N]`.
 
 **Job states**: `queued → running → done|error|cancelled`; FIFO on
 `(queued_at, job_id)`; one job at a time (single GPU arbiter); a worker killed
@@ -890,7 +890,7 @@ Preview with `sable models janitor --dry-run [--disk-days N]`.
 
 `training.base_model` (config) must be an **HF checkpoint id or local HF-format
 dir** — never a GGUF (GGUFs are serve-only). GPU-heavy steps run in a
-subprocess (`python -m sable.training.worker`); set `training.python` to the
+subprocess (`python -m toaster_loop.training.worker`); set `training.python` to the
 interpreter that has torch. `training.backend` selects the SFT implementation:
 default **`peft`** (today's transformers+peft path, unchanged) or **`streamed`**
 — a layer-streaming trainer for checkpoints bigger than VRAM: the checkpoint
@@ -923,40 +923,40 @@ prose answers still pass substring checks. See
 
 ```bash
 # in an env with the [training] extra (torch/transformers/peft/trl):
-sable train start --dataset <id> --dry-run   # config+dataset validation only
-sable iterate --name smoke                    # full loop on the real trainer
-sable models list && sable deploy v1        # go live
+toaster-loop train start --dataset <id> --dry-run   # config+dataset validation only
+toaster-loop iterate --name smoke                    # full loop on the real trainer
+toaster-loop models list && toaster-loop deploy v1        # go live
 ```
 
-Deleting `<home>` fully resets sable. Traces are captured post-run from the
+Deleting `<home>` fully resets toaster_loop. Traces are captured post-run from the
 completed message list returned by the runner — one canonical capture point
 for the built-in runtime.
 
 ### Config
 
 Copy [`config.example.yaml`](config.example.yaml) → `config.yaml`, pass with
-`--config path/to/config.yaml` or `SABLE_CONFIG`; when unset, config loads
-from `<SABLE_HOME>/sable.yaml` (the file the dashboard Settings panel
-writes). Environment variables (`SABLE_HOME`, `SABLE_GGUF`,
-`SABLE_MODELS_DIR`, `SABLE_PORT`, `SABLE_CONTEXT`,
-`SABLE_ATTACH_URL`, `SABLE_MODEL`,
-`SABLE_LLAMA_SERVER`, `SABLE_RECORDING`, `SABLE_DASHBOARD_PORT`,
-`SABLE_EXTERNAL_SERVER_URL`) override file values. The optional `dashboard:` config
+`--config path/to/config.yaml` or `TOASTER_LOOP_CONFIG`; when unset, config loads
+from `<TOASTER_LOOP_HOME>/toaster_loop.yaml` (the file the dashboard Settings panel
+writes). Environment variables (`TOASTER_LOOP_HOME`, `TOASTER_LOOP_GGUF`,
+`TOASTER_LOOP_MODELS_DIR`, `TOASTER_LOOP_PORT`, `TOASTER_LOOP_CONTEXT`,
+`TOASTER_LOOP_ATTACH_URL`, `TOASTER_LOOP_MODEL`,
+`TOASTER_LOOP_LLAMA_SERVER`, `TOASTER_LOOP_RECORDING`, `TOASTER_LOOP_DASHBOARD_PORT`,
+`TOASTER_LOOP_EXTERNAL_SERVER_URL`) override file values. The optional `dashboard:` config
 section (see [`config.example.yaml`](config.example.yaml)) takes `port:` and an
-optional shared-secret `token:` (also `--token` / `SABLE_DASHBOARD_TOKEN`;
-when set, every `/api/*` call must carry `X-Sable-Token`) — the bind host is
+optional shared-secret `token:` (also `--token` / `TOASTER_LOOP_DASHBOARD_TOKEN`;
+when set, every `/api/*` call must carry `X-Toaster Loop-Token`) — the bind host is
 always loopback.
 
 The `delegation:` section gates the agent-discovery/delegation toolset
 (`list_agents`, `delegate_task`, `check_delegation`): `enabled` (default true,
-env `SABLE_DELEGATION`) and `timeout_seconds` (default 300, env
-`SABLE_DELEGATION_TIMEOUT_S`) — the default cap on how long `delegate_task`
+env `TOASTER_LOOP_DELEGATION`) and `timeout_seconds` (default 300, env
+`TOASTER_LOOP_DELEGATION_TIMEOUT_S`) — the default cap on how long `delegate_task`
 waits for a child agent run before returning a timeout payload. Children run
 on the active project's attached profiles; see
 [`docs/DECISIONS.md`](docs/DECISIONS.md) D-11.
 
 The `serve:` section carries serving-launch behavior: `calibration: off|auto`
-(default `off`) opts into applying `sable calibrate` profiles at launch —
+(default `off`) opts into applying `toaster-loop calibrate` profiles at launch —
 with `auto`, adopted knob values for this machine-id + model-hash become
 defaults underneath explicit `run_settings` (manual values always win; with no
 matching profile, or the key absent, launches are byte-identical to before).
@@ -982,7 +982,7 @@ serve:
   # watchdog_restart_window_seconds: 600
 ```
 
-On detection the pid is re-verified as sable-owned before any signal is sent
+On detection the pid is re-verified as toaster-loop-owned before any signal is sent
 (foreign/recycled pids are never killed — stale state is cleared instead),
 then SIGTERM → SIGKILL after grace and a restart with exponential backoff up
 to the cap. Events land on the dashboard SSE bus as `serve.watchdog`
@@ -1022,9 +1022,9 @@ clear retryable error. Events land on the dashboard SSE bus as `serve.coexist`
 `coexist_refused`). Explicit control:
 
 ```console
-$ sable instances status              # every instance + load state
-$ sable instances unload coder        # graceful stop, recorded unloaded
-$ sable instances load coder          # (re)launch by id
+$ toaster-loop instances status              # every instance + load state
+$ toaster-loop instances unload coder        # graceful stop, recorded unloaded
+$ toaster-loop instances load coder          # (re)launch by id
 ```
 
 or `POST /api/servers/<id>/unload` / `/load` on the dashboard API (instance
@@ -1032,14 +1032,14 @@ rows carry a `load_state` field: loaded | unloaded | unloading | stopped).
 See [`docs/ROADMAP.md`](docs/ROADMAP.md) WP5 for the handshake algorithm.
 
 The `tools:` section carries the editor-style post-write error checking for
-coding agents: `lint_on_write` (default true, env `SABLE_LINT_ON_WRITE`)
+coding agents: `lint_on_write` (default true, env `TOASTER_LOOP_LINT_ON_WRITE`)
 runs a cheap tier-1 syntax check (`py_compile` for `.py`, `node --check` for
 JS/TS when available) on the new content of every successful
 `write_file`/`patch` — the write is never rejected, but failures append a
 `✗ SYNTAX ERROR in <path> …` block (with pre-existing errors filtered out via
 a delta against the pre-edit content) so the model fixes them next turn. The
 optional `tools.lsp:` sub-section (`enabled`, default false, env
-`SABLE_LSP`) adds tier-2 LSP diagnostics: a detected language server
+`TOASTER_LOOP_LSP`) adds tier-2 LSP diagnostics: a detected language server
 (pyright / typescript-language-server / gopls / rust-analyzer by default;
 override per extension via `servers:`) is driven over stdio JSON-RPC with a
 pre-edit shadow-document baseline, so only NEW diagnostics are surfaced. All
@@ -1047,7 +1047,7 @@ probes are timeout-bounded and degrade to silent skips when no server exists.
 
 The `indexing:` section drives per-project codebase semantic search (the
 `search_codebase` tool + the Settings card). Phase 5 schema: `enabled`
-(default false), `model` (embedding GGUF path — sable spawns and stops its
+(default false), `model` (embedding GGUF path — toaster-loop spawns and stops its
 own loopback `llama-server --embedding` for it; only processes it spawned are
 ever terminated), `output_dim` (`768|512|256|128` Matryoshka (MRL) truncation
 applied to stored *and* query vectors with L2 renormalization; a query whose
@@ -1055,19 +1055,19 @@ dim/model differs from the built index reports "index needs rebuild" instead
 of returning garbage), `search_mode` (`hybrid|semantic|lexical`) and the
 advanced `paths_override` (manual roots for the default/no-project DB only —
 each project indexes its own `workspace_dir`). One sqlite DB per project lives
-at `<SABLE_HOME>/index/<project_id>.db` (+ `default.db`). Projects enroll
+at `<TOASTER_LOOP_HOME>/index/<project_id>.db` (+ `default.db`). Projects enroll
 themselves: creating or editing a project from the Chat page (or the API)
 starts a build of **that project's own** DB when `enabled` — nothing is ever
 appended to `paths_override`, and one project's build/search never sees another
 project's files. Deleting a project deletes its index DB (and only that file). Legacy keys (`embedding_url`, `embedding_model`,
 `top_k`, `paths`) load without crashing: `embedding_model` maps to `model`,
-`paths` to `paths_override`, and the url/`top_k` are dropped (sable owns
+`paths` to `paths_override`, and the url/`top_k` are dropped (toaster-loop owns
 the server; top_k is an internal constant).
 
 ### Exit codes
 
-Every `sable` command follows this taxonomy (source of truth:
-[`sable/core/exitcodes.py`](sable/core/exitcodes.py)):
+Every `toaster-loop` command follows this taxonomy (source of truth:
+[`toaster-loop/core/exitcodes.py`](toaster-loop/core/exitcodes.py)):
 
 | Code | Meaning |
 |------|---------|
@@ -1076,12 +1076,12 @@ Every `sable` command follows this taxonomy (source of truth:
 | 2    | usage error — argparse rejects the command line, and post-parse invocation mistakes (mutually exclusive flags, bad `--config-key` shape, `bench compare` with an unreadable operand) |
 | 3    | **invalid configuration** — the YAML failed validation; stderr carries ONE consolidated report listing every unknown / missing / mistyped field at once ("refuse to guess") |
 | 4    | **finished but corrupt artifact** — the process flow completed, yet a produced artifact failed its integrity check (truncated / zero-byte / bad-magic GGUF, NaN loss recorded). Distinct from 1 so automation can tell "the run errored" from "the run looked fine and quietly produced garbage" |
-| 10   | `sable llama update --check`: an update is available (established informational code) |
+| 10   | `toaster-loop llama update --check`: an update is available (established informational code) |
 | 130  | interrupted (Ctrl-C), per shell convention |
 
 Config strictness (WP2a): mistyped values are **always** errors with the
 consolidated report; unknown keys stay warn-only by default so stray keys in
-existing configs keep loading unchanged — set `SABLE_CONFIG_STRICT=1` to
+existing configs keep loading unchanged — set `TOASTER_LOOP_CONFIG_STRICT=1` to
 promote them into the same error. Found values in reports pass through the
 secret redactor, so a mistyped credential field never echoes its value.
 
@@ -1109,7 +1109,7 @@ pytest tests/ -v
 The tests spin up a **fake OpenAI-compatible server** (stdlib, no model
 download) and assert: health-check works, attach mode reaches it, the agent
 loop completes a full tool-call → tool-result → final-answer round trip, and —
-all hermetically under a temp `SABLE_HOME` — trace JSONL +
+all hermetically under a temp `TOASTER_LOOP_HOME` — trace JSONL +
 SQLite rows are written, feedback/traces CLIs work, recording can be disabled,
 a broken recorder cannot break a run, and the built-in runtime produces a
 complete trace. Phase 3 adds curation tests (traces seeded via the store
@@ -1134,13 +1134,13 @@ the `tests/test_hygiene.py` import allowlist).
 
 ## Manual test with a real local GGUF
 
-1. Make sure `llama-server` exists (`sable setup` builds one under
-   `~/.sable/llama.cpp`; sable also checks PATH).
+1. Make sure `llama-server` exists (`toaster-loop setup` builds one under
+   `~/.toaster-loop/llama.cpp`; toaster-loop also checks PATH).
 2. Grab any tool-call-capable GGUF (Qwen-family recommended),
-   e.g. `qwen3-8b-q4_k_m.gguf`, or download one via `sable hub`.
-3. `sable serve --gguf /path/to/model.gguf -v` and confirm the printed
+   e.g. `qwen3-8b-q4_k_m.gguf`, or download one via `toaster-loop hub`.
+3. `toaster-loop serve --gguf /path/to/model.gguf -v` and confirm the printed
    base_url; `curl http://127.0.0.1:<port>/v1/models` should list the model.
-4. In another shell: `sable run --attach http://127.0.0.1:<port> --task "list files in ." -v`.
+4. In another shell: `toaster-loop run --attach http://127.0.0.1:<port> --task "list files in ." -v`.
 5. Kill the server mid-conversation (`Ctrl-C` on serve): the agent must exit
    with a clear connection error, not hang.
 

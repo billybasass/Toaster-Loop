@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
+<title>Toaster Loop dashboard</title>
+<link rel="icon" type="image/svg+xml" href="/toaster-loop.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <a class="brand" href="#/overview" title="Toaster Loop">🍞 Toaster Loop</a>
+    <div id="statusbar" class="statusbar" aria-live="polite"></div>
+  </header>
+
+  <nav id="nav" class="rail" aria-label="panels"></nav>
+
+  <main id="outlet" class="outlet"></main>
+
+  <footer class="foot"><span id="footmeta">loopback-only · no telemetry · all mutations via the core API</span></footer>
+</div>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+<div id="modal-host"></div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

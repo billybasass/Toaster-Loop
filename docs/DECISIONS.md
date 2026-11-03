@@ -1,15 +1,15 @@
-# DECISIONS — sable
+# DECISIONS — toaster-loop
 
 Numbered Architecture Decision Records (ADRs). Status: accepted unless noted.
 
 ## D-1 — Standalone package, process boundaries to everything else
-**Decision.** sable is one self-contained Python package. Anything it does not
+**Decision.** toaster-loop is one self-contained Python package. Anything it does not
 implement itself (inference servers, external OpenAI-compatible endpoints) runs as a
 separate process reached over HTTP or subprocess boundaries; nothing is vendored,
 forked, or imported from other agent/trainer programs.
 **Rationale.** A single importable dependency surface keeps the tool installable
-anywhere and reviewable; external programs upgrade independently of sable.
-**Consequence.** sable maintains its own thin seams: OpenAI HTTP (inference),
+anywhere and reviewable; external programs upgrade independently of toaster_loop.
+**Consequence.** toaster-loop maintains its own thin seams: OpenAI HTTP (inference),
 subprocess config/files (training/export), and a fully built-in agent runtime.
 
 ## D-2 — (superseded by D-12) External agent-loop reuse
@@ -20,7 +20,7 @@ built-in runner's design.
 
 ## D-3 — Licensing posture: nothing external is imported
 **Decision.** The dependency boundary is binding on design and enforced by CI
-(`tests/test_hygiene.py`): sable imports only `pyyaml`, `httpx`, the stdlib,
+(`tests/test_hygiene.py`): toaster-loop imports only `pyyaml`, `httpx`, the stdlib,
 and — lazily, inside the training worker only — the open ML stack
 (torch/transformers/peft/trl/datasets). No agent framework, no trainer CLI library, no
 external "studio"/hub packages. Interactions with other local programs are HTTP-only
@@ -30,22 +30,22 @@ import must be a deliberate, reviewed change to that test.
 
 ## D-4 — Primary serving path: supervisor-owned llama-server on GGUF
 **Decision.** The default inference backend is a llama.cpp `llama-server` process owned
-by sable, serving the active GGUF on a loopback dynamic port with an OpenAI-compatible
+by toaster-loop, serving the active GGUF on a loopback dynamic port with an OpenAI-compatible
 API. Any other OpenAI-compatible server is an optional, explicit attach target.
 **Rationale.** Zero auth friction, trivial hot-swap (kill + respawn with new `-m`), and
-immunity to confusion with servers other programs may run — sable never mutates or
+immunity to confusion with servers other programs may run — toaster-loop never mutates or
 depends on them, only kills processes it spawned itself.
 **Trade-off.** Loses third-party model-manager conveniences; acceptable because
-sable's registry replaces that role.
+toaster-loop's registry replaces that role.
 
 ## D-5 — Training via generated YAML + subprocess worker
 **Amended.** The original plan had two backends (an external CLI for SFT, a direct
 worker for preference training). As built, *all* kinds (SFT/DPO/GRPO) run in the
-sable-owned worker subprocess (`python -m sable.training.worker`) on
+toaster-loop-owned worker subprocess (`python -m toaster_loop.training.worker`) on
 transformers/peft/trl. The YAML contract decision stands: the worker executes an
 documented trainer config schema, mirrored as a file contract — nothing imported.
 **Decision.** Scheduler emits a `train`-compatible YAML (model/data/training/lora/
-logging) and runs training in a sable-owned worker subprocess importing the open ML
+logging) and runs training in a toaster-loop-owned worker subprocess importing the open ML
 stack directly.
 **Rationale.** Config-file contract is stable and `--dry-run` testable; progress via
 trainer output files; preference data needs custom code anyway.
@@ -78,18 +78,18 @@ promotion requires non-regression; rollback is one command and automatic on swap
 **Rationale.** Weight updates are the risky edge of the loop; local models regress
 subtly (tool-call syntax breakage especially).
 **Consequence.** The replay harness ships before auto-training; golden-task curation
-(`sable mine-goldens`) is its own mini-workstream.
+(`toaster-loop mine-goldens`) is its own mini-workstream.
 
-## D-9 — Single-machine, single-GPU arbiter in sable-core
+## D-9 — Single-machine, single-GPU arbiter in toaster-loop-core
 **Decision.** One scheduler owns GPU state: inference server + training jobs are
 serialized unless headroom is proven; agent traffic preempts (training checkpoints,
 server reloads after).
 **Rationale.** The target machine is one Linux desktop/laptop; co-tenancy OOM is the
 most likely failure mode of the whole concept.
 
-## D-10 — Storage: SQLite + files under ~/.sable
+## D-10 — Storage: SQLite + files under ~/.toaster-loop
 **Decision.** No server-grade infra (no Postgres/object store). SQLite for index/registry,
-JSONL for traces/datasets, directories for adapters/GGUFs. Deleting `~/.sable` is a
+JSONL for traces/datasets, directories for adapters/GGUFs. Deleting `~/.toaster-loop` is a
 full reset.
 **Rationale.** Single-user local tool; portability; debuggability (user can grep their
 own experience buffer).
@@ -105,8 +105,8 @@ it in-line, capped by `delegation.timeout_seconds` (default 300; per-call overri
 On timeout it returns a structured payload (`status: timed_out`, partial output slot,
 diagnostics) and abandons the child thread — never hangs the parent loop.
 `check_delegation` polls the in-process delegation registry for terminal state.
-**Rationale.** sable's tool loop is synchronous by construction
-(`content = impl(**args)` inside `SableAgentClient.run()`), so an async
+**Rationale.** toaster-loop's tool loop is synchronous by construction
+(`content = impl(**args)` inside `ToasterLoopAgentClient.run()`), so an async
 enqueue/poll model would add a background scheduler, persistence and re-entry
 machinery without changing what the parent can do while waiting — it is blocked
 in the tool call either way. The sync-with-timeout shape keeps one execution
@@ -124,7 +124,7 @@ its run finishes); `thread` lineage entries carry `delegation_id`, `agent`,
 (`core/agent_runner.py`: chat loop, native tool calling, compaction, guardrails,
 recording), the toolset (`core/tools.py`), curation, scheduling, registry, serving
 supervision and the dashboard. Where prior art existed, designs were adapted in spirit
-with the mechanism re-implemented for sable's constraints; no external agent or
+with the mechanism re-implemented for toaster-loop's constraints; no external agent or
 trainer framework is imported at runtime.
 **Rationale.** A minimal dependency surface (`pyyaml` + `httpx` + `Pillow` at runtime
 — Pillow is the native screen-capture layer for `take_screenshot` on
@@ -133,7 +133,7 @@ loopback tool installable anywhere, removes version coupling to upstreams with t
 own release cadences, and makes trace-capture/hot-swap hooks first-class instead of
 adapter-shimmed. Hardening that mattered for a local-only endpoint (timeouts, infra
 failure classification, context compression) was re-implemented where it pays, rather
-than inherited wholesale with machinery sable never uses.
+than inherited wholesale with machinery toaster-loop never uses.
 **Consequences.** `tests/test_hygiene.py` enforces the import allowlist.
 Behavioral compatibility is defined by formats and payload shapes (ShareGPT trajectory,
 OpenAI-compatible HTTP), not shared code. D-1's process-boundary rules survive:
@@ -143,7 +143,7 @@ external programs remain HTTP/subprocess-only.
 **Decision.** The streamed backend persists adapters as a plain
 module-name → LoRA-tensor state dict (`lora_state.safetensors` + an
 `adapter_config.json` carrying `"backend": "streamed"` and
-`"format": "sable-lora-state-dict"`), and the GGUF-LoRA writer consumes ONLY
+`"format": "toaster-loop-lora-state-dict"`), and the GGUF-LoRA writer consumes ONLY
 that contract shape. The name mapping is checkpoint naming
 (`model.layers.<i>.<module>.lora_A|B`) → llama.cpp LoRA naming
 (`blk.<i>.<role>.weight.lora_a|_b`), F32, complete pairs enforced.
@@ -219,7 +219,7 @@ children run the peer's actual persona instead of today's empty string. After
 a remote-inference child settles, its transcript is pushed to the peer via
 `/remote/v1/traces/import` — delegation gets parity with chat's
 `_push_remote_trace`. A companion fix (also closing the pre-existing chat gap)
-carries `resolve_remote_agent`'s `remote_instance` as an `X-Sable-Instance`
+carries `resolve_remote_agent`'s `remote_instance` as an `X-Toaster Loop-Instance`
 header so multi-instance peers stop landing everything on the first instance.
 **Rationale.** Chat already established the semantics: "a remote agent is a
 local agent whose completions cross the wire" (plans/remote-agents.md);
@@ -240,7 +240,7 @@ runner's httpx timeout. Effort collapses to wiring + resolution, reusing the
 chat path's own pieces.
 **Consequences.**
 - `execute_delegation` resolves `<agent>@<host>` via a lazy `dashboard.peers`
-  import (sanctioned: peers.json lives under SABLE_HOME and is pure state;
+  import (sanctioned: peers.json lives under TOASTER_LOOP_HOME and is pure state;
   guarded by `try/except ImportError` so standalone core keeps working).
   Unknown-with-`@` names get an error naming the host and pointing at the
   Serve page, distinct from the plain "unknown agent" message.
@@ -265,7 +265,7 @@ chat path's own pieces.
   `AgentBackendError` → structured failed payload.
 - Naive `?instance=` on the base URL is explicitly rejected: the runner builds
   `{base_url}/chat/completions`, so a query string would land mid-path. The
-  instance selector rides a header instead (`X-Sable-Instance`), honored by
+  instance selector rides a header instead (`X-Toaster Loop-Instance`), honored by
   `remote_gateway.resolve_upstream` ahead of model-name matching.
 Implementation spec: `plans/delegation-remote.md` (appendix to this decision).
 
@@ -287,7 +287,7 @@ async semantics (`wait: false`). Completion deadlines are replaced by
 within `delegation.liveness_timeout_seconds`; a stale child is cooperatively
 cancelled and settled `wedged` (new terminal status) — a wedged-child detector,
 not a wall-clock kill of healthy-but-slow work. The in-process registry becomes
-a cache over a persisted store (`<SABLE_HOME>/delegations/delegations.db`,
+a cache over a persisted store (`<TOASTER_LOOP_HOME>/delegations/delegations.db`,
 SQLite, schema v11 of the shared `store/db.py` conventions), so delegation state
 and undelivered inbox turns survive dashboard restarts; on startup, `running`
 records owned by the dead process reconcile to `interrupted` (never requeued —
@@ -340,7 +340,7 @@ payload rather than dropping work.
   deterministically and its spec'd use stays sync; MCP/CLI direct callers get
   async by default like the model-facing tool.
 - The dispatcher lives in the dashboard process (it owns chat-run startup).
-  CLI `sable run` without a dashboard still dispatches (threadless inbox: the
+  CLI `toaster-loop run` without a dashboard still dispatches (threadless inbox: the
   result is only reachable via `check_delegation`, and an explicit note says
   so) — same degradation rule as thread lineage today.
 Implementation spec: `plans/delegation-inbox.md` (phases, state machines,

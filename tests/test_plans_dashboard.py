@@ -6,21 +6,21 @@ import json
 
 import pytest
 
-from sable.core.agent_runner import AgentResult
-from sable.core.config import SableConfig
-from sable.dashboard.app import DashboardApp
+from toaster_loop.core.agent_runner import AgentResult
+from toaster_loop.core.config import ToasterLoopConfig
+from toaster_loop.dashboard.app import DashboardApp
 
 
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 def _app(home, plans_enabled=True):
-    cfg = SableConfig(plans={"enabled": True} if plans_enabled else {})
+    cfg = ToasterLoopConfig(plans={"enabled": True} if plans_enabled else {})
     return DashboardApp(cfg, home=home)
 
 
@@ -184,7 +184,7 @@ def test_start_creates_thread_run_in_progress(home, monkeypatch):
                                backend="stub", tokens_in=1, tokens_out=1,
                                trace_id=rec.trace_id if rec else None)
 
-    monkeypatch.setattr("sable.core.agent_runner.create_runner", StubRunner)
+    monkeypatch.setattr("toaster_loop.core.agent_runner.create_runner", StubRunner)
     app.handle("POST", "/api/plans/default", body={"op": "add",
                                                    "title": "ship it",
                                                    "description": "d"})
@@ -209,8 +209,8 @@ def test_start_creates_thread_run_in_progress(home, monkeypatch):
     assert "# Task t1: ship it" in first_user["content"]
 
     # trace stamped with plan_task both ways
-    from sable.store.db import TraceStore
-    store = TraceStore(home / "buffer" / "sable.db")
+    from toaster_loop.store.db import TraceStore
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     try:
         rows = store.list_traces()
         assert rows and all(rw.plan_task == "t1" for rw in rows)
@@ -227,7 +227,7 @@ def test_start_creates_thread_run_in_progress(home, monkeypatch):
 def test_loop_start_and_cancel_via_api(home, monkeypatch):
     import threading as _th
 
-    from sable.core import plan_loop as pl
+    from toaster_loop.core import plan_loop as pl
 
     _project(home)
     app = _app(home)
@@ -239,7 +239,7 @@ def test_loop_start_and_cancel_via_api(home, monkeypatch):
     def slow_run(prompt, task, profile):
         started.set()
         gate.wait(5)
-        from sable.core import plans as P
+        from toaster_loop.core import plans as P
         store = P.load_plan("proj-a")
         P.set_status(store, task["id"], "done")
         P.save_plan(store)

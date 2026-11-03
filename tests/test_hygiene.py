@@ -13,9 +13,9 @@ import ast
 import sys
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[1] / "sable"
+SRC = Path(__file__).resolve().parents[1] / "toaster_loop"
 
-# Third-party packages the sable source may import at all. Everything else
+# Third-party packages the toaster_loop source may import at all. Everything else
 # (outside stdlib) is an offender. Stdlib is derived from the running
 # interpreter; keep this list in sync with pyproject.toml dependencies.
 ALLOWED_THIRD_PARTY = {"yaml", "httpx", "PIL"}
@@ -55,12 +55,12 @@ def test_only_allowed_third_party_imports():
             for name in names:
                 root = _root(name)
                 if root in STDLIB or root in ALLOWED_THIRD_PARTY \
-                        or root in HEAVY or root.startswith("sable"):
+                        or root in HEAVY or root.startswith("toaster_loop"):
                     continue
                 lineno = getattr(node, "lineno", 0)
                 offenders.append(f"{py}:{lineno}: imports {name!r}")
     assert not offenders, (
-        "Unexpected third-party import(s); sable is self-contained "
+        "Unexpected third-party import(s); toaster_loop is self-contained "
         "(runtime deps: pyyaml + httpx + Pillow only):\n" + "\n".join(offenders))
 
 
@@ -99,7 +99,7 @@ def test_no_legacy_env_var():
     for py in SRC.rglob("*.py"):
         text = py.read_text()
         for i, line in enumerate(text.splitlines(), 1):
-            if legacy in line.upper() and "SABLE" not in line.upper():
+            if legacy in line.upper() and "TOASTER_LOOP" not in line.upper():
                 offenders.append(f"{py}:{i}")
     assert not offenders, f"Legacy env-var references: {offenders}"
 
@@ -114,9 +114,9 @@ import ast
 import pkgutil
 from pathlib import Path
 
-import sable
+import toaster_loop
 
-SRC = Path(str(sable.__file__)).resolve().parent
+SRC = Path(str(toaster_loop.__file__)).resolve().parent
 
 
 def _all_modules() -> dict[str, Path]:
@@ -126,12 +126,12 @@ def _all_modules() -> dict[str, Path]:
     files, never leaf modules — and license hygiene guarantees those are
     cheap). The actual graph below is built from raw source with ast.
     """
-    mods = {"sable": SRC / "__init__.py"}
-    for info in pkgutil.walk_packages([str(SRC)], prefix="sable.",
+    mods = {"toaster_loop": SRC / "__init__.py"}
+    for info in pkgutil.walk_packages([str(SRC)], prefix="toaster_loop.",
                                       onerror=lambda m: None):
         # walk_packages yields both modules and subpackages; resolve each to a
         # file path relative to the package root.
-        rel = info.name[len("sable."):].split(".")
+        rel = info.name[len("toaster_loop."):].split(".")
         path = SRC.joinpath(*rel)
         file = path / "__init__.py" if info.ispkg else path.with_suffix(".py")
         if file.exists():
@@ -145,7 +145,7 @@ def _pkg_of(module: str, is_pkg: bool) -> list[str]:
 
 
 def _mark_prefixes(name: str, imported: set[str], modules: dict[str, Path]) -> None:
-    """Mark `sable.a.b` and all of its parent packages as imported."""
+    """Mark `toaster_loop.a.b` and all of its parent packages as imported."""
     parts = name.split(".")
     for i in range(1, len(parts) + 1):
         prefix = ".".join(parts[:i])
@@ -161,7 +161,7 @@ def _build_graph(modules: dict[str, Path], is_pkg: set[str]) -> dict[str, set[st
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    if alias.name == "sable" or alias.name.startswith("sable."):
+                    if alias.name == "toaster_loop" or alias.name.startswith("toaster_loop."):
                         _mark_prefixes(alias.name, edges, modules)
             elif isinstance(node, ast.ImportFrom):
                 if node.level:  # relative: from . / ..core.x import y
@@ -181,11 +181,11 @@ def _build_graph(modules: dict[str, Path], is_pkg: set[str]) -> dict[str, set[st
                         if cand in modules:
                             _mark_prefixes(cand, edges, modules)
                 elif node.module and (
-                    node.module == "sable"
-                    or node.module.startswith("sable.")
+                    node.module == "toaster_loop"
+                    or node.module.startswith("toaster_loop.")
                 ):
                     _mark_prefixes(node.module, edges, modules)
-                    # `from sable.x import name` — name may be a submodule.
+                    # `from toaster_loop.x import name` — name may be a submodule.
                     for alias in node.names:
                         cand = f"{node.module}.{alias.name}"
                         if cand in modules:
@@ -194,21 +194,21 @@ def _build_graph(modules: dict[str, Path], is_pkg: set[str]) -> dict[str, set[st
 
 
 # Production entry points:
-#   - sable.cli        the `sable` console script (pyproject [project.scripts])
-#   - sable.__main__   `python -m sable`
-#   - sable.dashboard.server  started from cli.py (statically visible, listed
+#   - toaster_loop.cli        the `toaster_loop` console script (pyproject [project.scripts])
+#   - toaster_loop.__main__   `python -m toaster_loop`
+#   - toaster_loop.dashboard.server  started from cli.py (statically visible, listed
 #     anyway because it is an entry point by charter)
-#   - sable.training.worker   launched as a SUBPROCESS
-#     (`python -m sable.training.worker`, see training/scheduler.py) — the
+#   - toaster_loop.training.worker   launched as a SUBPROCESS
+#     (`python -m toaster_loop.training.worker`, see training/scheduler.py) — the
 #     static graph can never see this edge, so it is a root by declaration.
 # No importlib/__import__ usage exists in the package (grep-verified), so no
 # other dynamic targets are needed here.
 ROOTS = {
-    "sable",
-    "sable.cli",
-    "sable.__main__",
-    "sable.dashboard.server",
-    "sable.training.worker",
+    "toaster_loop",
+    "toaster_loop.cli",
+    "toaster_loop.__main__",
+    "toaster_loop.dashboard.server",
+    "toaster_loop.training.worker",
 }
 
 # Honest exemptions, kept minimal — every entry needs a reason. If a module

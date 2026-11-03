@@ -1,4 +1,4 @@
-"""WP12 plans: CLI round-trips (`sable plan ...`, run --plan-task)."""
+"""WP12 plans: CLI round-trips (`toaster_loop plan ...`, run --plan-task)."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ import json
 import pytest
 import yaml
 
-from sable.cli import main
+from toaster_loop.cli import main
 
 
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     """Config with plans enabled + an attach endpoint stub (fake server)."""
     home = tmp_path / "plan-home"
-    monkeypatch.setenv("SABLE_HOME", str(home))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
     cfg_file = tmp_path / "config.yaml"
     cfg_file.write_text(yaml.safe_dump({
         "home": str(home),
@@ -31,7 +31,7 @@ def _cli(cfg_file, *argv):
 
 def test_plan_commands_require_enabled(tmp_path, monkeypatch):
     home = tmp_path / "off-home"
-    monkeypatch.setenv("SABLE_HOME", str(home))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
     cfg_file = tmp_path / "off.yaml"
     cfg_file.write_text(yaml.safe_dump({"home": str(home)}))
     assert _cli(cfg_file, "plan", "list") == 1
@@ -158,11 +158,11 @@ def test_run_plan_task_seeds_prompt(env, monkeypatch, capsys):
 
         def run(self, msg, history=None):
             captured["msg"] = msg
-            from sable.core.agent_runner import AgentResult
+            from toaster_loop.core.agent_runner import AgentResult
             return AgentResult(final_response="ok", messages=[],
                                backend="stub", tokens_in=1, tokens_out=1)
 
-    monkeypatch.setattr("sable.cli.create_runner", StubRunner)
+    monkeypatch.setattr("toaster_loop.cli.create_runner", StubRunner)
     with FakeOpenAIServer() as fs:
         rc = main(["run", "--config", str(cfg), "--attach",
                    fs.base_url.rsplit("/v1", 1)[0], "--plan-task", "t1",
@@ -176,7 +176,7 @@ def test_run_plan_task_seeds_prompt(env, monkeypatch, capsys):
 
 def test_run_plan_task_requires_enabled(tmp_path, monkeypatch):
     home = tmp_path / "off2"
-    monkeypatch.setenv("SABLE_HOME", str(home))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
     cfg_file = tmp_path / "off2.yaml"
     cfg_file.write_text(yaml.safe_dump({"home": str(home)}))
     rc = main(["run", "--config", str(cfg_file),
@@ -204,10 +204,10 @@ def test_plan_loop_status_empty(env, capsys):
 
 
 def test_plan_loop_single_flight_conflict(env, monkeypatch, capsys):
-    """Second `sable plan loop` while one runs => conflict exit 1, no queue."""
+    """Second `toaster_loop plan loop` while one runs => conflict exit 1, no queue."""
     import threading
 
-    from sable.core import plan_loop as pl
+    from toaster_loop.core import plan_loop as pl
 
     _, cfg = env
     _cli(cfg, "plan", "add", "solo")
@@ -222,9 +222,9 @@ def test_plan_loop_single_flight_conflict(env, monkeypatch, capsys):
         return {"ok": False}
 
     monkeypatch.setattr(pl, "_default_run_fn", lambda cfg_, p: slow_run)
-    loop = pl.PlanLoop(__import__("sable.core.config",
-                                   fromlist=["SableConfig"]
-                                   ).SableConfig(plans={"enabled": True}),
+    loop = pl.PlanLoop(__import__("toaster_loop.core.config",
+                                   fromlist=["ToasterLoopConfig"]
+                                   ).ToasterLoopConfig(plans={"enabled": True}),
                        None, run_fn=slow_run).start()
     started.wait(5)
     try:

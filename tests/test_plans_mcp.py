@@ -15,8 +15,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from test_mcp import (FakeApp, FakeResponse, call_tool, init,  # noqa: E402
                       make_server, rpc)
 
-from sable.mcp.schema import MAX_ARRAY_ITEMS, validate_args
-from sable.mcp.tools import build_tools
+from toaster_loop.mcp.schema import MAX_ARRAY_ITEMS, validate_args
+from toaster_loop.mcp.tools import build_tools
 
 PLAN_TOOLS = {"plans_list", "plan_loop_status", "projects_list", "plan_add",
               "plan_update", "plan_set_status", "plan_depends",
@@ -35,7 +35,7 @@ class _Cfg:
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
@@ -269,7 +269,7 @@ def test_ttl_expiry_with_injected_clock(home):
     now = [1000.0]
     app = FakeApp(home)
     app.cfg = _Cfg({"enabled": True})
-    from sable.mcp.server import McpServer
+    from toaster_loop.mcp.server import McpServer
 
     srv = McpServer(app=app, ttl_s=60.0, clock=lambda: now[0])
     init(srv)

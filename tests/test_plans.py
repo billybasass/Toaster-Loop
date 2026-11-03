@@ -1,6 +1,6 @@
 """WP12 plans: core store + DAG logic (core/plans.py).
 
-Hermetic: every helper passes an explicit tmp `home`; the autouse SABLE_HOME
+Hermetic: every helper passes an explicit tmp `home`; the autouse TOASTER_LOOP_HOME
 fixture in conftest.py keeps stray resolution out of the real home.
 """
 
@@ -11,7 +11,7 @@ import threading
 
 import pytest
 
-from sable.core.plans import (PlanError, add_dependency, add_task,
+from toaster_loop.core.plans import (PlanError, add_dependency, add_task,
                               blockers, build_task_prompt, counts,
                               find_cycles, get_task, load_plan, next_task,
                               next_task_id, plan_path, ready, record_run,
@@ -21,7 +21,7 @@ from sable.core.plans import (PlanError, add_dependency, add_task,
 
 @pytest.fixture()
 def home(tmp_path):
-    h = tmp_path / "sable-home"
+    h = tmp_path / "toaster_loop-home"
     h.mkdir()
     return h
 
@@ -113,7 +113,7 @@ def test_two_threads_add_loses_nothing(home):
     def same(n):
         start2.wait()
         for i in range(10):
-            with __import__("sable.core.plans", fromlist=["_LOCK"])._LOCK:
+            with __import__("toaster_loop.core.plans", fromlist=["_LOCK"])._LOCK:
                 store = load_plan("shared", home=home)
                 _add(store, f"s{n}-{i}")
                 save_plan(store, home=home)

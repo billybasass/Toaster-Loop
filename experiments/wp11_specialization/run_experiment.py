@@ -3,7 +3,7 @@
 Protocol (docs/SPECIALIZATION-WP11.md):
 
   1. Fabricate the experience buffer through the REAL TraceRecorder into a
-     throwaway SABLE_HOME under a tmpdir (NEVER the developer's ~/.sable),
+     throwaway TOASTER_LOOP_HOME under a tmpdir (NEVER the developer's ~/.toaster-loop),
      read calibration prompts back out of the buffer, map them to tasks.
   2. Two optimization regimes are measured (both real, reported separately):
        full    — train to convergence (production-realistic; ceiling risk)
@@ -116,8 +116,8 @@ def run_regime(name: str, steps: int, replicates: int,
             "replicates": replicates,
             "paired": True,
             "eval": "downstream golden suite via "
-                    "sable.training.validate._check_task (substring)",
-            "calibration_source": "sable experience buffer (TraceRecorder "
+                    "toaster_loop.training.validate._check_task (substring)",
+            "calibration_source": "toaster_loop experience buffer (TraceRecorder "
                                   "-> JSONL+index -> read back)",
             "noise_floor_method": floor["method"],
             "persisted_bench_noise_floor": persisted,
@@ -132,9 +132,9 @@ def run_regime(name: str, steps: int, replicates: int,
 def run_experiment(replicates: int = DEFAULT_REPLICATES,
                    regimes: Dict[str, int] | None = None,
                    verbose: bool = True) -> Dict[str, Any]:
-    tmp_home = Path(tempfile.mkdtemp(prefix="wp11-sable-home-"))
-    os.environ["SABLE_HOME"] = str(tmp_home)  # belt & braces: buffer never
-    os.environ.pop("SABLE_BENCH_DIR", None)   # lands in the real ~ dir
+    tmp_home = Path(tempfile.mkdtemp(prefix="wp11-toaster_loop-home-"))
+    os.environ["TOASTER_LOOP_HOME"] = str(tmp_home)  # belt & braces: buffer never
+    os.environ.pop("TOASTER_LOOP_BENCH_DIR", None)   # lands in the real ~ dir
 
     try:
         splits = split_tasks()

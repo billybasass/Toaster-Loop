@@ -19,15 +19,15 @@ import time
 
 import pytest
 
-from sable.core import delegation, delegation_store
-from sable.core.config import SableConfig
+from toaster_loop.core import delegation, delegation_store
+from toaster_loop.core.config import ToasterLoopConfig
 
 
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "home"
     h.mkdir()
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
@@ -40,8 +40,8 @@ def _clean(home):
     delegation.register_child_run_bridge(None)
 
 
-def _cfg(**kw) -> SableConfig:
-    cfg = SableConfig(**kw)
+def _cfg(**kw) -> ToasterLoopConfig:
+    cfg = ToasterLoopConfig(**kw)
     cfg.profiles = [{"name": "coder", "system_prompt": "code",
                      "tools": ["read_file"]}]
     return cfg
@@ -65,9 +65,9 @@ def _wait_until(fn, timeout=5.0):
 @pytest.fixture()
 def dash(home):
     """DashboardApp (registers the child-run bridge in __init__)."""
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
-    return DashboardApp(SableConfig(), home=home)
+    return DashboardApp(ToasterLoopConfig(), home=home)
 
 
 def _sse(text: str):

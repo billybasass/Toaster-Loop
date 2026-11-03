@@ -18,11 +18,11 @@ import pytest
 
 from fake_server import FakeOpenAIServer  # noqa: E402
 
-from sable.core.agent_runner import (  # noqa: E402
-    SableAgentClient,
+from toaster_loop.core.agent_runner import (  # noqa: E402
+    ToasterLoopAgentClient,
 )
-from sable.core.config import SableConfig, load_config  # noqa: E402
-from sable.serving.supervisor import (  # noqa: E402
+from toaster_loop.core.config import ToasterLoopConfig, load_config  # noqa: E402
+from toaster_loop.serving.supervisor import (  # noqa: E402
     ServeError,
     ServingSupervisor,
     healthcheck,
@@ -40,8 +40,8 @@ def fake_server():
 def test_config_env_overrides_file(tmp_path, monkeypatch):
     cfg_file = tmp_path / "cfg.yaml"
     cfg_file.write_text("port: 1234\ncontext_length: 32768\ngguf_path: /x/model.gguf\n")
-    monkeypatch.setenv("SABLE_PORT", "9999")  # env wins over file
-    monkeypatch.delenv("SABLE_GGUF", raising=False)
+    monkeypatch.setenv("TOASTER_LOOP_PORT", "9999")  # env wins over file
+    monkeypatch.delenv("TOASTER_LOOP_GGUF", raising=False)
     cfg = load_config(str(cfg_file))
     assert cfg.port == 9999
     assert cfg.context_length == 32768
@@ -50,9 +50,9 @@ def test_config_env_overrides_file(tmp_path, monkeypatch):
 
 
 def test_attach_url_normalization():
-    cfg = SableConfig(attach_url="http://127.0.0.1:8888")
+    cfg = ToasterLoopConfig(attach_url="http://127.0.0.1:8888")
     assert cfg.effective_attach_url == "http://127.0.0.1:8888/v1"
-    cfg2 = SableConfig(attach_url="http://127.0.0.1:8888/v1")
+    cfg2 = ToasterLoopConfig(attach_url="http://127.0.0.1:8888/v1")
     assert cfg2.effective_attach_url == "http://127.0.0.1:8888/v1"
 
 
@@ -64,7 +64,7 @@ def test_healthcheck(fake_server):
 
 
 def test_supervisor_attach_no_spawn(fake_server):
-    cfg = SableConfig(attach_url=fake_server.base_url)
+    cfg = ToasterLoopConfig(attach_url=fake_server.base_url)
     sup = ServingSupervisor(cfg)
     handle = sup.attach()
     try:
@@ -76,13 +76,13 @@ def test_supervisor_attach_no_spawn(fake_server):
 
 
 def test_supervisor_spawn_requires_gguf():
-    cfg = SableConfig(gguf_path=None)
+    cfg = ToasterLoopConfig(gguf_path=None)
     with pytest.raises(ServeError):
         ServingSupervisor(cfg).start(ready_timeout=1)
 
 
 def test_supervisor_spawn_missing_gguf_file(tmp_path):
-    cfg = SableConfig(gguf_path=str(tmp_path / "nope.gguf"))
+    cfg = ToasterLoopConfig(gguf_path=str(tmp_path / "nope.gguf"))
     with pytest.raises(ServeError):
         ServingSupervisor(cfg).start(ready_timeout=1)
 
@@ -91,10 +91,10 @@ def test_supervisor_spawn_missing_gguf_file(tmp_path):
 
 def test_agent_tool_call_roundtrip(fake_server, tmp_path):
     """Agent loop reaches chat completion and completes a tool-call round trip."""
-    client = SableAgentClient(base_url=fake_server.base_url, model="fake-model")
+    client = ToasterLoopAgentClient(base_url=fake_server.base_url, model="fake-model")
     result = client.run("read the fake server source")
     assert result.completed is True
-    assert result.backend == "sable"
+    assert result.backend == "toaster_loop"
     # Sequence must include: assistant tool_call -> tool result -> final answer.
     roles = [m.get("role") for m in result.messages]
     assert "tool" in roles
@@ -108,8 +108,8 @@ def test_agent_connection_error_not_hang(monkeypatch):
     returns a completed=False result carrying failure_reason instead of
     raising; the retry sleeps are stubbed so the test stays quick.
     """
-    monkeypatch.setattr(SableAgentClient, "_sleep", staticmethod(lambda s: None))
-    client = SableAgentClient(
+    monkeypatch.setattr(ToasterLoopAgentClient, "_sleep", staticmethod(lambda s: None))
+    client = ToasterLoopAgentClient(
         base_url="http://127.0.0.1:9/v1", model="m", timeout=2.0
     )
     result = client.run("hello")
@@ -121,22 +121,22 @@ def test_agent_connection_error_not_hang(monkeypatch):
 
 def test_create_runner_returns_builtin(fake_server):
     """create_runner returns the built-in runtime with no external deps."""
-    from sable.core.agent_runner import create_runner
+    from toaster_loop.core.agent_runner import create_runner
 
-    cfg = SableConfig()
+    cfg = ToasterLoopConfig()
     runner = create_runner(cfg, fake_server.base_url, "fake-model")
-    assert runner.name == "sable"
+    assert runner.name == "toaster_loop"
     result = runner.run("read the fake server file")
     assert result.completed is True
     assert "Done." in result.final_response
-    assert result.backend == "sable"
+    assert result.backend == "toaster_loop"
 
 
 def test_profile_tool_subset_enforced():
     """enabled_tool_names restricts the exposed schemas/impls."""
-    from sable.core.agent_runner import create_runner
+    from toaster_loop.core.agent_runner import create_runner
 
-    runner = create_runner(SableConfig(), "http://127.0.0.1:9/v1", "m",
+    runner = create_runner(ToasterLoopConfig(), "http://127.0.0.1:9/v1", "m",
                            enabled_tool_names=["list_dir"])
     names = {s["function"]["name"] for s in runner.tools}
     assert names == {"list_dir"}
@@ -154,12 +154,12 @@ import pytest
 import yaml
 
 
-from sable.core.exitcodes import (  # noqa: E402
+from toaster_loop.core.exitcodes import (  # noqa: E402
     EXIT_CONFIG_INVALID,
     EXIT_CORRUPT_ARTIFACT,
     EXIT_OK,
 )
-from sable.training.integrity import (  # noqa: E402
+from toaster_loop.training.integrity import (  # noqa: E402
     check_gguf_file,
     export_integrity_problems,
     find_nan_losses,
@@ -265,7 +265,7 @@ emit("done")
 @pytest.fixture()
 def env(tmp_path, monkeypatch):
     home = tmp_path / "uf-exitcodes"
-    monkeypatch.setenv("SABLE_HOME", str(home))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
     stub = tmp_path / "stub.py"
     stub.write_text(_STUB_BASE)
     cfg_file = home.parent / "config.yaml"
@@ -290,7 +290,7 @@ def _seed_dataset(home, ds_id: str):
 
 
 def _iterate_args(cfg_file, tmp_path):
-    from sable.cli import build_parser
+    from toaster_loop.cli import build_parser
 
     return build_parser().parse_args([
         "iterate", "--config", str(cfg_file), "--dry-run",
@@ -300,9 +300,9 @@ def _iterate_args(cfg_file, tmp_path):
 # ---------------------------------------------------------------- CLI: code 3
 
 def test_invalid_config_exits_3_with_consolidated_report(env, capsys):
-    """`sable.main()` on an invalid --config exits 3 and prints EVERY
+    """`toaster_loop.main()` on an invalid --config exits 3 and prints EVERY
     problem field to stderr in one listing."""
-    from sable.cli import main
+    from toaster_loop.cli import main
 
     bad = env[0].parent / "bad.yaml"
     bad.write_text(yaml.safe_dump({
@@ -317,7 +317,7 @@ def test_invalid_config_exits_3_with_consolidated_report(env, capsys):
 
 
 def test_missing_config_file_exits_3(env, capsys):
-    from sable.cli import main
+    from toaster_loop.cli import main
 
     rc = main(["traces", "list",
                "--config", str(env[0] / "does-not-exist.yaml")])
@@ -327,7 +327,7 @@ def test_missing_config_file_exits_3(env, capsys):
 
 def test_valid_config_still_exits_0(env, capsys):
     """Successful observable path unchanged: valid config -> exit 0."""
-    from sable.cli import main
+    from toaster_loop.cli import main
 
     _seed_dataset(env[0], "ds-ok")
     rc = main(["train", "start", "--config", str(env[1]),
@@ -339,7 +339,7 @@ def test_valid_config_still_exits_0(env, capsys):
 
 def test_train_start_nan_loss_exits_4(env, monkeypatch, capsys):
     """Worker exits 0 but records NaN train_loss -> exit 4 (corrupt)."""
-    from sable.cli import build_parser, cmd_train_start
+    from toaster_loop.cli import build_parser, cmd_train_start
 
     _seed_dataset(env[0], "ds-nan")
     monkeypatch.setenv("STUB_NAN_LOSS", "1")
@@ -351,7 +351,7 @@ def test_train_start_nan_loss_exits_4(env, monkeypatch, capsys):
 
 
 def test_train_start_clean_still_zero(env):
-    from sable.cli import build_parser, cmd_train_start
+    from toaster_loop.cli import build_parser, cmd_train_start
 
     _seed_dataset(env[0], "ds-clean")
     args = build_parser().parse_args([
@@ -364,7 +364,7 @@ def test_iterate_corrupt_export_exits_4(env, monkeypatch):
     flags res.corrupt and cmd_iterate exits with code 4."""
     import os
 
-    from sable.cli import build_parser, cmd_iterate
+    from toaster_loop.cli import build_parser, cmd_iterate
 
     _seed_dataset(env[0], "ds-bad")
     # seed traces so curate produces a dataset on its own is complex; reuse
@@ -382,7 +382,7 @@ def test_iterate_corrupt_export_exits_4(env, monkeypatch):
 def test_iterate_empty_export_exits_4(env, monkeypatch):
     import os
 
-    from sable.cli import build_parser, cmd_iterate
+    from toaster_loop.cli import build_parser, cmd_iterate
 
     _seed_dataset(env[0], "ds-empty")
     monkeypatch.setenv("STUB_EXPORT_MODE", "empty")
@@ -398,7 +398,7 @@ def test_iterate_good_export_still_zero(env):
     """A sound GGUF keeps the historical success path (the validation stage
     may fail without a server starter — what matters is that we do NOT exit
     with the corrupt code)."""
-    from sable.cli import build_parser, cmd_iterate
+    from toaster_loop.cli import build_parser, cmd_iterate
 
     _seed_dataset(env[0], "ds-good")
     args = build_parser().parse_args([
@@ -409,7 +409,7 @@ def test_iterate_good_export_still_zero(env):
 
 def test_taxonomy_no_collisions():
     """The finalized table: established codes untouched, new ones distinct."""
-    from sable.core import exitcodes as ec
+    from toaster_loop.core import exitcodes as ec
 
     vals = [ec.EXIT_OK, ec.EXIT_ERROR, ec.EXIT_USAGE, ec.EXIT_CONFIG_INVALID,
             ec.EXIT_CORRUPT_ARTIFACT, ec.EXIT_UPDATE_AVAILABLE,
@@ -433,8 +433,8 @@ import pytest
 
 
 from fake_server import FakeOpenAIServer, make_scripted_handler  # noqa: E402
-from sable.registry import ModelRegistry  # noqa: E402
-from sable.training.validate import (  # noqa: E402
+from toaster_loop.registry import ModelRegistry  # noqa: E402
+from toaster_loop.training.validate import (  # noqa: E402
     ValidationConfig,
     run_golden_suite,
     validate_model,
@@ -683,9 +683,9 @@ from pathlib import Path
 import pytest
 
 
-from sable.core.agent_runner import SableAgentClient, create_runner
-from sable.core.config import SableConfig
-from sable.core.tools import (
+from toaster_loop.core.agent_runner import ToasterLoopAgentClient, create_runner
+from toaster_loop.core.config import ToasterLoopConfig
+from toaster_loop.core.tools import (
     CAPABILITY_TOOLS,
     resolve_capabilities,
     run_command,
@@ -715,12 +715,12 @@ def test_capabilities_unknown_keys_ignored():
 
 # ------------------------------------------------------------- runner gate
 
-def _tool_names(client: SableAgentClient):
+def _tool_names(client: ToasterLoopAgentClient):
     return {s.get("function", {}).get("name") for s in client.tools}
 
 
 def test_default_runner_exposes_no_capability_tools():
-    client = SableAgentClient(base_url="http://127.0.0.1:1/v1", model="m")
+    client = ToasterLoopAgentClient(base_url="http://127.0.0.1:1/v1", model="m")
     names = _tool_names(client)
     assert "web_fetch" not in names and "run_command" not in names
     assert "read_file" in names  # sanity: the normal set is intact
@@ -729,7 +729,7 @@ def test_default_runner_exposes_no_capability_tools():
 
 
 def test_capability_enabled_exposes_schema_and_impl():
-    client = SableAgentClient(
+    client = ToasterLoopAgentClient(
         base_url="http://127.0.0.1:1/v1", model="m",
         capabilities={"internet": True, "run_commands": False})
     names = _tool_names(client)
@@ -741,14 +741,14 @@ def test_capability_enabled_exposes_schema_and_impl():
 
 def test_capability_tool_honors_profile_tool_subset():
     # Profile lists web_fetch but the capability is OFF => still not exposed.
-    client = SableAgentClient(
+    client = ToasterLoopAgentClient(
         base_url="http://127.0.0.1:1/v1", model="m",
         enabled_tool_names=["read_file", "web_fetch"])
     assert "web_fetch" not in _tool_names(client)
     assert "web_fetch" not in client.tool_impls
 
     # Capability ON grants the tool even when the subset does not list it.
-    client = SableAgentClient(
+    client = ToasterLoopAgentClient(
         base_url="http://127.0.0.1:1/v1", model="m",
         enabled_tool_names=["read_file"],
         capabilities={"internet": True})
@@ -759,7 +759,7 @@ def test_capability_tool_honors_profile_tool_subset():
 
 
 def test_create_runner_merges_global_and_profile_capabilities():
-    cfg = SableConfig(agent={"capabilities": {"internet": True}})
+    cfg = ToasterLoopConfig(agent={"capabilities": {"internet": True}})
     runner = create_runner(cfg, base_url="http://127.0.0.1:1/v1", model="m")
     assert "web_fetch" in _tool_names(runner)
 
@@ -771,7 +771,7 @@ def test_create_runner_merges_global_and_profile_capabilities():
 
 
 def test_create_runner_web_fetch_config_binds():
-    cfg = SableConfig(tools={"web_fetch": {"allow_private_networks": True}})
+    cfg = ToasterLoopConfig(tools={"web_fetch": {"allow_private_networks": True}})
     runner = create_runner(cfg, base_url="http://127.0.0.1:1/v1", model="m",
                            capabilities={"internet": True})
     impl = runner.tool_impls["web_fetch"]
@@ -823,9 +823,9 @@ def test_run_command_rejects_empty():
 # --------------------------------------------------- dashboard profiles API
 
 def _app(home):
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.dashboard.app import DashboardApp
 
-    return DashboardApp(SableConfig(), home=home)
+    return DashboardApp(ToasterLoopConfig(), home=home)
 
 
 def test_profiles_api_validates_and_persists_capabilities(tmp_path):
@@ -868,13 +868,13 @@ def test_profiles_api_rejects_non_dict_capabilities(tmp_path):
 def test_profile_capabilities_survive_config_roundtrip(tmp_path):
     import yaml
 
-    from sable.core.config import load_config
+    from toaster_loop.core.config import load_config
 
     app = _app(str(tmp_path))
     app.handle("PUT", "/api/profiles/webkit", body={
         "system_prompt": "s", "tools": [],
         "capabilities": {"internet": True}})
-    cfg_file = Path(str(tmp_path)) / "sable.yaml"
+    cfg_file = Path(str(tmp_path)) / "toaster_loop.yaml"
     assert cfg_file.is_file()
     data = yaml.safe_load(cfg_file.read_text())
     prof = next(p for p in data["profiles"] if p["name"] == "webkit")
@@ -891,8 +891,8 @@ def test_profile_capabilities_survive_config_roundtrip(tmp_path):
 
 def test_delegation_child_inherits_profile_capabilities(tmp_path, monkeypatch):
     """_run_child passes the CHILD profile's capabilities into create_runner."""
-    from sable.core import delegation as deleg
-    from sable.core.agent_runner import create_runner as real_create
+    from toaster_loop.core import delegation as deleg
+    from toaster_loop.core.agent_runner import create_runner as real_create
 
     seen: dict = {}
 
@@ -900,8 +900,8 @@ def test_delegation_child_inherits_profile_capabilities(tmp_path, monkeypatch):
         seen["capabilities"] = kw.get("capabilities")
         raise RuntimeError("stop-after-spy")
 
-    monkeypatch.setattr("sable.core.agent_runner.create_runner", spy)
-    cfg = SableConfig(profiles=[{
+    monkeypatch.setattr("toaster_loop.core.agent_runner.create_runner", spy)
+    cfg = ToasterLoopConfig(profiles=[{
         "name": "surf", "tools": [], "capabilities": {"internet": True}}])
     with pytest.raises(RuntimeError, match="stop-after-spy"):
         deleg._run_child(cfg, cfg.profiles[0], "task", {"base_url": "u"},
@@ -921,15 +921,15 @@ from pathlib import Path
 import pytest
 
 
-from sable.core.config import SableConfig  # noqa: E402
-from sable.dashboard.app import DashboardApp  # noqa: E402
-from sable.dashboard.metrics import (  # noqa: E402
+from toaster_loop.core.config import ToasterLoopConfig  # noqa: E402
+from toaster_loop.dashboard.app import DashboardApp  # noqa: E402
+from toaster_loop.dashboard.metrics import (  # noqa: E402
     liveness_strength,
     promotion_denominator,
     score_coverage,
 )
-from sable.registry import ModelRegistry  # noqa: E402
-from sable.store.db import TraceRow, TraceStore  # noqa: E402
+from toaster_loop.registry import ModelRegistry  # noqa: E402
+from toaster_loop.store.db import TraceRow, TraceStore  # noqa: E402
 
 
 # ---------------------------------------------------------------- pure helpers
@@ -958,18 +958,18 @@ def test_liveness_strength():
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "uf-cli"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
 @pytest.fixture()
 def app(home):
-    return DashboardApp(SableConfig(), home=home)
+    return DashboardApp(ToasterLoopConfig(), home=home)
 
 
 def _seed(home):
     """4 traces, only 1 scored; 1 promote op (rate would read 100%)."""
-    store = TraceStore(Path(home) / "buffer" / "sable.db")
+    store = TraceStore(Path(home) / "buffer" / "toaster_loop.db")
     for i, score in enumerate((0.5, None, None, None)):
         tid = f"h{i}"
         p = Path(store.db_path).parent / f"{tid}.jsonl"
@@ -983,7 +983,7 @@ def _seed(home):
             outcome_score=score, num_tool_calls=0, tokens_in=1,
             tokens_out=1, duration_s=1.0, jsonl_path=str(p)))
     store.close()
-    reg = ModelRegistry(Path(home) / "buffer" / "sable.db")
+    reg = ModelRegistry(Path(home) / "buffer" / "toaster_loop.db")
     m = reg.register_model("base-a")
     reg.set_validation(m.model_id, {"ok": True}, passed=True)
     reg.promote(m.model_id)  # single decision -> pass rate would say 100%
@@ -1004,19 +1004,19 @@ def test_metrics_endpoint_exposes_both_variants(app, home):
     text = resp.raw.decode("utf-8")
 
     # pair 1: score mean (rate) + its raw denominator + coverage ratio
-    assert _sample(text, "sable_outcome_score_mean") is not None
-    assert _sample(text, "sable_traces_scored_total") == "1"
-    cov = _sample(text, "sable_score_coverage_ratio")
+    assert _sample(text, "toaster_loop_outcome_score_mean") is not None
+    assert _sample(text, "toaster_loop_traces_scored_total") == "1"
+    cov = _sample(text, "toaster_loop_score_coverage_ratio")
     assert cov is not None and abs(float(cov) - 0.25) < 1e-9
 
     # pair 2: promotion pass RATE + its raw decision count (1/1 decisions)
-    rate = _sample(text, "sable_promotion_pass_rate")
+    rate = _sample(text, "toaster_loop_promotion_pass_rate")
     assert rate is not None and abs(float(rate) - 1.0) < 1e-9
-    assert _sample(text, "sable_promotion_decisions_total") == "1"
+    assert _sample(text, "toaster_loop_promotion_decisions_total") == "1"
 
     # pair 3: instance liveness + evidence strength split
-    assert "sable_instances_up{id=" in text
-    assert 'sable_instance_up_strength{id="default",strength=' in text
+    assert "toaster_loop_instances_up{id=" in text
+    assert 'toaster_loop_instance_up_strength{id="default",strength=' in text
 
 
 def test_metrics_empty_home_still_valid(app):
@@ -1024,11 +1024,11 @@ def test_metrics_empty_home_still_valid(app):
     valid and the counters exist at zero."""
     resp = app.handle("GET", "/api/metrics", query={"refresh": "1"})
     text = resp.raw.decode("utf-8")
-    assert "sable_score_coverage_ratio " not in text
-    assert _sample(text, "sable_traces_scored_total") == "0"
+    assert "toaster_loop_score_coverage_ratio " not in text
+    assert _sample(text, "toaster_loop_traces_scored_total") == "0"
     # promotion rate AND its denominator are honest-absent with zero decisions
-    assert "sable_promotion_pass_rate " not in text
-    assert "sable_promotion_decisions_total " not in text
+    assert "toaster_loop_promotion_pass_rate " not in text
+    assert "toaster_loop_promotion_decisions_total " not in text
 
 
 def test_status_endpoint_carries_scored_denominator(app, home):
@@ -1051,9 +1051,9 @@ from pathlib import Path
 import pytest
 
 
-from sable.core.config import SableConfig, load_config  # noqa: E402
-from sable.core import indexer as ix  # noqa: E402
-from sable.dashboard.app import DashboardApp  # noqa: E402
+from toaster_loop.core.config import ToasterLoopConfig, load_config  # noqa: E402
+from toaster_loop.core import indexer as ix  # noqa: E402
+from toaster_loop.dashboard.app import DashboardApp  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -1141,7 +1141,7 @@ def test_auto_retrieve_threshold_stripped(tmp_path, monkeypatch):
     p = tmp_path / "cfg.yaml"
     p.write_text("indexing:\n  enabled: true\n"
                  "  auto_retrieve_threshold: 0.7\n")
-    monkeypatch.setenv("SABLE_CONFIG", str(p))
+    monkeypatch.setenv("TOASTER_LOOP_CONFIG", str(p))
     cfg = load_config()
     assert "auto_retrieve_threshold" not in cfg.indexing
     assert cfg.indexing.get("enabled") is True
@@ -1200,7 +1200,7 @@ def test_fs_read_sensitive_and_traversal(app, workspace):
 
 
 def test_fs_read_size_truncation(app, workspace, monkeypatch):
-    import sable.dashboard.api.fsbrowse as fsbrowse_mod
+    import toaster_loop.dashboard.api.fsbrowse as fsbrowse_mod
     monkeypatch.setattr(fsbrowse_mod, "FS_READ_MAX_CHARS", 10)
     # between the char cap and the hard size gate (10 < 30 <= 40 bytes) so
     # the content-level truncation branch runs rather than the metadata-only one
@@ -1220,7 +1220,7 @@ def test_fs_tree_truncated_flag(app, tmp_path, monkeypatch):
     # cap slice, making the exact entry count layout-dependent)
     ws = tmp_path / "ws-cap"
     ws.mkdir()
-    import sable.dashboard.api.fsbrowse as fsbrowse_mod
+    import toaster_loop.dashboard.api.fsbrowse as fsbrowse_mod
     monkeypatch.setattr(fsbrowse_mod, "FS_TREE_MAX_ENTRIES", 2)
     for n in range(10):
         (ws / f"n{n}.txt").write_text("x")
@@ -1289,7 +1289,7 @@ def test_search_clears_stale_last_error(home):
 # ------------------------------------------- 10. search_codebase top_k
 
 def test_search_codebase_schema_has_no_top_k():
-    from sable.core.tools import TOOL_SCHEMAS
+    from toaster_loop.core.tools import TOOL_SCHEMAS
 
     sc = next(s for s in TOOL_SCHEMAS
               if s.get("function", {}).get("name") == "search_codebase")
@@ -1308,10 +1308,10 @@ from pathlib import Path
 import pytest
 
 
-from sable.registry import ModelRegistry  # noqa: E402
-from sable.registry.registry import RegistryError  # noqa: E402
-from sable.training.pipeline import parse_worker_rank_history  # noqa: E402
-from sable.training.worker import (  # noqa: E402
+from toaster_loop.registry import ModelRegistry  # noqa: E402
+from toaster_loop.registry.registry import RegistryError  # noqa: E402
+from toaster_loop.training.pipeline import parse_worker_rank_history  # noqa: E402
+from toaster_loop.training.worker import (  # noqa: E402
     RankScaler,
     rank_scaling_from_config,
 )
@@ -1319,7 +1319,7 @@ from sable.training.worker import (  # noqa: E402
 
 @pytest.fixture()
 def registry(home):
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     yield reg
     reg.close()
 
@@ -1394,7 +1394,7 @@ def test_legacy_db_migration_adds_column(home):
     """Pre-#43 jobs table (no depends_on_json) upgrades in place."""
     import sqlite3
 
-    db = home / "buffer" / "sable.db"
+    db = home / "buffer" / "toaster_loop.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db)
     conn.executescript(
@@ -1463,7 +1463,7 @@ def stub(tmp_path):
 
 
 def test_run_job_refuses_blocked_job(registry, stub):
-    from sable.training.scheduler import Scheduler, SchedulerError, TrainingConfig
+    from toaster_loop.training.scheduler import Scheduler, SchedulerError, TrainingConfig
 
     sched = Scheduler(registry=registry, cfg=TrainingConfig(),
                       worker_command=[sys.executable, stub])
@@ -1479,7 +1479,7 @@ def test_run_job_refuses_blocked_job(registry, stub):
 
 
 def test_run_pending_respects_edges(registry, stub):
-    from sable.training.scheduler import Scheduler, TrainingConfig
+    from toaster_loop.training.scheduler import Scheduler, TrainingConfig
 
     sched = Scheduler(registry=registry, cfg=TrainingConfig(),
                       worker_command=[sys.executable, stub])
@@ -1581,14 +1581,14 @@ from pathlib import Path
 import pytest
 
 
-from sable.core import modelhub  # noqa: E402
-from sable.core.config import SableConfig  # noqa: E402
-from sable.core.modelhub import (  # noqa: E402
+from toaster_loop.core import modelhub  # noqa: E402
+from toaster_loop.core.config import ToasterLoopConfig  # noqa: E402
+from toaster_loop.core.modelhub import (  # noqa: E402
     HubError,
     ModelHub,
     validate_repo_id,
 )
-from sable.dashboard.app import DashboardApp  # noqa: E402
+from toaster_loop.dashboard.app import DashboardApp  # noqa: E402
 
 # ------------------------------------------------------------- fake hub API
 
@@ -1960,7 +1960,7 @@ def test_download_sync_writes_hub_layout(hub_server, hub):
     assert job.state == "done", job.error
     snap = hub.base_dir() / "models--testorg--Test-GGUF" / "snapshots" / REPO_SHA
     assert (snap / "Q8_0" / "model.gguf").read_bytes() == b"x" * 7
-    assert (snap / "sable_download.json").is_file()
+    assert (snap / "toaster_loop_download.json").is_file()
     assert (hub.base_dir() / "models--testorg--Test-GGUF" / "refs" / "main"
             ).read_text().strip() == REPO_SHA
 
@@ -2082,7 +2082,7 @@ def test_delete_missing_repo(hub):
 
 def test_base_dir_fallback_to_home(tmp_path, monkeypatch):
     # No explicit dir + no existing HF cache anywhere => <home>/models.
-    monkeypatch.delenv("SABLE_MODELS_DIR", raising=False)
+    monkeypatch.delenv("TOASTER_LOOP_MODELS_DIR", raising=False)
     monkeypatch.setenv("HF_HOME", str(tmp_path / "nope"))  # nonexistent
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     h = ModelHub(models_dir=None, home=tmp_path / "home")
@@ -2101,8 +2101,8 @@ def test_explicit_missing_models_dir_is_kept(tmp_path):
 
 @pytest.fixture()
 def hub_app(tmp_path, hub_server):
-    cfg = SableConfig(models_dir=str(tmp_path / "models"))
-    return DashboardApp(cfg, home=tmp_path / ".sable")
+    cfg = ToasterLoopConfig(models_dir=str(tmp_path / "models"))
+    return DashboardApp(cfg, home=tmp_path / ".toaster-loop")
 
 
 def test_dashboard_hub_routes(hub_app):
@@ -2153,8 +2153,8 @@ def test_dashboard_hub_detail_and_feed_routes(hub_app):
 
 
 def test_hub_image_proxy_and_card_image(hub_server, hub):
-    from sable.core.modelhub import HubError as _HE
-    from sable.core.modelhub import _first_card_image, fetch_image
+    from toaster_loop.core.modelhub import HubError as _HE
+    from toaster_loop.core.modelhub import _first_card_image, fetch_image
 
     # Repo-relative path fetched through the configured endpoint.
     data, ctype = fetch_image(repo_id="testorg/Test-GGUF", path="a.png")
@@ -2200,7 +2200,7 @@ def test_dashboard_hub_errors(hub_app):
 # ------------------------------------------------------------- kinds: datasets
 
 def test_normalize_kind():
-    from sable.core.modelhub import normalize_kind
+    from toaster_loop.core.modelhub import normalize_kind
 
     assert normalize_kind("") == "models"
     assert normalize_kind("model") == "models"
@@ -2298,7 +2298,7 @@ def test_dashboard_hub_kind_routes(hub_app):
 # ------------------------------------------------------------- PulseMCP dir
 
 def test_mcp_dir_requires_key(monkeypatch):
-    from sable.core.modelhub import HubError as _HE, search_mcp_dir
+    from toaster_loop.core.modelhub import HubError as _HE, search_mcp_dir
 
     monkeypatch.delenv("PULSEMCP_API_KEY", raising=False)
     with pytest.raises(_HE, match="PULSEMCP_API_KEY"):
@@ -2308,7 +2308,7 @@ def test_mcp_dir_requires_key(monkeypatch):
 def test_mcp_dir_search_and_detail(monkeypatch):
     import httpx
 
-    from sable.core.modelhub import mcp_dir_detail, search_mcp_dir
+    from toaster_loop.core.modelhub import mcp_dir_detail, search_mcp_dir
 
     monkeypatch.setenv("PULSEMCP_API_KEY", "test-key")
     seen = {}
@@ -2362,7 +2362,7 @@ def test_dashboard_mcp_dir_route(app, monkeypatch):
 def test_mcp_registry_search_and_detail(monkeypatch):
     import httpx
 
-    from sable.core.modelhub import mcp_registry_detail, search_mcp_registry
+    from toaster_loop.core.modelhub import mcp_registry_detail, search_mcp_registry
 
     def fake_get(url, params=None, headers=None, **kw):
         class R:

@@ -1,15 +1,15 @@
 [project]
-name = "sable"
+name = "toaster-loop"
 version = "0.1.0"
 description = "Local self-improving agent system: built-in agent runtime and training pipeline over local llama.cpp-served models"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = { text = "MIT" }
-authors = [{ name = "sable" }]
+authors = [{ name = "toaster-loop" }]
 # Keep dependencies minimal (see DECISIONS D-1/D-4): the agent runtime,
 # toolset and curation pipeline are built in and need only these. The GPU
 # training stack (torch/transformers/peft/trl) lives under the [training]
-# extra and is imported lazily only inside `python -m sable.training.worker`.
+# extra and is imported lazily only inside `python -m toaster_loop.training.worker`.
 dependencies = [
   "pyyaml>=6.0",
   "httpx>=0.27",
@@ -32,26 +32,26 @@ training = [
 ]
 
 [project.scripts]
-sable = "sable.cli:main"
+toaster-loop = "toaster_loop.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["sable*"]
+include = ["toaster_loop*"]
 
 [tool.setuptools.package-data]
-"sable.dashboard" = ["static/*.html", "static/*.js", "static/*.css", "static/*.svg",
+"toaster_loop.dashboard" = ["static/*.html", "static/*.js", "static/*.css", "static/*.svg",
   "static/js/*.js", "static/js/panels/*.js"]
 
-# Lint (CI: `ruff check sable tests`). Scope is correctness-first:
+# Lint (CI: `ruff check toaster-loop tests`). Scope is correctness-first:
 # syntax/import errors (E4, E9), real bugs (F). Style rules are deliberately
 # off — the codebase has its own dense-comment style. BLE001 (bare except) is
 # intentionally NOT enabled repo-wide: broad exception handling is a core
 # resilience pattern here (best-effort cleanup must never crash a run); the
 # convention is an explicit `# noqa: BLE001 - <reason>` annotation at each
-# site. Audit with `ruff check --select BLE sable` when reviewing that
+# site. Audit with `ruff check --select BLE toaster-loop` when reviewing that
 # convention.
 [tool.ruff]
 target-version = "py311"
@@ -67,25 +67,25 @@ select = ["E4", "E9", "F"]
 # mypy — incremental adoption (production-readiness pass). The store/registry
 # core is clean and GATES CI; other packages have a known error budget listed
 # per-module below (see the counts at time of writing) so CI stays green while
-# they are cleaned up module by module. Run locally: `mypy sable` (all
+# they are cleaned up module by module. Run locally: `mypy toaster-loop` (all
 # modules, report only) or `mypy` (gated subset).
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
 check_untyped_defs = false
 # Default target when `mypy` runs with no args (the CI gate).
-files = ["sable/store", "sable/registry", "sable/core/config.py"]
+files = ["toaster_loop/store", "toaster_loop/registry", "toaster_loop/core/config.py"]
 
 # Known-debt modules: report but never gate (raise the bar by deleting a
 # module from this list once it is clean).
 [[tool.mypy.overrides]]
 module = [
-  "sable.curate.*",
-  "sable.serving.*",
-  "sable.training.*",
-  "sable.dashboard.*",
-  "sable.core.*",
-  "sable.evaluation.*",
-  "sable.cli",
+  "toaster_loop.curate.*",
+  "toaster_loop.serving.*",
+  "toaster_loop.training.*",
+  "toaster_loop.dashboard.*",
+  "toaster_loop.core.*",
+  "toaster_loop.evaluation.*",
+  "toaster_loop.cli",
 ]
 ignore_errors = true

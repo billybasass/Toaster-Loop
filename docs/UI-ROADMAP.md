@@ -1,4 +1,4 @@
-# UI-ROADMAP — sable Phase 5 implementation phases
+# UI-ROADMAP — toaster-loop Phase 5 implementation phases
 
 Status: **complete** — subphases 5a–5e all shipped (each ended green), and the dashboard
 grew beyond this plan in later passes: Model Hub, Easy training, multi-instance serving
@@ -179,7 +179,7 @@ Acceptance criteria
 - [UI] Manual: create profile "coder", run a chat task with it, see it tagged
   in Traces; set a threshold rule, seed traces, watch auto-iterate start.
 - Full suite green; `test_license_hygiene` + no-external-URL tests pass over the
-  complete shipped UI tree; README documents `sable dashboard` + token mode.
+  complete shipped UI tree; README documents `toaster-loop dashboard` + token mode.
 
 ---
 

@@ -1,11 +1,11 @@
-# sable cleanup (Windows) — return the program to a freshly-downloaded state.
+# toaster-loop cleanup (Windows) — return the program to a freshly-downloaded state.
 #
 #   .\cleanup.ps1              # interactive: shows what would be removed, asks
 #   .\cleanup.ps1 --yes        # no prompt (also: -y)
 #   .\cleanup.ps1 --keep-models
 #
 # PowerShell port of cleanup.sh (A3). Removes:
-#   * SABLE_HOME runtime state (%USERPROFILE%\.sable by default): traces,
+#   * TOASTER_LOOP_HOME runtime state (%USERPROFILE%\.toaster-loop by default): traces,
 #     skills, mined goldens, buffer, datasets, model registry, logs,
 #     serve/launch state, managed llama.cpp build (everything under the home).
 #   * Legacy %USERPROFILE%\.unforge state dir from before the rename.
@@ -41,9 +41,9 @@ function Native([scriptblock]$Body) {
     & { $ErrorActionPreference = "Continue"; . $Body }
 }
 
-$SableBin = Join-Path $Repo ".venv\Scripts\sable.exe"
+$ToasterLoopBin = Join-Path $Repo ".venv\Scripts\toaster-loop.exe"
 
-Write-Host "This returns sable to a freshly-downloaded state:"
+Write-Host "This returns toaster-loop to a freshly-downloaded state:"
 Write-Host "  - wipes the runtime home (traces, datasets, models, logs, llama.cpp)"
 Write-Host "  - deletes the local .venv and build artifacts in $Repo"
 Write-Host "Source files under git are left untouched."
@@ -54,27 +54,27 @@ if (-not $AssumeYes) {
     if ($ans -notin @("y", "Y", "yes", "YES")) { Write-Host "aborted."; exit 0 }
 }
 
-# 1. Runtime state (stops sable-owned server/dashboard first). Uses the venv
+# 1. Runtime state (stops toaster-loop-owned server/dashboard first). Uses the venv
 #    CLI when present; otherwise a direct directory removal as fallback —
-#    guarded to look like an sable home, same refusal as cleanup.sh.
-if (Test-Path $SableBin) {
+#    guarded to look like an toaster-loop home, same refusal as cleanup.sh.
+if (Test-Path $ToasterLoopBin) {
     Write-Host "== wiping runtime home =="
-    Native { & $SableBin reset --yes @KeepModelsArgs }
+    Native { & $ToasterLoopBin reset --yes @KeepModelsArgs }
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "warning: 'sable reset' failed; continuing with repo cleanup"
+        Write-Host "warning: 'toaster-loop reset' failed; continuing with repo cleanup"
     }
 } else {
-    Write-Host "== runtime home: venv already gone - removing $HOME\.sable directly =="
-    $HomeDir = if ($env:SABLE_HOME) { $env:SABLE_HOME } else { Join-Path $HOME ".sable" }
+    Write-Host "== runtime home: venv already gone - removing $HOME\.toaster-loop directly =="
+    $HomeDir = if ($env:TOASTER_LOOP_HOME) { $env:TOASTER_LOOP_HOME } else { Join-Path $HOME ".toaster-loop" }
     # Portable (Windows PowerShell 5.1 has no ternary operator).
     $Resolved = Resolve-Path -ErrorAction SilentlyContinue $HomeDir
     if ($Resolved) { $HomeNorm = $Resolved.Path } else { $HomeNorm = $HomeDir }
-    $LooksLikeHome = ($HomeNorm -like (Join-Path $HOME ".sable")) -or
-                     ($HomeNorm -like (Join-Path $HOME ".sable-*"))
+    $LooksLikeHome = ($HomeNorm -like (Join-Path $HOME ".toaster-loop")) -or
+                     ($HomeNorm -like (Join-Path $HOME ".toaster-loop-*"))
     if ($LooksLikeHome) {
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $HomeDir
     } else {
-        Write-Warning "refusing to delete unexpected SABLE_HOME=$HomeDir"
+        Write-Warning "refusing to delete unexpected TOASTER_LOOP_HOME=$HomeDir"
     }
 }
 
@@ -89,7 +89,7 @@ if (-not $env:UNFORGE_HOME) {
 
 # 2. Repo-local artifacts (the ones .gitignore declares as generated).
 Write-Host "== cleaning repo checkout =="
-foreach ($d in ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache", "sable.egg-info",
+foreach ($d in ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache", "toaster_loop.egg-info",
                "unforge.egg-info", "None",
                "adapter", "outputs", "train_runs", "datasets", "models", "logs", "htmlcov") {
     Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $Repo $d)
@@ -105,5 +105,5 @@ Get-ChildItem -Path $Repo -Recurse -File -Include "*.db", "*.db-wal", "*.db-shm"
     Remove-Item -Force -ErrorAction SilentlyContinue
 
 Write-Host ""
-Write-Host "sable is back to a freshly-downloaded state."
+Write-Host "toaster-loop is back to a freshly-downloaded state."
 Write-Host "To start using it again: .\setup.ps1"

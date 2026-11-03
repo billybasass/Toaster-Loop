@@ -1,4 +1,4 @@
-# Skills — teaching sable agents programs without MCP
+# Skills — teaching toaster-loop agents programs without MCP
 
 The problem this solves: an agent asked to drive Steam, Blender or Unreal
 discovers a pile of environment facts the hard way (which screenshot path
@@ -20,12 +20,12 @@ Four tools appear for agents:
 
 | Tool | Purpose |
 |---|---|
-| `save_skill(name, description, content)` | Persist a recipe (overwrites same name). Also reports a per-skill **scripts dir** under `<SABLE_HOME>/skills/<name>/` where the agent drops executable helpers via `run_command`. |
+| `save_skill(name, description, content)` | Persist a recipe (overwrites same name). Also reports a per-skill **scripts dir** under `<TOASTER_LOOP_HOME>/skills/<name>/` where the agent drops executable helpers via `run_command`. |
 | `read_skill(name)` | Pull the full markdown body on demand. |
 | `list_skills()` | Names + one-line descriptions. |
 | `delete_skill(name)` | Remove a skill that turned out wrong (the bundled scripts dir stays). |
 
-Storage is plain markdown with frontmatter under `<SABLE_HOME>/skills/`:
+Storage is plain markdown with frontmatter under `<TOASTER_LOOP_HOME>/skills/`:
 
 ```
 ---
@@ -94,7 +94,7 @@ skills capture *how a program/machine behaves*.
 
 - Skills are runtime knowledge, never training data — no ShareGPT export;
   curation over real traces remains the only training path.
-- Writes stay inside `<SABLE_HOME>/skills/` (same trust level as
+- Writes stay inside `<TOASTER_LOOP_HOME>/skills/` (same trust level as
   `todo_write`); scripts there are only executed if the agent also has the
   `run_commands` capability.
 - No MCP servers, no per-app plugins: this is the "grow without jamming

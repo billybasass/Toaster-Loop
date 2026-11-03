@@ -1,4 +1,4 @@
-# sable one-click setup (Windows) — safe to double-click or run from a terminal:
+# toaster-loop one-click setup (Windows) — safe to double-click or run from a terminal:
 #
 #   .\setup.ps1                          # full setup (venv + package + training
 #                                        #  extras + llama.cpp build for this GPU)
@@ -8,9 +8,9 @@
 # PowerShell port of setup.sh (A3). What it does:
 #   1. Creates .\.venv (uv if installed, else python -m venv) with a
 #      Python between 3.11 and 3.13.
-#   2. Installs sable (editable) + dev extras; adds the [training] extra
+#   2. Installs toaster-loop (editable) + dev extras; adds the [training] extra
 #      unless --no-training is passed.
-#   3. Runs `sable setup` — detects the GPU and builds llama.cpp for it
+#   3. Runs `toaster-loop setup` — detects the GPU and builds llama.cpp for it
 #      (skipped with a warning when git/cmake/a compiler are absent).
 #   4. Reports which screen-capture backend is present (Pillow ImageGrab).
 #
@@ -85,7 +85,7 @@ $PyVersion = (Native { & $Py --version }) -join " "
 Write-Host "interpreter: $Py ($PyVersion)"
 
 # ------------------------------------------------------------------- 2. venv
-Say "2/4 creating venv + installing sable"
+Say "2/4 creating venv + installing toaster-loop"
 $Extras = if ($Training) { "dev,training" } else { "dev" }
 if ($HasUv) {
     Native { & uv venv $Venv --python $Py } 2>$null | Out-Null
@@ -97,14 +97,14 @@ if ($HasUv) {
 
 # torch build flavor must match THIS machine's accelerator (plain PyPI ships
 # CUDA on Windows too; Intel Arc needs the xpu index). See
-# sable/core/torchenv.py. Install torch FIRST from the right index so the
+# toaster-loop/core/torchenv.py. Install torch FIRST from the right index so the
 # [training] extras resolve against it.
 if ($Training) {
     $env:PYTHONPATH = $Repo
     $venvPy = Join-Path $Venv "Scripts\python.exe"
-    $Flavor = ((Native { & $venvPy -c "from sable.core.torchenv import detect_flavor; print(detect_flavor().flavor)" } ) | Select-Object -Last 1)
+    $Flavor = ((Native { & $venvPy -c "from toaster_loop.core.torchenv import detect_flavor; print(detect_flavor().flavor)" } ) | Select-Object -Last 1)
     if (-not $Flavor) { $Flavor = "default" }
-    $FlavorIdx = ((Native { & $venvPy -c "from sable.core.torchenv import detect_flavor; print(detect_flavor().index_url or '')" } ) | Select-Object -Last 1)
+    $FlavorIdx = ((Native { & $venvPy -c "from toaster_loop.core.torchenv import detect_flavor; print(detect_flavor().index_url or '')" } ) | Select-Object -Last 1)
     Remove-Item Env:\PYTHONPATH -ErrorAction SilentlyContinue
     Write-Host "torch      : $Flavor build for this hardware"
     if ($HasUv) {
@@ -128,10 +128,10 @@ if ($HasUv) {
     Native { & $venvPy -m pip install -q "-e" "${Repo}[$Extras]" }
     if ($LASTEXITCODE -ne 0) { Warn "package install failed (check network/disk)"; exit 1 }
 }
-$Sable = Join-Path $Venv "Scripts\sable.exe"
-if (-not (Test-Path $Sable)) { Write-Error "error: venv install failed - no .venv\Scripts\sable.exe"; exit 1 }
-$SableVersion = (Native { & $Sable --version }) -join " "
-Write-Host "installed  : $SableVersion"
+$ToasterLoopBin = Join-Path $Venv "Scripts\toaster-loop.exe"
+if (-not (Test-Path $ToasterLoopBin)) { Write-Error "error: venv install failed - no .venv\Scripts\toaster-loop.exe"; exit 1 }
+$ToasterLoopVersion = (Native { & $ToasterLoopBin --version }) -join " "
+Write-Host "installed  : $ToasterLoopVersion"
 
 # --------------------------------------------------------------- 3. llama.cpp
 Say "3/4 building llama.cpp for this machine (GPU autodetect)"
@@ -162,7 +162,7 @@ function Ensure-Tool([string]$name, [string]$wingetId) {
 
 # NVIDIA CUDA toolkit: needed only when an NVIDIA GPU is present and nvcc is
 # absent. Note VS 2026 + CUDA requires the *newest* toolkit (12.8 cannot build
-# against a VS 2026 host compiler); sable's build pins the newest installed one.
+# against a VS 2026 host compiler); toaster-loop's build pins the newest installed one.
 $HasNvGpu = [bool](Get-Command nvidia-smi -ErrorAction SilentlyContinue)
 $HasNvcc = [bool](Get-Command nvcc -ErrorAction SilentlyContinue) -or
           [bool]$env:CUDA_PATH -and (Test-Path (Join-Path $env:CUDA_PATH "bin\nvcc.exe"))
@@ -172,7 +172,7 @@ if ($HasNvGpu -and -not $HasNvcc) {
     # winget puts nvcc under the toolkit dir, not PATH; accept either.
     if (-not ((Get-Command nvcc -ErrorAction SilentlyContinue) -or
               (Test-Path "$env:ProgramFiles\NVIDIA GPU Computing Toolkit\CUDA\*\bin\nvcc.exe"))) {
-        Warn "continuing without CUDA - sable setup will fall back to another backend"
+        Warn "continuing without CUDA - toaster-loop setup will fall back to another backend"
     }
 }
 
@@ -183,9 +183,9 @@ foreach ($t in @("git", "Git.Git"), @("cmake", "Kitware.CMake")) {
 if (-not $ToolchainOk) {
     Warn "toolchain incomplete - skipping llama.cpp build; re-run setup.ps1 after installing git/cmake"
 } else {
-    Native { & $Sable setup @BackendArgs }
+    Native { & $ToasterLoopBin setup @BackendArgs }
     if ($LASTEXITCODE -ne 0) {
-        Warn "llama.cpp setup failed - serving/training may be limited; re-run setup.ps1 or 'sable setup' after fixing the toolchain"
+        Warn "llama.cpp setup failed - serving/training may be limited; re-run setup.ps1 or 'toaster-loop setup' after fixing the toolchain"
     }
 }
 

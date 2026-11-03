@@ -1,20 +1,20 @@
-"""Fabricate an Sable experience buffer for WP11 (documented stand-in).
+"""Fabricate an Toaster Loop experience buffer for WP11 (documented stand-in).
 
-Calibration data for the specialization experiment comes from the SABLE
+Calibration data for the specialization experiment comes from the TOASTER_LOOP
 EXPERIENCE BUFFER ONLY — so the fixture writes traces through the real
-``sable.store.TraceRecorder`` (JSONL under ``<home>/buffer/YYYY/MM/`` plus
-the SQLite index) into a caller-provided tmp ``SABLE_HOME``, and reads them
+``toaster_loop.store.TraceRecorder`` (JSONL under ``<home>/buffer/YYYY/MM/`` plus
+the SQLite index) into a caller-provided tmp ``TOASTER_LOOP_HOME``, and reads them
 back through ``TraceStore.list_traces`` + the JSONL transcripts, exactly like
 dashboard/curation code does. Nothing else feeds calibration.
 
 Realism model (documented stand-in for a real user's buffer): each fabricated
 trace is one completed agent run whose task line embeds a prefix to extend —
 ``"nextchar <4-char prefix>"`` — plus a minimal user/assistant message pair,
-mirroring how sable traces carry the task text in ``task_summary`` and the
+mirroring how toaster_loop traces carry the task text in ``task_summary`` and the
 transcript in the JSONL. The domain skew (70% domain A) simulates one user's
 behavioral distribution; the split discipline lives in testbed.split_tasks.
 
-This module imports no torch — it is pure buffer plumbing (stdlib + sable
+This module imports no torch — it is pure buffer plumbing (stdlib + toaster_loop
 store), so tests can exercise it without the training extra.
 """
 
@@ -24,7 +24,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from sable.store import TraceRecorder, TraceStore
+from toaster_loop.store import TraceRecorder, TraceStore
 
 TASK_PREFIX = "nextchar "
 
@@ -80,7 +80,7 @@ def load_calibration_prompts(home: Path) -> List[str]:
     record); foreign traces (not matching our task prefix) are skipped, which
     also proves the reader tolerates a mixed buffer.
     """
-    db = TraceStore(home / "buffer" / "sable.db")
+    db = TraceStore(home / "buffer" / "toaster_loop.db")
     try:
         rows = db.list_traces()  # newest first; order irrelevant for stats
     finally:

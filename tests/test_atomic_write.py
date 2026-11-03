@@ -17,15 +17,15 @@ import threading
 
 import pytest
 
-from sable.doctor import check_chat_tmp, find_stale_chat_tmp
-from sable.store.atomic import (atomic_write_json, atomic_write_text,
+from toaster_loop.doctor import check_chat_tmp, find_stale_chat_tmp
+from toaster_loop.store.atomic import (atomic_write_json, atomic_write_text,
                                 replace_with_retry, tmp_path_for)
 
 
 @pytest.fixture()
 def home(tmp_path, monkeypatch):
     h = tmp_path / "uf-atomic"
-    monkeypatch.setenv("SABLE_HOME", str(h))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(h))
     return h
 
 
@@ -146,10 +146,10 @@ def test_thread_put_recovers_from_locked_replace(home, monkeypatch):
     """The WP1 acceptance shape, end to end through the real handler: the
     first os.replace is refused with WinError 32 (AV/indexer handle), the
     retry succeeds and the thread file is written."""
-    from sable.core.config import SableConfig
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.core.config import ToasterLoopConfig
+    from toaster_loop.dashboard.app import DashboardApp
 
-    app = DashboardApp(SableConfig(), home=home)
+    app = DashboardApp(ToasterLoopConfig(), home=home)
     r = app.handle("PUT", "/api/chat/threads/w1",
                    body={"messages": [{"role": "user", "content": "hi"}]})
     assert r.status == 200

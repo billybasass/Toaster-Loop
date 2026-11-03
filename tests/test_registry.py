@@ -19,33 +19,33 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from sable.cli import main as cli_main  # noqa: E402
-from sable.curate import CurationConfig  # noqa: E402
-from sable.registry import (  # noqa: E402
+from toaster_loop.cli import main as cli_main  # noqa: E402
+from toaster_loop.curate import CurationConfig  # noqa: E402
+from toaster_loop.registry import (  # noqa: E402
     ModelRegistry, RegistryError, days_since_last_use, recent_ops, record,
     verify_ledger)
-from sable.registry import janitor as janitor_mod  # noqa: E402
-from sable.registry.janitor import load_state, run_janitor  # noqa: E402
-from sable.registry.ledger import GENESIS_HASH, normalize_intent  # noqa: E402
-from sable.registry.registry import ModelRow  # noqa: E402
-from sable.registry.tiers import (  # noqa: E402
+from toaster_loop.registry import janitor as janitor_mod  # noqa: E402
+from toaster_loop.registry.janitor import load_state, run_janitor  # noqa: E402
+from toaster_loop.registry.ledger import GENESIS_HASH, normalize_intent  # noqa: E402
+from toaster_loop.registry.registry import ModelRow  # noqa: E402
+from toaster_loop.registry.tiers import (  # noqa: E402
     MIN_SERVED_OK, compute_served_stats, derive_tier, requirements_hint,
     served_stats_for, tier_name)
-from sable.serving.supervisor import ServeError  # noqa: E402
-from sable.store.db import TraceRow, TraceStore  # noqa: E402
+from toaster_loop.serving.supervisor import ServeError  # noqa: E402
+from toaster_loop.store.db import TraceRow, TraceStore  # noqa: E402
 
 
 @pytest.fixture()
 def home(tmp_path):
-    """Fake SABLE_HOME with a buffer dir (matches conftest's autouse env)."""
-    h = tmp_path / ".sable-test-home"
+    """Fake TOASTER_LOOP_HOME with a buffer dir (matches conftest's autouse env)."""
+    h = tmp_path / ".toaster-loop-test-home"
     (h / "buffer").mkdir(parents=True)
     return h
 
 
 @pytest.fixture()
 def registry(home):
-    reg = ModelRegistry(home / "buffer" / "sable.db")
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
     yield reg
     reg.close()
 
@@ -532,7 +532,7 @@ def test_cli_history_and_verify(tmp_path, monkeypatch, capsys):
     import os
 
 
-    db = Path(os.environ["SABLE_HOME"]) / "buffer" / "sable.db"
+    db = Path(os.environ["TOASTER_LOOP_HOME"]) / "buffer" / "toaster_loop.db"
     reg = ModelRegistry(db)
     try:
         reg.register_model("base-a")
@@ -613,7 +613,7 @@ def test_cli_promote_intent_then_history_intents(tmp_path, capsys):
     import os
 
 
-    db = Path(os.environ["SABLE_HOME"]) / "buffer" / "sable.db"
+    db = Path(os.environ["TOASTER_LOOP_HOME"]) / "buffer" / "toaster_loop.db"
     reg = ModelRegistry(db)
     try:
         reg.register_model("base-a")
@@ -645,11 +645,11 @@ def test_cli_history_intents_honest_empty(capsys):
 
 
 def test_dashboard_promote_accepts_optional_intent(tmp_path):
-    from sable.core.config import SableConfig
-    from sable.dashboard.app import DashboardApp
+    from toaster_loop.core.config import ToasterLoopConfig
+    from toaster_loop.dashboard.app import DashboardApp
 
     home = tmp_path / "dash-home"
-    db = home / "buffer" / "sable.db"
+    db = home / "buffer" / "toaster_loop.db"
     reg = ModelRegistry(db)
     try:
         reg.register_model("base-a")
@@ -657,7 +657,7 @@ def test_dashboard_promote_accepts_optional_intent(tmp_path):
     finally:
         reg.close()
 
-    app = DashboardApp(SableConfig(), home=home)
+    app = DashboardApp(ToasterLoopConfig(), home=home)
     r = app.handle("POST", "/api/models/promote",
                    body={"model_id": "v1", "intent": "fewer tool errors"})
     assert r.status == 200
@@ -775,7 +775,7 @@ def _trace(store, tid, ts, alias=None, version=None,
 
 
 def test_compute_served_stats(tmp_path):
-    store = TraceStore(tmp_path / "sable.db")
+    store = TraceStore(tmp_path / "toaster_loop.db")
     _trace(store, "a", "2026-09-03T00:00:00+00:00", alias="v1", score=0.8)
     _trace(store, "b", "2026-09-03T01:00:00+00:00", alias="v1", score=0.0)
     _trace(store, "c", "2026-09-03T02:00:00+00:00", alias="v1", score=-0.4)
@@ -844,7 +844,7 @@ def test_requirements_hint_matches_evidence():
 
 def test_to_dict_exposes_derived_tier(tmp_path):
 
-    reg = ModelRegistry(tmp_path / "sable.db")
+    reg = ModelRegistry(tmp_path / "toaster_loop.db")
     m = reg.register_model("B/M")
     d = m.to_dict()
     assert d["tier"] == 0 and d["tier_name"] == "experimental"
@@ -903,7 +903,7 @@ def env(tmp_path, monkeypatch):
     from fake_server import FakeOpenAIServer, make_scripted_handler
 
     home = tmp_path / "uf-tiers"
-    monkeypatch.setenv("SABLE_HOME", str(home))
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(home))
     stub = tmp_path / "stub.py"
     stub.write_text(STUB)
 
@@ -934,9 +934,9 @@ def seed(store, home, i):
 
 
 def _run(home, stub, starter, reg, store, auto, min_tier):
-    from sable.training.pipeline import run_iterate
-    from sable.training.scheduler import Scheduler, TrainingConfig
-    from sable.training.validate import ValidationConfig
+    from toaster_loop.training.pipeline import run_iterate
+    from toaster_loop.training.scheduler import Scheduler, TrainingConfig
+    from toaster_loop.training.validate import ValidationConfig
 
     sched = Scheduler(registry=reg, cfg=TrainingConfig(
         base_model="Base/HF-Model"), worker_command=[sys.executable, str(stub)])
@@ -954,7 +954,7 @@ def test_auto_promotion_skips_below_min_tier(env):
     """Fresh train = T1 after validation (no shadow) -> auto path skips with
     an honest reason; the model stays validated for manual promotion."""
     home, stub, starter = env
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     reg = _registry_for(home)
     for i in range(3):
         seed(store, home, i)
@@ -972,7 +972,7 @@ def test_auto_promotion_skips_below_min_tier(env):
 
 def test_auto_promotion_knob_zero_disables_policy(env):
     home, stub, starter = env
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     reg = _registry_for(home)
     for i in range(3):
         seed(store, home, i)
@@ -986,7 +986,7 @@ def test_manual_iterate_and_promote_permissive_at_low_tier(env):
     """auto=False (manual iterate) promotes at T1; registry.promote itself was
     never tier-aware and stays that way."""
     home, stub, starter = env
-    store = TraceStore(home / "buffer" / "sable.db")
+    store = TraceStore(home / "buffer" / "toaster_loop.db")
     reg = _registry_for(home)
     for i in range(3):
         seed(store, home, i)
@@ -1002,11 +1002,11 @@ def test_manual_iterate_and_promote_permissive_at_low_tier(env):
 
 def _registry_for(home):
 
-    return ModelRegistry(home / "buffer" / "sable.db")
+    return ModelRegistry(home / "buffer" / "toaster_loop.db")
 
 
 def test_validation_config_knob_parses():
-    from sable.training.validate import ValidationConfig
+    from toaster_loop.training.validate import ValidationConfig
 
     vc = ValidationConfig.from_yaml({"validation": {"min_tier_auto_deploy": 0}})
     assert vc.min_tier_auto_deploy == 0
@@ -1378,8 +1378,8 @@ def test_janitor_config_parsing():
 # ------------------------------------------------------------ deploy guard
 
 def test_deploy_rejects_archived_model(home, registry):
-    from sable.serving.deploy import deploy_model
-    from sable.core.config import SableConfig
+    from toaster_loop.serving.deploy import deploy_model
+    from toaster_loop.core.config import ToasterLoopConfig
 
     mid, _ = _superseded(registry)
     _, gguf = _make_artifacts(home, registry, mid)
@@ -1387,14 +1387,14 @@ def test_deploy_rejects_archived_model(home, registry):
     registry.archive_model(mid, home=home)
 
     with pytest.raises(ServeError, match="archived"):
-        deploy_model(home, registry, mid, SableConfig())
+        deploy_model(home, registry, mid, ToasterLoopConfig())
 
 
 # ------------------------------------------------- auto-check cron hook
 
 def _auto_check(tmp_path, monkeypatch, janitor_cfg):
-    """Run `sable train auto-check` with a config carrying a janitor section."""
-    import sable.registry.janitor as jm
+    """Run `toaster_loop train auto-check` with a config carrying a janitor section."""
+    import toaster_loop.registry.janitor as jm
 
     calls: list = []
 
@@ -1424,7 +1424,7 @@ def test_auto_check_skips_janitor_when_disabled(tmp_path, monkeypatch):
 
 
 def test_auto_check_survives_janitor_crash(tmp_path, monkeypatch):
-    import sable.registry.janitor as jm
+    import toaster_loop.registry.janitor as jm
 
     def boom(*a, **k):
         raise RuntimeError("disk on fire")
@@ -1472,7 +1472,7 @@ def test_cli_models_list_shows_pinned_marker(home, registry, capsys):
 # ------------------------------------------------------ migration v4 -> v5
 
 def test_migration_v4_to_v5(home):
-    db = home / "buffer" / "sable.db"
+    db = home / "buffer" / "toaster_loop.db"
     conn = sqlite3.connect(db)
     # Hand-built pre-v5 table: no pinned/pre_archive_paths, old CHECK.
     conn.execute("""
