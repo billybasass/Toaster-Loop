@@ -1049,44 +1049,38 @@ def test_serve_status_none_and_attach(app, home):
         assert r.body["base_url"] == fs.base_url
 
 
-def test_serve_start_validation_and_conflict(app, home):
-    # nothing configured => 400
-    r = app.handle("POST", "/api/serve/start", body={})
-    assert r.status == 400 and err_code(r) == "bad_request"
+def test_server_start_validation_and_conflict(app, home):
+    # The legacy /api/serve/start endpoint was removed; the reserved default
+    # instance is started through POST /api/servers/default/start. With no
+    # gguf_path configured the default instance has nothing to spawn => 400.
+    r = app.handle("POST", "/api/servers/default/start", body={})
+    assert r.status == 400 and err_code(r) == "bad_instance"
 
-    # auto with no active model => 409
-    r = app.handle("POST", "/api/serve/start", body={"auto": True})
-    assert r.status == 409 and err_code(r) == "no_active_model"
-
-    # registered model without GGUF artifact => 409
-    reg = ModelRegistry(home / "buffer" / "sable.db")
-    m = reg.register_model(base_model="b")
-    reg.close()
-    r = app.handle("POST", "/api/serve/start", body={"model_id": m.model_id})
-    assert r.status == 409 and err_code(r) == "no_gguf"
-
-    # already serving (attach alive) => 409 unless force
+    # already serving (attach alive in the legacy state, folded into the
+    # merged default view) => 409 unless force
     from fake_server import FakeOpenAIServer
 
     with FakeOpenAIServer() as fs:
         _fake_serve_state(home, fs.base_url)
-        r = app.handle("POST", "/api/serve/start", body={"gguf": "/nope.gguf"})
+        r = app.handle("POST", "/api/servers/default/start", body={})
         assert r.status == 409 and err_code(r) == "already_serving"
 
 
-def test_serve_attach_and_stop_never_kills_attached(app, home):
+def test_serve_stop_never_kills_attached(app, home):
+    # /api/serve/attach was removed (attach through a named instance or the
+    # default config); /api/serve/stop stays for the legacy status card. Seed
+    # the attach state the way an old sable left it and verify stop only
+    # forgets it — never kills the foreign server.
     from fake_server import FakeOpenAIServer
 
     with FakeOpenAIServer() as fs:
-        r = app.handle("POST", "/api/serve/attach", body={"url": fs.base_url})
-        assert r.status == 202, r.body
-        assert r.body["model_name"] == "fake-model"
+        _fake_serve_state(home, fs.base_url)
         status = app.handle("GET", "/api/serve/status").body
         assert status["running"] and status["mode"] == "attach"
 
         r = app.handle("POST", "/api/serve/stop", body={})
         assert r.status == 200 and r.body == {"ok": True, "stopped": False}
-        # state cleared; fake server still healthy (we never killed it)
+        # state cleared (both views); fake server still healthy (never killed)
         assert not (home / "serve_state.json").exists()
         import httpx
 

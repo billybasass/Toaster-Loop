@@ -14,12 +14,7 @@ from typing import Any, Dict, Optional
 
 
 from ...serving import instances as srv_inst
-from ...serving.deploy import (
-    clear_serve_state,
-    read_serve_state,
-    stop_owned_server,
-    write_serve_state,
-)
+from ...serving.deploy import read_serve_state, stop_owned_server
 from ...serving.supervisor import ServeError, healthcheck
 from .base import ApiContext, ApiResponse, HttpError, _utcnow
 
@@ -43,10 +38,7 @@ serve state so pre-Phase-6 setups keep working untouched.
         from ...serving.supervisor import crash_loop_status
 
         iid = str(inst.get("id"))
-        if iid == srv_inst.DEFAULT_ID:
-            st = srv_inst.read_state(self.home, iid) or read_serve_state(self.home)
-        else:
-            st = srv_inst.read_state(self.home, iid)
+        st = srv_inst.read_state_merged(self.home, iid)
         running = srv_inst.state_alive(st)
         # mode follows the live state when present (the reserved default's
         # definition is config-derived; serve_state.json knows the truth).
@@ -199,22 +191,16 @@ serve state so pre-Phase-6 setups keep working untouched.
         return {"ok": True}
 
     def _instance_state(self, server_id: str) -> Optional[Dict[str, Any]]:
-        if server_id == srv_inst.DEFAULT_ID:
-            return srv_inst.read_state(self.home, server_id) \
-                or read_serve_state(self.home)
-        return srv_inst.read_state(self.home, server_id)
+        return srv_inst.read_state_merged(self.home, server_id)
 
     def _write_instance_state(self, server_id: str,
                               state: Dict[str, Any]) -> None:
-        srv_inst.write_state(self.home, server_id, state)
-        if server_id == srv_inst.DEFAULT_ID:
-            # Keep the legacy view in sync (old panels read serve_state.json).
-            write_serve_state(self.home, state)
+        # Merged accessor keeps serve_state.json in sync for the reserved
+        # default (old panels and CLI readers still consult it).
+        srv_inst.write_state_merged(self.home, server_id, state)
 
     def _clear_instance_state(self, server_id: str) -> None:
-        srv_inst.clear_state(self.home, server_id)
-        if server_id == srv_inst.DEFAULT_ID:
-            clear_serve_state(self.home)
+        srv_inst.clear_state_merged(self.home, server_id)
 
     def _stop_instance(self, server_id: str, forget: bool = False) -> bool:
         """Stop one instance: in-process child first, then recorded pid.
@@ -228,6 +214,8 @@ serve state so pre-Phase-6 setups keep working untouched.
             # Legacy single-instance serve (serve_state.json) ownership path.
             st = read_serve_state(self.home)
             if st and st.get("mode", "spawn") != "attach":
+                # stop_owned_server operates on the legacy file itself, so it
+                # stays a direct deploy call rather than a merged accessor.
                 stopped = stop_owned_server(self.home)
         self._clear_instance_state(server_id)
         return stopped

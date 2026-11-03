@@ -76,7 +76,11 @@ def stop_owned_server(home: Path, grace: float = 8.0) -> bool:
     Cross-platform via runtime.terminate_owned_pid — the shared verify-then-kill
     helper (WP4 extraction; os.kill(pid, 0) would terminate on Windows and
     SIGKILL doesn't exist there). A pid that is alive but NOT ours (stale state
-    file / recycled pid) is left alone and the stale state cleared."""
+    file / recycled pid) is left alone and the stale state cleared. Clears BOTH
+    views of the default instance's state (legacy file + per-instance mirror)
+    via the merged accessor, so no stale mirror outlives the server."""
+    from .instances import DEFAULT_ID, clear_state_merged
+
     st = read_serve_state(home)
     if not st or not st.get("pid"):
         return False
@@ -88,12 +92,12 @@ def stop_owned_server(home: Path, grace: float = 8.0) -> bool:
             "serve_state pid %s exists but is not owned by us; leaving it alone",
             pid,
         )
-        clear_serve_state(home)
+        clear_state_merged(home, DEFAULT_ID)
         return False
     if verdict == "gone":
-        clear_serve_state(home)
+        clear_state_merged(home, DEFAULT_ID)
         return False
-    clear_serve_state(home)
+    clear_state_merged(home, DEFAULT_ID)
     return True
 
 
@@ -211,7 +215,7 @@ def _start_server_detached_once(
     # Shape parity with dashboard _write_instance_state's spawn record (same
     # keys): mode/instance_id let router pool building and metrics treat a
     # CLI-detached default server exactly like a dashboard-started one.
-    from .instances import DEFAULT_ID
+    from .instances import DEFAULT_ID, write_state_merged
 
     state = {
         "mode": "spawn",
@@ -225,7 +229,10 @@ def _start_server_detached_once(
         "instance_id": DEFAULT_ID,
         "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    write_serve_state(log_dir.parent, state)
+    # Merged write: legacy serve_state.json AND the per-instance mirror, so a
+    # CLI-detached default server is visible to every Phase-6 reader and the
+    # merged read never prefers a stale mirror over this fresher record.
+    write_state_merged(log_dir.parent, DEFAULT_ID, state)
     return state
 
 

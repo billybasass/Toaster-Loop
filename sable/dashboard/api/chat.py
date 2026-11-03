@@ -20,9 +20,6 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 
 from ...serving import instances as srv_inst
-from ...serving.deploy import (
-    read_serve_state,
-)
 from ..events import sse_frame
 from .base import (ApiContext, HttpError, SSE_HEARTBEAT_S, ApiResponse,
                    logger, _utcnow)
@@ -121,7 +118,8 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
             except Exception as e:  # noqa: BLE001 — fall through to legacy
                 logger.debug("routing unavailable (%s); "
                              "using default endpoint resolution", e)
-        st = read_serve_state(self.home)
+        # Merged default-instance view (legacy serve_state.json folded in).
+        st = srv_inst.read_state_merged(self.home, srv_inst.DEFAULT_ID)
         if st and self._serve_alive(st):
             return (str(st["base_url"]), st.get("attach_api_key"),
                     str(st.get("model_name") or "model"))
@@ -149,7 +147,7 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
             return (attach, self.cfg.attach_api_key,
                     self.cfg.model_name or "model")
         raise HttpError(503, "nothing is serving — start a server "
-                             "(POST /api/serve/start) or attach one",
+                             "(POST /api/servers/default/start) or attach one",
                         code="not_serving")
 
     def _instance_context_length(self, server_instance: Optional[str]

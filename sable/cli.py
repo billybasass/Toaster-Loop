@@ -4968,10 +4968,7 @@ def cmd_instances_status(args: argparse.Namespace) -> int:
     for inst in rows:
         iid = str(inst.get("id"))
         state = coex.load_state_of(iid)
-        st = srv_inst.read_state(home, iid)
-        if iid == srv_inst.DEFAULT_ID and not st:
-            from .serving.deploy import read_serve_state
-            st = read_serve_state(home)
+        st = srv_inst.read_state_merged(home, iid)
         mode = (st or {}).get("mode") or ("attach" if inst.get("attach_url")
                                           else "spawn")
         url = (st or {}).get("base_url") if state == "loaded" else None

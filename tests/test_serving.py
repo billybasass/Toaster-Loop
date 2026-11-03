@@ -5233,17 +5233,21 @@ def test_ports_in_use_sees_other_instances(home__test_serving_phase6, ggufs):
                                         exclude_id=sid) is False
 
 
-# ------------------------- legacy /api/serve/start via instance machinery
+# ------------- reserved default instance via the canonical start endpoint
+# (the legacy /api/serve/start endpoint was removed; these paths now run
+# through POST /api/servers/default/start with the config-derived default)
 
-def test_serve_start_registers_owned_handle_and_state(home__test_serving_phase6, stub_binary,
-                                                      ggufs, cleanup_servers):
-    """h_serve_start now spawns through start_instance_server: the child lands
-    in the _owned_handles registry (shutdown coverage), serve_state.json keeps
-    its legacy shape for old readers, and /api/serve/stop reaches the child."""
+def test_default_start_registers_owned_handle_and_state(home__test_serving_phase6, stub_binary,
+                                                        ggufs, cleanup_servers):
+    """Starting the reserved default spawns through start_instance_server: the
+    child lands in the _owned_handles registry (shutdown coverage),
+    serve_state.json keeps its legacy shape for old readers, and
+    /api/serve/stop reaches the child."""
     from sable.serving.supervisor import owned_instance_ids
 
-    app = make_app(home__test_serving_phase6, llama_server_binary=stub_binary)
-    r = app.handle("POST", "/api/serve/start", body={"gguf": ggufs[0]})
+    app = make_app(home__test_serving_phase6, llama_server_binary=stub_binary,
+                   gguf_path=ggufs[0])
+    r = app.handle("POST", "/api/servers/default/start", body={})
     assert r.status == 202, r.body
     assert r.body["ok"] is True and r.body["base_url"].startswith("http://")
 
@@ -5281,37 +5285,96 @@ def test_serve_start_registers_owned_handle_and_state(home__test_serving_phase6,
     assert not (home__test_serving_phase6 / "serve_state.json").exists()
 
 
-def test_serve_start_crash_loop_refusal_surfaces(home__test_serving_phase6, stub_binary, ggufs,
-                                                 cleanup_servers):
+def test_default_start_crash_loop_refusal_surfaces(home__test_serving_phase6, stub_binary, ggufs,
+                                                   cleanup_servers):
     """Over-budget starts are refused THROUGH the endpoint (500), while an
     explicit user start clears the budget and succeeds (#28 semantics)."""
     from sable.serving import supervisor as sup
 
-    app = make_app(home__test_serving_phase6, llama_server_binary=stub_binary)
+    app = make_app(home__test_serving_phase6, llama_server_binary=stub_binary,
+                   gguf_path=ggufs[0])
     for _ in range(sup.CRASH_LOOP_MAX_FAILURES):
         sup.record_start_failure("default")
 
-    # autostart=True keeps the refusal in force (mirrors h_server_start):
-    # start_instance_server refuses before ever spawning.
-    r = app.handle("POST", "/api/serve/start",
-                   body={"gguf": ggufs[0], "autostart": True})
+    # autostart=True keeps the refusal in force: start_instance_server refuses
+    # before ever spawning.
+    r = app.handle("POST", "/api/servers/default/start", body={"autostart": True})
     assert r.status == 500 and "crash loop" in r.body["error"]["message"]
 
     # explicit user start clears the crash-loop state and spawns normally
-    r2 = app.handle("POST", "/api/serve/start", body={"gguf": ggufs[1]})
+    r2 = app.handle("POST", "/api/servers/default/start", body={})
     assert r2.status == 202, r2.body
     assert sup.crash_loop_status("default") is None  # healthy start reset it
     app.handle("POST", "/api/serve/stop", body={})
 
 
-def test_serve_start_log_location(home__test_serving_phase6, stub_binary, ggufs, cleanup_servers):
+def test_default_start_log_location(home__test_serving_phase6, stub_binary, ggufs, cleanup_servers):
     """Spawn log stays at <home>/logs/server-default.log (user-visible path)."""
-    app = make_app(home__test_serving_phase6, llama_server_binary=stub_binary)
-    r = app.handle("POST", "/api/serve/start", body={"gguf": ggufs[0]})
+    app = make_app(home__test_serving_phase6, llama_server_binary=stub_binary,
+                   gguf_path=ggufs[0])
+    r = app.handle("POST", "/api/servers/default/start", body={})
     assert r.status == 202
     logp = home__test_serving_phase6 / "logs" / "server-default.log"
     assert logp.is_file() and b"ready" in logp.read_bytes()
     app.handle("POST", "/api/serve/stop", body={})
+
+
+def test_merged_state_accessors_fold_legacy_default(home__test_serving_phase6):
+    """The compatibility seam: read/write/clear_state_merged handle the
+    reserved default's two state views (per-instance file + legacy
+    serve_state.json) in one call; non-default ids are plain passthrough."""
+    h = home__test_serving_phase6
+    # No state anywhere -> merged read is None.
+    assert srv_inst.read_state_merged(h, "default") is None
+
+    # Legacy-only write (an old sable / CLI path): merged read folds it in.
+    from sable.serving.deploy import write_serve_state
+    write_serve_state(h, {"mode": "attach", "base_url": "http://127.0.0.1:9/v1"})
+    st = srv_inst.read_state_merged(h, "default")
+    assert st and st["base_url"] == "http://127.0.0.1:9/v1"
+
+    # Per-instance file wins once present (fresher record is authoritative).
+    srv_inst.write_state(h, "default", {"mode": "spawn", "pid": os.getpid(),
+                                        "base_url": "http://127.0.0.1:8/v1"})
+    st = srv_inst.read_state_merged(h, "default")
+    assert st["mode"] == "spawn"
+
+    # Merged write dual-writes: both views land and agree.
+    srv_inst.write_state_merged(h, "default", {"mode": "spawn", "pid": 4242})
+    assert srv_inst.read_state(h, "default")["pid"] == 4242
+    from sable.serving.deploy import read_serve_state
+    assert read_serve_state(h)["pid"] == 4242
+
+    # Merged clear removes BOTH views.
+    srv_inst.clear_state_merged(h, "default")
+    assert srv_inst.read_state(h, "default") is None
+    assert read_serve_state(h) is None
+
+    # Non-default ids never touch the legacy file.
+    srv_inst.write_state_merged(h, "other", {"pid": 1})
+    assert read_serve_state(h) is None
+    assert srv_inst.read_state_merged(h, "other") == {"pid": 1}
+
+
+def test_migrate_legacy_state_one_time_copies_to_mirror(home__test_serving_phase6):
+    """Boot migration: legacy serve_state.json -> serving/state/default.json.
+    Idempotent; never creates a definition record; leaves the legacy file."""
+    h = home__test_serving_phase6
+    # Nothing to migrate -> False, no files created.
+    assert srv_inst.migrate_legacy_state(h) is False
+
+    from sable.serving.deploy import write_serve_state
+    write_serve_state(h, {"mode": "spawn", "pid": 77, "base_url": "http://x/v1"})
+    assert srv_inst.migrate_legacy_state(h) is True
+    mirror = srv_inst.read_state(h, "default")
+    assert mirror and mirror["pid"] == 77
+    # Legacy file untouched (still dual-written by the seam; old readers live).
+    from sable.serving.deploy import read_serve_state
+    assert read_serve_state(h) is not None
+    # Definition record deliberately NOT created (stays config-derived).
+    assert not srv_inst.instance_path(h, "default").exists()
+    # Idempotent: second run does nothing.
+    assert srv_inst.migrate_legacy_state(h) is False
 
 
 def test_state_files_with_api_key_are_owner_only(home__test_serving_phase6):

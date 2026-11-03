@@ -468,16 +468,13 @@ def _instance_up(st: Optional[Dict[str, Any]]) -> float:
 
 def _instances_section(ex: Exposition, home: Path, cfg: Any = None) -> None:
     from ..serving import instances as srv_inst
-    from ..serving.deploy import read_serve_state
 
     samples: List[Tuple[Optional[Dict[str, str]], float]] = []
     strength: List[Tuple[Optional[Dict[str, str]], float]] = []
     try:
         for inst in srv_inst.load_instances(home, cfg=cfg):
             iid = str(inst.get("id") or "?")
-            st = srv_inst.read_state(home, iid)
-            if iid == srv_inst.DEFAULT_ID and not st:
-                st = read_serve_state(home)
+            st = srv_inst.read_state_merged(home, iid)
             up = _instance_up(st)
             samples.append(({"id": iid}, up))
             # WP2c metric honesty: an attach-mode up=1 only means "state

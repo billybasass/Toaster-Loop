@@ -256,9 +256,15 @@ iterate) execute on background threads; the UI polls `/api/jobs` for progress.
   duplicate_name`; ports claimed by other managed servers (including the
   indexer's embed server) → `409 port_conflict`.
 - **Reserved `default`**: synthesized from the legacy config keys
-  (`gguf_path`/`attach_url`/`port`) with state read from (and written back
-  to) `serve_state.json`, so old endpoints/panels keep working; it cannot be
-  deleted. Legacy `/api/serve/*` endpoints remain the default-instance path.
+  (`gguf_path`/`attach_url`/`port` — these are now just *the default
+  instance's source*; named instances are the primary model). Its runtime
+  state lives at `serving/state/default.json`, with the legacy
+  `serve_state.json` folded in by the single compatibility seam in
+  `serving/instances.py` (`read_state_merged`/`write_state_merged`/
+  `clear_state_merged`); it cannot be deleted. `/api/serve/start` and
+  `/api/serve/attach` were removed — use `POST /api/servers/default/start`
+  (spawn) or a named attach instance; `/api/serve/status|stop` remain as the
+  legacy status-card path.
 - **VRAM advisory**: `POST /api/servers/<id>/start` returns a `warning`
   field when the GGUF estimate exceeds currently free VRAM (accounting for
   other running servers). Warning only — the spawn proceeds; re-send with

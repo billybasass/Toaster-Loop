@@ -246,31 +246,18 @@ class Coexistence:
 
     def _read_state(self, iid: str) -> Optional[Dict[str, Any]]:
         from . import instances as srv_inst
-        from .deploy import read_serve_state
 
-        home = self._require_home()
-        st = srv_inst.read_state(home, iid)
-        if not st and iid == srv_inst.DEFAULT_ID:
-            st = read_serve_state(home)
-        return st
+        return srv_inst.read_state_merged(self._require_home(), iid)
 
     def _write_state(self, iid: str, state: Dict[str, Any]) -> None:
         from . import instances as srv_inst
-        from .deploy import write_serve_state
 
-        home = self._require_home()
-        srv_inst.write_state(home, iid, state)
-        if iid == srv_inst.DEFAULT_ID:
-            write_serve_state(home, state)
+        srv_inst.write_state_merged(self._require_home(), iid, state)
 
     def _clear_state(self, iid: str) -> None:
         from . import instances as srv_inst
-        from .deploy import clear_serve_state
 
-        home = self._require_home()
-        srv_inst.clear_state(home, iid)
-        if iid == srv_inst.DEFAULT_ID:
-            clear_serve_state(home)
+        srv_inst.clear_state_merged(self._require_home(), iid)
 
     def load_state_of(self, iid: str) -> str:
         """loaded | unloaded | unloading | stopped (dashboard-facing label)."""

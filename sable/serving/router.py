@@ -260,11 +260,7 @@ def build_pool(home: Path, cfg: Any = None, *,
         iid = str(inst.get("id") or "")
         if not iid or inst.get("role") == "embedding":
             continue
-        st = srv_inst.read_state(home, iid)
-        if st is None and iid == srv_inst.DEFAULT_ID:
-            from .deploy import read_serve_state
-
-            st = read_serve_state(home)
+        st = srv_inst.read_state_merged(home, iid)
         if not srv_inst.state_alive(st):
             continue
         base_url = str((st or {}).get("base_url") or "").strip()

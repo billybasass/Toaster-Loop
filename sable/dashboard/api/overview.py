@@ -10,9 +10,7 @@ import time
 from typing import Any, Dict, Iterator
 
 
-from ...serving.deploy import (
-    read_serve_state,
-)
+from ...serving import instances as srv_inst
 from ..events import format_sse
 from .base import ApiContext, ApiResponse, SSE_HEARTBEAT_S, _redact
 
@@ -55,7 +53,9 @@ class OverviewRoutes(ApiContext):
         _scored = stats.get("scored_traces") or 0
         stats["unscored_traces"] = max(0, int(_tot) - int(_scored))
 
-        serve_state = read_serve_state(self.home)
+        # Merged default-instance view (legacy serve_state.json folded in).
+        serve_state = srv_inst.read_state_merged(self.home,
+                                                 srv_inst.DEFAULT_ID)
         server_live = False
         if serve_state and serve_state.get("pid"):
             # Windows-safe liveness (A1): os.kill(pid, 0) TERMINATES on NT.

@@ -518,7 +518,7 @@ class EngineWatchdog:
             iid = str(inst.get("id") or "")
             if not iid:
                 continue
-            st = srv_inst.read_state(home, iid)
+            st = srv_inst.read_state_merged(home, iid)
             if (st or {}).get("mode") == "attach":
                 continue
             pid = (st or {}).get("pid")
@@ -815,11 +815,9 @@ def restart_instance(cfg: WatchdogConfig, home: Any) -> RestartFn:
             "restarted_by": "watchdog",
             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         }
-        srv_inst.write_state(home_p, instance_id, new_state)
-        if instance_id == srv_inst.DEFAULT_ID:
-            from .deploy import write_serve_state
-
-            write_serve_state(home_p, new_state)
+        # Merged accessor keeps the legacy serve_state.json in sync for the
+        # reserved default (single seam in serving/instances.py).
+        srv_inst.write_state_merged(home_p, instance_id, new_state)
         return True
 
     return _restart

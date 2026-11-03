@@ -7,6 +7,11 @@
 # Default: ~/.sable . Env: SABLE_HOME
 home: null                 # e.g. ~/data/sable
 
+# LEGACY SINGLE-SERVER KEYS (below: gguf_path / port / context_length /
+# attach_url) — since Phase 6 these are simply the SOURCE of the reserved
+# "default" server instance. Named instances (Serve panel / /api/servers, or
+# the section documented further down) are the primary way to run models now.
+
 # Path to the GGUF model served by supervisor-owned llama-server.
 # Env: SABLE_GGUF
 gguf_path: null            # e.g. ~/models/qwen3-8b-q4_k_m.gguf
@@ -245,8 +250,10 @@ delegation:
 # <id>.json (runtime state at <SABLE_HOME>/serving/state/<id>.json), managed
 # by the Serve panel / /api/servers*. The reserved "default" instance has no
 # file: it mirrors the legacy single-server keys above (gguf_path, attach_url,
-# port, context_length) and its runtime state stays in serve_state.json, so
-# old configs and endpoints keep working unchanged. Each instance may override
+# port, context_length) — instances are the primary model, those keys just
+# configure the default one. Its runtime state lives at serving/state/
+# default.json with serve_state.json folded in for compatibility, so old
+# configs and endpoints keep working unchanged. Each instance may override
 # run_settings/sampling on top of the global sections below; spawn VRAM
 # over-commit warns (never blocks; force bypasses); attach URLs must be
 # loopback (127.0.0.1/localhost). Shutdown stops only processes sable

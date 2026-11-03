@@ -357,6 +357,82 @@ def clear_state(home: Path, instance_id: str) -> None:
         pass
 
 
+# ---------------------------------------------------------- merged accessors
+#
+# THE compatibility seam, sealed in one place. The reserved "default"
+# instance's runtime state has two homes: the per-instance file at
+# serving/state/default.json AND the legacy <home>/serve_state.json that
+# pre-Phase-6 code (and ``sable serve`` / deploy's CLI-detached path) still
+# writes. Every reader used to re-decide "fold in the legacy file?" inline;
+# every writer used to re-implement the dual-write. Use THESE instead —
+#   * read_state_merged: per-instance state, falling back to the legacy file
+#     for DEFAULT_ID when no per-instance file exists yet.
+#   * write_state_merged: write the per-instance file; for DEFAULT_ID also
+#     keep serve_state.json in sync (dual-write, so old readers never diverge).
+#   * clear_state_merged: remove both views of DEFAULT_ID's state.
+# Scheduled deletion: once serve_state.json is migrated away (one release
+# after ``migrate_legacy_state`` ships), these wrappers collapse to the plain
+# read/write/clear_state above and every caller stays untouched.
+
+def read_state_merged(home: Path, instance_id: str) -> Optional[Dict[str, Any]]:
+    """Runtime state with the legacy serve_state.json folded in.
+
+    Non-default instances are a plain ``read_state``. For DEFAULT_ID, a
+    per-instance state file wins; otherwise the legacy file is read (it may
+    have been written by the CLI detached-serve path or an older sable)."""
+    st = read_state(home, instance_id)
+    # ``not st`` (not ``is None``): an empty/corrupt per-instance file also
+    # falls back to the legacy view, matching every pre-seam call site.
+    if not st and instance_id == DEFAULT_ID:
+        from .deploy import read_serve_state
+
+        st = read_serve_state(home)
+    return st
+
+
+def write_state_merged(home: Path, instance_id: str,
+                       state: Dict[str, Any]) -> None:
+    """Persist runtime state, keeping the legacy view in sync for DEFAULT_ID."""
+    write_state(home, instance_id, state)
+    if instance_id == DEFAULT_ID:
+        from .deploy import write_serve_state
+
+        write_serve_state(home, state)
+
+
+def clear_state_merged(home: Path, instance_id: str) -> None:
+    """Clear runtime state in BOTH views for DEFAULT_ID (legacy file too)."""
+    clear_state(home, instance_id)
+    if instance_id == DEFAULT_ID:
+        from .deploy import clear_serve_state
+
+        clear_serve_state(home)
+
+
+def migrate_legacy_state(home: Path) -> bool:
+    """One-time upgrade: copy serve_state.json to serving/state/default.json.
+
+    Runs at dashboard boot. Idempotent and conservative: it only ever CREATES
+    the per-instance state file when none exists — the legacy file itself is
+    left in place (still dual-written by ``write_state_merged``), so every old
+    reader keeps working untouched (cardinal rule #1). The default instance's
+    *definition* stays config-derived on purpose: freezing a default.json
+    definition record would silently shadow later Settings-page changes to
+    gguf_path/attach_url/port. Returns True when a migration was performed."""
+    legacy = read_state(home, DEFAULT_ID)
+    if legacy is not None:
+        return False  # per-instance file already exists — nothing to do
+    from .deploy import read_serve_state
+
+    st = read_serve_state(home)
+    if not st:
+        return False
+    write_state(home, DEFAULT_ID, st)
+    logger.info("migrated legacy serve_state.json to %s",
+                instance_state_path(home, DEFAULT_ID))
+    return True
+
+
 def state_alive(st: Optional[Dict[str, Any]]) -> bool:
     """Is this recorded state pointing at a live endpoint?"""
     if not st:

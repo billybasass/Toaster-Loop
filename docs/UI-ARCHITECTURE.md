@@ -223,9 +223,10 @@ Backend capabilities reachable today from Python (verified against
 - **Already wrapped by dashboard API**: status, traces list/detail, feedback,
   datasets list/show, models + promote/rollback (+lineage edges), jobs list/cancel
   (+log tail), curate, train submit, iterate submit.
-- **Exists in Python, needs endpoints**: serve start/stop/attach
-  (`ServingSupervisor`, `serve_state.json`), deploy/hot-swap
-  (`serving/deploy.py`), train auto-check (`cmd_train_auto_check`), dataset row
+- **Exists in Python, needs endpoints**: ~~serve start/stop/attach
+  (`ServingSupervisor`, `serve_state.json`)~~ — shipped (Phase 6:
+  `/api/servers*`; legacy `/api/serve/start|attach` removed), deploy/hot-swap
+  (`serving/deploy.py` — shipped as `/api/serve/deploy`), train auto-check (`cmd_train_auto_check`), dataset row
   preview (read `sft.jsonl`/`dpo.jsonl` slices), export dataset to dir
   (`cmd_datasets_export`), GPU stats (`training/scheduler.gpu_free_mib` +
   extended nvidia-smi query), config read/write (`core/config.py`, YAML round-trip).

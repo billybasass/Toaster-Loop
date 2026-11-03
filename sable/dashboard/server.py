@@ -621,6 +621,19 @@ def serve_dashboard(
         httpd.sable_app.startup_indexing()  # type: ignore[attr-defined]
     except Exception:
         logger.exception("startup index refresh failed to schedule")
+    # Legacy serve_state.json -> serving/state/default.json one-time upgrade
+    # (state only; the default instance definition stays config-derived). Runs
+    # BEFORE autostart so a freshly migrated server is already visible to the
+    # autostart liveness check. The legacy file itself stays in place and keeps
+    # being dual-written — old CLI/eval readers are untouched.
+    try:
+        from ..serving.instances import migrate_legacy_state
+
+        if migrate_legacy_state(httpd.sable_app.home):  # type: ignore[attr-defined]
+            logger.info("migrated legacy serve_state.json to the "
+                        "per-instance state store")
+    except Exception:
+        logger.exception("legacy serve-state migration failed (non-fatal)")
     # Phase 6: autostart-flagged server instances boot in the background.
     try:
         httpd.sable_app.startup_autostart()  # type: ignore[attr-defined]

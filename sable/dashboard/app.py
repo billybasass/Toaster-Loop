@@ -176,11 +176,10 @@ dependency wiring only. Route handlers resolve by name via getattr.
         # Prometheus text exposition (review idea #5) — same auth/loopback
         # rules as every other /api/* route (enforced in server.py).
         ("GET", "/api/metrics", "h_metrics"),
-        # serve / deploy
+        # serve / deploy — start/attach moved to /api/servers/<id>/start (the
+        # reserved default instance covers the legacy single-server flow).
         ("GET", "/api/serve/status", "h_serve_status"),
-        ("POST", "/api/serve/start", "h_serve_start"),
         ("POST", "/api/serve/stop", "h_serve_stop"),
-        ("POST", "/api/serve/attach", "h_serve_attach"),
         ("POST", "/api/deploy", "h_deploy"),
         ("POST", "/api/serve/deploy", "h_deploy"),
         # remote sable peers (LAN): probe + remember another machine's

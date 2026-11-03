@@ -81,7 +81,6 @@ def resolve_upstream(app: Any, subpath: str,
     from pathlib import Path
 
     from ..serving import instances as srv_inst
-    from ..serving.deploy import read_serve_state
 
     home = Path(app.home)
     want = str(model or "").strip().lower()
@@ -107,9 +106,7 @@ def resolve_upstream(app: Any, subpath: str,
             if want_inst not in (str(inst.get("id")), str(inst.get("name"))):
                 continue
             iid = str(inst.get("id"))
-            st = srv_inst.read_state(home, iid)
-            if iid == srv_inst.DEFAULT_ID and not st:
-                st = read_serve_state(home)
+            st = srv_inst.read_state_merged(home, iid)
             if not st or not srv_inst.state_alive(st):
                 raise LookupError(
                     f"server instance {instance} is not running on this sable")
@@ -128,9 +125,7 @@ def resolve_upstream(app: Any, subpath: str,
         try:
             for inst in srv_inst.load_instances(home, cfg=app.cfg):
                 iid = str(inst.get("id"))
-                st = srv_inst.read_state(home, iid)
-                if iid == srv_inst.DEFAULT_ID and not st:
-                    st = read_serve_state(home)
+                st = srv_inst.read_state_merged(home, iid)
                 if st and str(st.get("model_name") or "").strip().lower() == want:
                     hit = _from_state(st)
                     if hit:
@@ -138,13 +133,13 @@ def resolve_upstream(app: Any, subpath: str,
         except Exception:  # noqa: BLE001 — fall through to the default target
             logger.debug("remote gateway: instance scan failed", exc_info=True)
 
-    # Default serve endpoint (legacy single-server state, else default row).
-    # For requests WITHOUT a model (healthchecks, /v1/models listings) the
-    # default endpoint is preferred, but a live *named* instance is a valid
-    # serving target too — the peer may run its model only there. A request
-    # WITH a model must still hit the default endpoint: a random named
+    # Default serve endpoint (legacy single-server state folded into the
+    # default row). For requests WITHOUT a model (healthchecks, /v1/models
+    # listings) the default endpoint is preferred, but a live *named* instance
+    # is a valid serving target too — the peer may run its model only there. A
+    # request WITH a model must still hit the default endpoint: a random named
     # instance may serve a different model than the one named.
-    st = read_serve_state(home) or srv_inst.read_state(home, srv_inst.DEFAULT_ID)
+    st = srv_inst.read_state_merged(home, srv_inst.DEFAULT_ID)
     hit = _from_state(st)
     if hit:
         return hit
@@ -152,7 +147,7 @@ def resolve_upstream(app: Any, subpath: str,
         try:
             for inst in srv_inst.load_instances(home, cfg=app.cfg):
                 iid = str(inst.get("id"))
-                st_i = (srv_inst.read_state(home, iid)
+                st_i = (srv_inst.read_state_merged(home, iid)
                         if iid != srv_inst.DEFAULT_ID
                         else st)
                 hit = _from_state(st_i)
