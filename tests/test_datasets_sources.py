@@ -72,6 +72,87 @@ def test_parse_qa_blocks():
     assert pairs == [("What?", "This."), ("Two?", "**Bold** ok")]
 
 
+# ------------------------------------------------------- quality screening
+
+def test_looks_like_data_separates_prose_from_json():
+    prose = ("Toaster Loop curates datasets from local folders and websites. "
+             "Start a model on the Serve page for higher-quality pairs. " * 4)
+    assert not src._looks_like_data(prose)
+    payload = json.dumps({
+        "routes": [{"path": f"/{i}", "label": f"L{i}"} for i in range(30)],
+        "ga4": {"measurementId": "G-X"}, "contextual": {"options": ["copy"]}})
+    assert src._looks_like_data(payload)
+
+
+def test_docs_to_rows_drops_machine_data_pairs():
+    """A synth that returns a JSON-blob answer must not contribute rows — the
+    'may hurt a model' failure mode from SPA docs payloads."""
+    def jsony(name, chunk):
+        return [("What is this?", '{"href":"https://x","label":"y",'
+                                  '"ga4":{"id":"G-1"},"seo":{"a":1},'
+                                  '"routes":[{"p":"/a"},{"p":"/b"}]}')]
+
+    convs, warns = src.docs_to_rows([("page", "Some prose intro here. " * 6)],
+                                    synth_fn=jsony)
+    assert convs == []
+    assert any("machine-data" in w for w in warns)
+
+
+def test_scrub_machine_lines_keeps_prose():
+    text = ('Real documentation sentence about installing the toolkit.\n'
+            '{"href":"/terms","label":"Privacy"},{"search":{"prompt":"hi"}}\n'
+            'Another fine prose line with normal punctuation.')
+    out = src._scrub_machine_lines(text)
+    assert "installing the toolkit" in out
+    assert "Another fine prose" in out
+    assert '"href"' not in out
+
+
+def test_docs_to_rows_reports_progress():
+    seen = []
+    src.docs_to_rows(
+        [("a.md", "# H\n\n## S\n" + "content body. " * 10),
+         ("b.md", "# H2\n\n## T\n" + "more content. " * 10)],
+        synth_fn=None, progress=seen.append)
+    assert seen and "files)" in seen[-1]
+
+
+def test_crawl_strips_script_json_links(home, site):
+    """Links inside <script> JSON payloads must not be crawled (phantom 404s)."""
+    res = src.crawl_website(home, site + "/scripty.html", max_pages=10,
+                            max_depth=1, sleep_s=0.0,
+                            allow_private_networks=True)
+    manifest = json.loads(
+        (home / "datasets" / res.dataset_id / "manifest.json").read_text())
+    # /from-script-payload only appears inside the page's JSON state object;
+    # it must never have been fetched (no 404 warning for it).
+    assert not any("from-script-payload" in w for w in manifest["warnings"])
+
+
+def test_live_synth_fn_dead_instance_falls_back(home, monkeypatch):
+    """A named-but-not-running server falls back to the default serve state."""
+    from toaster_loop.serving import instances as srv_inst
+
+    calls = {}
+
+    def fake_http(base, model):
+        calls["base"] = base
+        return ("synth", base, model)
+
+    monkeypatch.setattr(src, "_http_synth", fake_http)
+    # dead named instance -> default view (empty here) -> None
+    assert src.live_synth_fn(type("A", (), {"home": home})(), "coder") is None
+    assert calls == {}
+
+    # live default state -> synth bound to it (write_state_merged keeps the
+    # legacy serve_state.json view that live_synth_fn reads for default).
+    srv_inst.write_state_merged(home, "default",
+                                {"base_url": "http://127.0.0.1:9",
+                                 "model_name": "m", "mode": "attach"})
+    res = src.live_synth_fn(type("A", (), {"home": home})())
+    assert res and calls["base"] == "http://127.0.0.1:9"
+
+
 # ---------------------------------------------------------------- folder
 
 def test_ingest_folder_roundtrip(home, tmp_path):
@@ -121,6 +202,15 @@ PAGES = {
     "/guide.html": ("<html><body><h2>Install</h2><p>"
                     + "Install steps for the toolkit. " * 8
                     + "</p></body></html>"),
+    # SPA-style page: navigable link in real markup, phantom route ONLY inside
+    # a <script> body (quoted href= form the crawl regex would otherwise hit).
+    "/scripty.html": (
+        "<html><body><h2>Scripty</h2><p>"
+        + "Docs body text for the scripty page. " * 6
+        + "</p><a href='/guide.html'>guide</a>"
+        + "<script>var state = '<ul>';"
+        + "state += '<li><a href=\"/from-script-payload\">phantom</a></li>';"
+        + "</script></body></html>"),
 }
 
 
@@ -282,7 +372,8 @@ def test_curate_source_endpoint_queues_folder_job(home, monkeypatch):
     (folder / "note.md").write_text("# N\n\n## Sec\n" + "body words. " * 12)
 
     # No live server -> live_synth_fn None -> fallback synth inline.
-    monkeypatch.setattr(src, "live_synth_fn", lambda app: None)
+    monkeypatch.setattr(src, "live_synth_fn",
+                        lambda app, server_id=None: None)
     app = DashboardApp(ToasterLoopConfig(), home=home)
 
     r = app.handle("POST", "/api/datasets/curate_source",

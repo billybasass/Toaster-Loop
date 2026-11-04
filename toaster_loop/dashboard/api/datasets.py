@@ -286,9 +286,12 @@ WP9 analytics and guarded export.
         """WP3d: queue a local-folder or website curation job.
 
         POST /api/datasets/curate_source
-          {source: "local_folder", path: "/some/dir", name?}
+          {source: "local_folder", path: "/some/dir", name?, server?}
           {source: "website", url: "https://docs.example.org/", name?,
-           max_pages?, max_depth?}
+           max_pages?, max_depth?, server?}
+        ``server`` names a serving instance (Phase 6) to drive synthesis;
+        omitted = the default serve endpoint, nothing running = heading
+        fallback. The job log streams {"event":"progress", message} lines.
         Same 202+poll contract as /api/curate (kind="curate_source"): large
         folders/crawls plus LLM synthesis must never block the HTTP thread.
         The job's final log line carries {"event": "done", "result":
@@ -325,13 +328,29 @@ WP9 analytics and guarded export.
             # plus per-chunk synthesis through the live serve endpoint is CPU/
             # IO work with no GPU dependency; the scheduler slot machinery for
             # training jobs does not apply.
+
+            def _log(rec: Dict[str, Any]) -> None:
+                if not log_path:
+                    return
+                try:
+                    with open(log_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                except OSError:
+                    pass
+
+            def _progress(msg: str) -> None:
+                # Progress lines land in the job log so long folder/crawl
+                # builds are visible live (Jobs panel + curateJob poller)
+                # instead of running silent until completion.
+                _log({"event": "progress", "job": job_id, "message": msg})
+
             reg = self._registry()
             try:
                 if not reg.mark_running(job_id, os.getpid(), actor="dashboard"):
                     return  # cancelled while queued
                 self._job_observer(job_id, "running")
                 try:
-                    res = self._curate_source_run(b)
+                    res = self._curate_source_run(b, progress=_progress)
                 except Exception as e:  # noqa: BLE001 — job errors are data
                     msg = f"{type(e).__name__}: {e}"
                     if log_path:
@@ -374,25 +393,37 @@ WP9 analytics and guarded export.
         return ApiResponse(202, {"ok": True, "job_id": job.job_id,
                                  "state": "queued"})
 
-    def _curate_source_run(self, b: Dict[str, Any]):
+    def _curate_source_run(self, b: Dict[str, Any], *,
+                           progress: Optional[Any] = None):
         """Execute a curate_source body (folder or website) with live-model
-        synthesis when a server is up. Split out so tests can call it inline."""
+        synthesis when a server is up. Split out so tests can call it inline.
+
+        ``server`` optionally names a serving instance (Phase 6) whose
+        chat-completions drive the doc->ShareGPT synthesis; omitted/"default"
+        uses the legacy serve endpoint, and nothing serving falls back to the
+        deterministic heading synth."""
         from ...curate.sources import crawl_website, ingest_folder, \
             live_synth_fn
 
         source = str(b.get("source") or "").strip().lower()
-        synth = live_synth_fn(self)
+        server_id = str(b.get("server") or "").strip() or None
+        synth = live_synth_fn(self, server_id)
+        if progress is not None:
+            progress("synthesis: " + (f"live model via {server_id or 'default'} "
+                     "server" if synth else
+                     "heading fallback (no server running)"))
         name = str(b.get("name") or "") or None
         if source == "local_folder":
             return ingest_folder(self.home, str(b.get("path") or ""),
-                                 name=name, synth_fn=synth)
+                                 name=name, synth_fn=synth,
+                                 progress=progress)
         kwargs: Dict[str, Any] = {}
         if b.get("max_pages") is not None:
             kwargs["max_pages"] = int(b["max_pages"])
         if b.get("max_depth") is not None:
             kwargs["max_depth"] = int(b["max_depth"])
         return crawl_website(self.home, str(b.get("url") or ""), name=name,
-                             synth_fn=synth, **kwargs)
+                             synth_fn=synth, progress=progress, **kwargs)
 
     # --------------------------------------------- WP3b: datasets env gate
 

@@ -17,8 +17,12 @@ const ROWS_PAGE = 10;
  * warnings?, error?}. Rejects only on submit failure (ApiError).
  * WP3d: same helper drives /api/datasets/curate_source (folder/website jobs
  * share the 202+poll contract and the final {"event":"done", result} log line).
+ * onProgress receives the newest {"event":"progress", message} log line while
+ * the job runs, so long crawls/folder scans are never silent. There is
+ * deliberately NO client-side timeout: big builds legitimately take a long
+ * time, and the job's own error/cancel states are the only failure signals.
  */
-async function curateJob(body, endpoint = "/api/curate") {
+async function curateJob(body, endpoint = "/api/curate", onProgress = null) {
   const r = await api(endpoint, { method: "POST", body });
   const jobId = r.job_id;
   if (!jobId) return Promise.reject(new Error("no job id in response"));
@@ -26,6 +30,7 @@ async function curateJob(body, endpoint = "/api/curate") {
   return new Promise((resolve) => {
     let timer = null;
     let settled = false;
+    let lastProgressLine = 0;
     const finish = (res) => {
       if (settled) return;
       settled = true;
@@ -39,6 +44,20 @@ async function curateJob(body, endpoint = "/api/curate") {
         d = await api(`/api/jobs/${encodeURIComponent(jobId)}`);
       } catch { return false; } // transient — retry on next event/timer
       const job = d.job;
+      // Surface new progress lines to the caller (folder/crawl builds stream
+      // {"event":"progress", message} into the job log).
+      if (onProgress && Array.isArray(d.log.lines)) {
+        const lines = d.log.lines;
+        if (lines.length > lastProgressLine) {
+          for (const line of lines.slice(lastProgressLine)) {
+            try {
+              const rec = JSON.parse(line);
+              if (rec.event === "progress" && rec.message) onProgress(rec.message);
+            } catch { /* non-JSON log lines are fine */ }
+          }
+          lastProgressLine = lines.length;
+        }
+      }
       if (job.state === "error" || job.state === "cancelled") {
         finish({ ok: false, error: job.error || job.state });
         return true;
@@ -63,13 +82,9 @@ async function curateJob(body, endpoint = "/api/curate") {
       if (p.job_id === jobId && p.state !== "queued" && p.state !== "running")
         check();
     });
-    let tries = 0;
     check().then((done) => {
       if (!done && !settled)
-        timer = setInterval(() => {
-          if (++tries > 300) finish({ ok: false, error: "curate job timed out" });
-          else check();
-        }, 2000); // fallback if SSE missed
+        timer = setInterval(() => { check(); }, 3000); // fallback if SSE missed
     });
   });
 }
@@ -448,6 +463,21 @@ async function curateForm(onDone) {
 function sourcesCard(onDone) {
   const host = el("div", { class: "card" });
   const out = el("div", { class: "result" });
+  const setProgress = (msg) => { out.textContent = msg; };
+
+  // Synthesis server picker: "default" (the legacy serve endpoint) plus every
+  // currently-running named instance. A dead/stale selection falls back to
+  // default server-side, so the list only needs to be a helpful hint.
+  const serverSel = el("select", { class: "narrow", title:
+    "Server used to synthesize doc pairs (offline = deterministic heading fallback)" },
+    el("option", { value: "", text: "default / auto" }));
+  api("/api/servers").then((d) => {
+    for (const s of (d.servers || [])) {
+      if (!s.running || s.role === "embedding") continue;
+      serverSel.appendChild(el("option", {
+        value: s.id, text: s.name + (s.default ? " (default)" : "") }));
+    }
+  }).catch(() => { /* picker stays default-only; auto still works */ });
 
   // -- local folder
   const dirIn = el("input", { type: "text", class: "grow",
@@ -458,11 +488,13 @@ function sourcesCard(onDone) {
   dirBtn.addEventListener("click", async () => {
     if (!dirIn.value.trim()) return toast("folder path required", "error");
     dirBtn.disabled = true;
-    out.textContent = "ingesting folder… (queued job; large folders take a while)";
+    setProgress("ingesting folder… (queued job; large folders take a while)");
     try {
       const body = { source: "local_folder", path: dirIn.value.trim() };
       if (dirName.value.trim()) body.name = dirName.value.trim();
-      const r = await curateJob(body, "/api/datasets/curate_source");
+      if (serverSel.value) body.server = serverSel.value;
+      const r = await curateJob(body, "/api/datasets/curate_source",
+        setProgress);
       if (r.ok) {
         out.textContent = `created ${r.dataset_id} (${r.rows} rows)`;
         toast(`dataset ${r.dataset_id} created from folder`, "ok");
@@ -484,11 +516,13 @@ function sourcesCard(onDone) {
   urlBtn.addEventListener("click", async () => {
     if (!urlIn.value.trim()) return toast("URL required", "error");
     urlBtn.disabled = true;
-    out.textContent = "crawling… (queued job, same-origin bounded crawl)";
+    setProgress("crawling… (queued job, same-origin bounded crawl)");
     try {
       const body = { source: "website", url: urlIn.value.trim() };
       if (pagesIn.value) body.max_pages = Number(pagesIn.value);
-      const r = await curateJob(body, "/api/datasets/curate_source");
+      if (serverSel.value) body.server = serverSel.value;
+      const r = await curateJob(body, "/api/datasets/curate_source",
+        setProgress);
       if (r.ok) {
         out.textContent = `created ${r.dataset_id} (${r.rows} rows)`;
         toast(`dataset ${r.dataset_id} created from site`, "ok");
@@ -530,6 +564,9 @@ function sourcesCard(onDone) {
     el("div", { class: "field" }, el("label", {}, "website"), urlIn,
       el("label", { title: "max pages (bounded crawl)" }, "pages"), pagesIn,
       urlBtn),
+    el("div", { class: "field" },
+      el("label", { title: "serving instance used for pair synthesis" },
+        "synth server"), serverSel),
     el("div", { class: "field" }, el("label", {}, "hub repo"), hubIn, hubBtn),
     out);
   return host;

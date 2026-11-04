@@ -62,6 +62,55 @@ MAX_TOTAL_BYTES = 40_000_000
 CHUNK_CHARS = 4000
 OVERLAP_CHARS = 200
 
+#: Manifest warning cap: link-heavy JS docs sites produce hundreds of junk
+#: URLs (route manifests inside <script> JSON), and every failed fetch used to
+#: land verbatim in manifest.warnings — an unreadable wall that hid the real
+#: problems. Beyond the cap we keep the first MAX_WARNINGS plus a summary line.
+MAX_WARNINGS = 50
+
+#: Script/style blocks, stripped before link extraction (the crawl's href
+#: regex otherwise matches "href":"..." inside framework JSON payloads and
+#: queues hundreds of nonexistent routes as 404 warnings).
+_SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>")
+
+ProgressFn = Callable[[str], None]
+"""Progress reporter: one line per unit of work (file/page/chunk batch). The
+dashboard writes these into the job log so long crawls aren't silent."""
+
+
+def _looks_like_data(text: str) -> bool:
+    """True when a text blob is machine data (JSON/JS/config) rather than prose.
+
+    Docs sites ship content inside framework payloads; feeding those chunks to
+    synthesis produced training rows of raw JSON — actively harmful for SFT.
+    Structural punctuation density separates the two cleanly: prose almost
+    never exceeds these ratios, minified/embedded JSON always does."""
+    s = text[:4000]
+    n = max(1, len(s))
+    structural = sum(s.count(c) for c in "{}[]")
+    quotes = s.count('"')
+    colons = s.count(":")
+    return (structural >= 8 and structural / n > 0.01) \
+        or (quotes / n > 0.04 and colons / n > 0.01)
+
+
+def _scrub_machine_lines(text: str) -> str:
+    """Drop lines that are clearly machine data (JSON key/value streams).
+
+    Crawl text from docs SPAs is prose and embedded payloads interleaved;
+    chunk-level _looks_like_data misses mixed chunks, so scrub line by line
+    first. A line with 6+ double quotes, or brace+quote pairs, is payload."""
+    kept: List[str] = []
+    for ln in text.splitlines():
+        s = ln.strip()
+        if s:
+            q = s.count('"')
+            br = s.count("{") + s.count("}")
+            if q >= 6 or (br >= 2 and q >= 2):
+                continue
+        kept.append(ln)
+    return "\n".join(kept)
+
 
 @dataclass
 class SourceResult:
@@ -130,6 +179,11 @@ def materialize(home: Path, conversations: List[List[Dict[str, Any]]], *,
         for conv in conversations:
             f.write(json.dumps({"conversations": conv},
                                ensure_ascii=False) + "\n")
+    warnings = list(warnings or [])
+    if len(warnings) > MAX_WARNINGS:
+        extra = len(warnings) - MAX_WARNINGS
+        warnings = warnings[:MAX_WARNINGS] + [
+            f"(+{extra} more warnings suppressed — see the job log)"]
     gate = run_gate(conversations, Path(home) / "datasets",
                     dataset_id=dataset_id)
     manifest: Dict[str, Any] = {
@@ -437,24 +491,46 @@ def _parse_qa(text: str) -> List[Tuple[str, str]]:
     return [(x, y) for x, y in pairs if x and y]
 
 
+def _usable_pair(q: str, a: str) -> bool:
+    """Training-value screen for one synthesized pair.
+
+    Rejects empty/short answers and machine-data answers (JSON/JS blobs from
+    SPA payloads). Rows like these were the "may hurt a model if trained on
+    it" complaint — a garbage answer teaches the model to emit JSON noise."""
+    q, a = q.strip(), a.strip()
+    if not q or len(a) < 20:
+        return False
+    return not _looks_like_data(a)
+
+
 def docs_to_rows(files: List[Tuple[str, str]], *,
                  synth_fn: Optional[SynthFn],
                  max_chunks_per_file: int = 20,
+                 progress: Optional[ProgressFn] = None,
                  ) -> Tuple[List[List[Dict[str, Any]]], List[str]]:
     """[(name, text)] -> (ShareGPT conversations, warnings).
 
     Each chunk goes through synth_fn (live model) or fallback_synth; a failing
-    model call degrades that file to the fallback with one warning. Output rows
-    are single-turn user/assistant ShareGPT conversations — identical shape to
-    importer output, so the training mask path is unchanged."""
+    model call degrades that file to the fallback with one warning. Machine
+    data is screened at two levels: whole chunks that are JSON/JS payloads are
+    skipped, and individual pairs whose answer looks like data are dropped —
+    SPA docs sites embed framework state in the page text, and feeding it to
+    synthesis produced harmful rows. Output rows are single-turn user/assistant
+    ShareGPT conversations — identical shape to importer output, so the
+    training mask path is unchanged."""
     warnings: List[str] = []
     conversations: List[List[Dict[str, Any]]] = []
-    for name, text in files:
-        chunks = chunk_text(text)[:max_chunks_per_file]
+    dropped_data = 0
+    for fi, (name, text) in enumerate(files):
+        scrubbed = _scrub_machine_lines(text)
+        chunks = chunk_text(scrubbed)[:max_chunks_per_file]
         if not chunks:
             continue
         used_fallback = False
         for chunk in chunks:
+            if _looks_like_data(chunk):
+                dropped_data += 1
+                continue
             pairs: List[Tuple[str, str]] = []
             if synth_fn is not None:
                 try:
@@ -471,9 +547,19 @@ def docs_to_rows(files: List[Tuple[str, str]], *,
             if not pairs:
                 pairs = fallback_synth(name, chunk)
             for q, a in pairs:
+                if not _usable_pair(q, a):
+                    dropped_data += 1
+                    continue
                 conversations.append([
                     {"from": "human", "value": q},
                     {"from": "gpt", "value": a}])
+        if progress is not None:
+            progress(f"{name}: {len(conversations)} rows so far "
+                     f"({fi + 1}/{len(files)} files)")
+    if dropped_data:
+        warnings.append(
+            f"dropped {dropped_data} machine-data chunk(s)/pair(s) "
+            "(JSON/JS payloads are not usable training text)")
     return conversations, warnings
 
 
@@ -526,7 +612,8 @@ def iter_doc_files(root: Path) -> Tuple[List[Path], List[Path]]:
 
 
 def ingest_folder(home: Path, folder: str, *, name: Optional[str] = None,
-                  synth_fn: Optional[SynthFn] = None
+                  synth_fn: Optional[SynthFn] = None,
+                  progress: Optional[ProgressFn] = None
                   ) -> SourceResult:
     """Recursive local-folder curation (WP3d). .json/.jsonl through importer.py
     unchanged; .parquet through the column-pair reader; prose/doc files
@@ -537,9 +624,16 @@ def ingest_folder(home: Path, folder: str, *, name: Optional[str] = None,
     data_files, doc_files = iter_doc_files(root)
     json_files = [p for p in data_files if p.suffix.lower() != ".parquet"]
     parquet_files = [p for p in data_files if p.suffix.lower() == ".parquet"]
+    total_units = len(json_files) + len(parquet_files) + len(doc_files)
+    logger.info("folder ingest %s: %d files (%d data, %d docs)",
+                root, total_units, len(data_files), len(doc_files))
+    if progress is not None:
+        progress(f"scanned {root}: {total_units} files "
+                 f"({len(data_files)} data, {len(doc_files)} docs)")
     warnings: List[str] = []
     conversations: List[List[Dict[str, Any]]] = []
     skipped: List[str] = []
+    done_units = 0
     from ..curate.importer import _row_to_messages
     for f in json_files:
         try:
@@ -562,10 +656,22 @@ def ingest_folder(home: Path, folder: str, *, name: Optional[str] = None,
             conv = messages_to_sharegpt(msgs) if msgs else []
             if conv:
                 conversations.append(conv)
+        done_units += 1
+        logger.info("folder ingest %s: %d/%d files, %d rows",
+                    root.name, done_units, total_units, len(conversations))
+        if progress is not None:
+            progress(f"{f.name}: {len(conversations)} rows "
+                     f"({done_units}/{total_units} files)")
     for f in parquet_files:
         convs, w = parquet_to_conversations(f)
         conversations.extend(convs)
         warnings.extend(w)
+        done_units += 1
+        logger.info("folder ingest %s: %d/%d files, %d rows",
+                    root.name, done_units, total_units, len(conversations))
+        if progress is not None:
+            progress(f"{f.name}: {len(conversations)} rows "
+                     f"({done_units}/{total_units} files)")
     doc_payload = []
     for p in doc_files:
         try:
@@ -574,7 +680,15 @@ def ingest_folder(home: Path, folder: str, *, name: Optional[str] = None,
                                             errors="replace")))
         except OSError as e:
             warnings.append(f"{p}: unreadable ({e})")
-    conv2, w = docs_to_rows(doc_payload, synth_fn=synth_fn)
+
+    def _doc_progress(msg: str) -> None:
+        if progress is not None:
+            progress(msg)
+        logger.info("folder ingest %s: %s", root.name, msg)
+
+    conv2, w = docs_to_rows(doc_payload, synth_fn=synth_fn,
+                            progress=_doc_progress if progress is not None
+                            or logger.isEnabledFor(logging.INFO) else None)
     warnings.extend(w)
     conversations.extend(conv2)
     label = name or root.name
@@ -660,12 +774,22 @@ def _robots_allows(base: str, path: str, *, allow_private: bool = False
     return not any(path.startswith(d) for d in disallow)
 
 
+#: Non-page assets never worth queueing during a crawl. Docs sites reference
+#: fonts/bundles inline; fetching them produced "not text/html (font/woff2)"
+#: style warnings that were pure noise.
+_ASSET_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".css", ".js", ".mjs",
+                   ".zip", ".pdf", ".svg", ".ico", ".woff", ".woff2",
+                   ".ttf", ".otf", ".eot", ".mp4", ".webm", ".webp",
+                   ".map", ".xml", ".txt.gz", ".avif")
+
+
 def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
                   max_pages: int = CRAWL_MAX_PAGES,
                   max_depth: int = CRAWL_MAX_DEPTH,
                   synth_fn: Optional[SynthFn] = None,
                   allow_private_networks: bool = False,
-                  sleep_s: float = 0.2) -> SourceResult:
+                  sleep_s: float = 0.2,
+                  progress: Optional[ProgressFn] = None) -> SourceResult:
     """Bounded same-origin crawl -> HTML text -> doc->ShareGPT pipeline.
 
     Politeness + safety: robots.txt honored (crawl-delay-free fixed sleep),
@@ -689,13 +813,25 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
     pages: List[Tuple[str, str]] = []      # (url, text)
     fetched: Dict[str, str] = {}           # url -> depth
     queue: List[Tuple[str, int]] = [(entry, 0)]
+    logger.info("crawl start %s (max_pages=%d max_depth=%d)",
+                entry, max_pages, max_depth)
+    if progress is not None:
+        progress(f"start crawl {entry} (up to {max_pages} pages)")
     while queue and len(fetched) < max_pages:
         u, depth = queue.pop(0)
         u = urldefrag(u)[0]
         if u in fetched:
             continue
+        # Asset URLs are dropped without fetching — no warning noise.
+        if urlparse(u).path.lower().endswith(_ASSET_SUFFIXES):
+            continue
         fetched[u] = str(depth)
         html, err = _fetch_guarded(u, allow_private=allow_private_networks)
+        if progress is not None:
+            progress(f"page {len(fetched)}/{max_pages}: {u}"
+                     + (f" — {err}" if err else ""))
+        logger.info("crawl page %d/%d %s%s", len(fetched), max_pages, u,
+                    "" if not err else f" — {err}")
         if err is not None or html is None:
             warnings.append(f"{u}: {err or 'no body'}")
             continue
@@ -708,21 +844,37 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
         if len(text.strip()) >= 80:
             pages.append((u, text))
         if depth < max_depth:
-            for href in re.findall(r"""href=["']([^"'#]+)["']""", html):
+            # Links come from real markup only: script/style bodies are
+            # stripped first so framework JSON ("href":"...") inside the page
+            # is never mistaken for navigable routes (hundreds of phantom 404s
+            # on docs SPAs).
+            for href in re.findall(
+                    r"""href=["']([^"'#]+)["']""",
+                    _SCRIPT_STYLE_RE.sub(" ", html)):
                 nu = urljoin(u, href)
                 if urlparse(nu).netloc != parsed.netloc or nu in fetched:
                     continue
-                if urlparse(nu).path.lower().endswith(
-                        (".png", ".jpg", ".jpeg", ".gif", ".css", ".js",
-                         ".zip", ".pdf", ".svg", ".ico")):
+                if urlparse(nu).path.lower().endswith(_ASSET_SUFFIXES):
                     continue
                 queue.append((nu, depth + 1))
         time.sleep(max(0.0, sleep_s))
     if not pages:
         raise ImportError_(f"crawl produced no readable pages from {entry}")
+    if progress is not None:
+        progress(f"crawled {len(pages)} readable pages; synthesizing…")
+    logger.info("crawl done %s: %d readable pages, synthesizing",
+                entry, len(pages))
+
+    def _synth_progress(msg: str) -> None:
+        if progress is not None:
+            progress(msg)
+        logger.info("crawl synth %s: %s", parsed.netloc, msg)
+
     conversations, w = docs_to_rows(
         [(urlparse(u).path or "/", t) for u, t in pages],
-        synth_fn=synth_fn)
+        synth_fn=synth_fn,
+        progress=_synth_progress if progress is not None
+        or logger.isEnabledFor(logging.INFO) else None)
     warnings.extend(w)
     label = name or (parsed.netloc.split(".")[0] or "site")
     res = materialize(home, conversations,
@@ -735,18 +887,39 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
 
 # ------------------------------------------------------- synthesis resolver
 
-def live_synth_fn(app: Any) -> Optional[SynthFn]:
-    """Synthesis via the dashboard's current serve endpoint (serve_state).
+def live_synth_fn(app: Any, server_id: Optional[str] = None
+                  ) -> Optional[SynthFn]:
+    """Synthesis via a serving instance's chat-completions endpoint.
 
-    Returns None when nothing is serving — callers then use fallback_synth and
-    record the hint. Kept app-shaped (not importing chat.py) so curate/ stays
-    dashboard-free."""
-    try:
-        from ..serving.deploy import read_serve_state
+    ``server_id`` selects a named multi-instance server (Phase 6); None or
+    "default" uses the legacy serve_state view. The chosen instance must be
+    alive (state_alive) — a dead state file falls back to the default so a
+    stale selection never silently kills synthesis. Returns None when nothing
+    is serving — callers then use fallback_synth and record the hint. Kept
+    app-shaped (not importing chat.py) so curate/ stays dashboard-free."""
+    home = Path(app.home)
+    st: Optional[Dict[str, Any]] = None
+    sid = str(server_id or "").strip()
+    if sid and sid != "default":
+        try:
+            from ..serving import instances as srv_inst
 
-        st = read_serve_state(Path(app.home))
-    except Exception:  # noqa: BLE001 — no state file == nothing serving
-        return None
+            cand = srv_inst.read_state_merged(home, sid)
+            if srv_inst.state_alive(cand):
+                st = cand
+            else:
+                logger.warning(
+                    "curation server %r is not running; falling back to the "
+                    "default serve endpoint", sid)
+        except Exception:  # noqa: BLE001 — unknown instance == no override
+            logger.warning("unknown curation server %r; using default", sid)
+    if st is None:
+        try:
+            from ..serving.deploy import read_serve_state
+
+            st = read_serve_state(home)
+        except Exception:  # noqa: BLE001 — no state file == nothing serving
+            return None
     base = str((st or {}).get("base_url") or "").strip()
     model = str((st or {}).get("model_name") or "").strip()
     if not base or not model:
