@@ -40,7 +40,17 @@ logger = logging.getLogger("toaster_loop.curate.sources")
 
 #: Doc extensions ingested as prose (vs data files through importer.py).
 DOC_EXTS = {".md", ".txt", ".rst", ".html", ".htm"}
-DATA_EXTS = {".json", ".jsonl"}
+DATA_EXTS = {".json", ".jsonl", ".parquet"}
+
+#: Directory names never descended into during folder ingest: vendored
+#: dependencies and tool caches produce thousands of "cannot detect dataset
+#: format" warnings (and zero training value) when someone points the folder
+#: source at a repo root with a .venv inside.
+SKIP_DIR_NAMES = {
+    ".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules",
+    "__pycache__", "site-packages", "dist-info", ".mypy_cache",
+    ".pytest_cache", ".ruff_cache", ".tox", "build", "dist", ".eggs",
+}
 
 #: Per-file / total read caps: a "curate my whole home dir" pick must not OOM
 #: the dashboard or take minutes per file.
@@ -72,22 +82,38 @@ def _safe_id(name: str) -> str:
     return safe[:64] or "source"
 
 
-def _alloc_ds_dir(home: Path, name: str) -> Tuple[Path, str]:
-    """Dataset dir + id with the importer's stamp--name scheme."""
+def alloc_dataset_id(home: Path, name: Optional[str]) -> Tuple[Path, str]:
+    """Dataset dir + id as ``<name>-<UTC stamp>`` — reserved (mkdir) on return.
+
+    Name-first so the dataset list reads like "docs-20261103T192214Z" instead
+    of a timestamp everyone has to decode; the trailing second-granularity UTC
+    stamp keeps ids unique and sortable within a name. Collision (rapid
+    successive runs) appends -2, -3… Shared by sources/importer/curater so all
+    three producers write one scheme. The mkdir(exist_ok=False) doubles as the
+    cross-process reservation lock the curater's claim-before-write relies on.
+    """
     datasets_root = Path(home) / "datasets"
+    datasets_root.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    base = f"{stamp}--{_safe_id(name)}" if name else stamp
-    ds_dir = datasets_root / base
+    safe = _safe_id(name) if name else ""
+    base = f"{safe}-{stamp}" if safe else stamp
+    candidate = base
     n = 2
-    while ds_dir.exists():
-        ds_dir = datasets_root / f"{base}-{n}"
-        n += 1
-    return ds_dir, ds_dir.name
+    while True:
+        ds_dir = datasets_root / candidate
+        try:
+            ds_dir.mkdir(parents=True, exist_ok=False)
+            return ds_dir, ds_dir.name
+        except FileExistsError:
+            candidate = f"{base}-{n}"
+            n += 1
+
 
 
 def materialize(home: Path, conversations: List[List[Dict[str, Any]]], *,
                 name: str, provenance: str, source: Dict[str, Any],
-                warnings: Optional[List[str]] = None) -> SourceResult:
+                warnings: Optional[List[str]] = None,
+                title: Optional[str] = None) -> SourceResult:
     """Write a curate-layout dataset record from ShareGPT conversations.
 
     Same contract as importer.import_dataset's output (sft.jsonl rows of
@@ -99,8 +125,7 @@ def materialize(home: Path, conversations: List[List[Dict[str, Any]]], *,
 
     if not conversations:
         raise ImportError_("no usable rows produced from this source")
-    ds_dir, dataset_id = _alloc_ds_dir(Path(home), name)
-    ds_dir.mkdir(parents=True, exist_ok=False)
+    ds_dir, dataset_id = alloc_dataset_id(Path(home), name)
     with open(ds_dir / "sft.jsonl", "w", encoding="utf-8") as f:
         for conv in conversations:
             f.write(json.dumps({"conversations": conv},
@@ -109,6 +134,7 @@ def materialize(home: Path, conversations: List[List[Dict[str, Any]]], *,
                     dataset_id=dataset_id)
     manifest: Dict[str, Any] = {
         "dataset_id": dataset_id,
+        "title": title or name,            # human label for the UI list
         "created_at": _utcnow(),
         "provenance": provenance,          # hub | local_folder | website
         **source,                          # source_repo / source_path / urls
@@ -140,20 +166,105 @@ def materialize(home: Path, conversations: List[List[Dict[str, Any]]], *,
 def find_hub_snapshot(home: Path, repo_id: str) -> Optional[Path]:
     """Latest snapshot dir for a downloaded hub DATASET repo, or None.
 
-    modelhub lays datasets out as
-    <home>/hub/datasets--<org>--<name>/snapshots/<sha>/; pick the newest by
-    mtime (typically one). Path-traversal-safe: repo_id is validated first."""
+    modelhub lays datasets out under its per-kind root —
+    <home>/hub/datasets/datasets--<org>--<name>/snapshots/<sha>/ (see
+    HubClient.kind_base/repo_cache_dir). The older flat layout
+    <home>/hub/datasets--<org>--<name>/ is checked too so snapshots downloaded
+    before the fix still import. Newest snapshot wins by mtime; path-traversal-
+    safe because repo_id is validated first."""
     from ..core.modelhub import _CACHE_PREFIX, validate_repo_id
 
     repo_id = validate_repo_id(repo_id)
     seg = _CACHE_PREFIX["datasets"] + repo_id.replace("/", "--")
-    snaps = Path(home) / "hub" / seg / "snapshots"
-    if not snaps.is_dir():
-        return None
-    cands = [d for d in snaps.iterdir() if d.is_dir()]
-    if not cands:
-        return None
-    return max(cands, key=lambda d: d.stat().st_mtime)
+    for snaps in (Path(home) / "hub" / "datasets" / seg / "snapshots",
+                  Path(home) / "hub" / seg / "snapshots"):
+        if not snaps.is_dir():
+            continue
+        cands = [d for d in snaps.iterdir() if d.is_dir()]
+        if cands:
+            return max(cands, key=lambda d: d.stat().st_mtime)
+    return None
+
+
+# ------------------------------------------------- generic table -> pairs
+
+#: Column-name candidates for mapping a tabular row (e.g. a HF parquet) onto a
+#: question/answer pair. Order = preference; first present combination wins.
+_Q_COLS = ("question", "instruction", "prompt", "description", "caption",
+           "query", "input", "text")
+_A_COLS = ("answer", "output", "completion", "response", "code", "solution",
+           "result")
+
+
+def _pair_columns(cols: List[str]) -> Optional[Tuple[str, str]]:
+    for q in _Q_COLS:
+        for a in _A_COLS:
+            if q != a and q in cols and a in cols:
+                return (q, a)
+    return None
+
+
+def parquet_to_conversations(
+        path: Path) -> Tuple[List[List[Dict[str, Any]]], List[str]]:
+    """.parquet -> (ShareGPT conversations, warnings).
+
+    HF datasets ship most public corpora as parquet; without this the hub
+    import produced nothing for them. Binary columns (the HF image struct
+    {bytes,path}) are dropped. When no recognized question/answer column pair
+    exists we degrade to the doc pipeline over the concatenated text columns,
+    so prose-only parquet still yields rows."""
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        return [], [f"{path.name}: parquet support needs pyarrow "
+                    "(pip install pyarrow); file skipped"]
+    try:
+        table = pq.read_table(path)
+        records = table.to_pylist()
+    except Exception as e:  # noqa: BLE001 — one bad file must not kill import
+        return [], [f"{path.name}: unreadable parquet ({e})"]
+
+    def _texty(v: Any) -> bool:
+        if isinstance(v, str):
+            return True
+        if isinstance(v, dict):  # HF image struct or nested metadata
+            return False
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    cols = [c for c in table.schema.names]
+    pair = _pair_columns(cols)
+    conversations: List[List[Dict[str, Any]]] = []
+    warnings: List[str] = []
+    if pair:
+        qcol, acol = pair
+        for rec in records:
+            q, a = rec.get(qcol), rec.get(acol)
+            if not _texty(q) or not _texty(a):
+                continue
+            q, a = str(q).strip(), str(a).strip()
+            if not q or not a:
+                continue
+            if acol == "code":  # description->script pairs train better framed
+                conversations.append([
+                    {"from": "human",
+                     "value": f"Write a Python script that satisfies this "
+                              f"description:\n\n{q}"},
+                    {"from": "gpt", "value": f"```python\n{a}\n```"}])
+            else:
+                conversations.append([
+                    {"from": "human", "value": q},
+                    {"from": "gpt", "value": a}])
+        return conversations, warnings
+
+    # No recognizable pair: fall back to doc synthesis over text columns.
+    text_cols = [c for c in cols if records and _texty(records[0].get(c))]
+    if not text_cols:
+        return [], [f"{path.name}: no text columns recognized"]
+    blob = "\n\n".join(
+        "\n".join(str(r.get(c, "")) for c in text_cols) for r in records)
+    convs, w = docs_to_rows([(path.stem, blob)], synth_fn=None)
+    warnings.extend(f"{path.name}: {x}" for x in w)
+    return convs, warnings
 
 
 def import_hub_snapshot(home: Path, repo_id: str, *,
@@ -161,28 +272,41 @@ def import_hub_snapshot(home: Path, repo_id: str, *,
     """Materialize a downloaded hub dataset snapshot into <home>/datasets/.
 
     Data files (.jsonl/.json) go through importer.py's reader + format sniff
-    unchanged; if the snapshot carries only prose files they fall back to the
-    doc pipeline WITHOUT synthesis (raw text rows are useless, so we synthesize
-    with the configured model when one is live — callers pass synth_fn)."""
+    unchanged; .parquet files map through the generic column-pair reader (HF's
+    dominant format); if the snapshot carries only prose files they fall back
+    to the doc pipeline WITHOUT synthesis (raw text rows are useless, so we
+    synthesize with the configured model when one is live — callers pass
+    synth_fn)."""
     snap = find_hub_snapshot(home, repo_id)
     if snap is None:
         raise ImportError_(
             f"no downloaded hub snapshot for {repo_id!r} — download it from "
             "the Hub page first")
+
+    # modelhub's own download manifest is metadata, not dataset content.
+    def _skip(p: Path) -> bool:
+        return p.name == "toaster_loop_download.json"
+
     data_files = sorted(p for p in snap.rglob("*")
-                        if p.is_file() and p.suffix.lower() in DATA_EXTS)
+                        if p.is_file() and not _skip(p)
+                        and p.suffix.lower() in DATA_EXTS - {".parquet"})
+    parquet_files = sorted(p for p in snap.rglob("*")
+                           if p.is_file() and not _skip(p)
+                           and p.suffix.lower() == ".parquet")
     doc_files = sorted(p for p in snap.rglob("*")
-                       if p.is_file() and p.suffix.lower() in DOC_EXTS)
+                       if p.is_file() and not _skip(p)
+                       and p.suffix.lower() in DOC_EXTS)
     warnings: List[str] = []
     conversations: List[List[Dict[str, Any]]] = []
+    from ..curate.importer import _row_to_messages
     for f in data_files:
         try:
             rows = read_rows(f)
+            fmt = detect_format(
+                [r for r in rows if "__malformed_line__" not in r])
         except ImportError_ as e:
             warnings.append(f"{f.name}: {e}")
             continue
-        fmt = detect_format([r for r in rows if "__malformed_line__" not in r])
-        from ..curate.importer import _row_to_messages
         for row in rows:
             if "__malformed_line__" in row:
                 continue
@@ -190,16 +314,20 @@ def import_hub_snapshot(home: Path, repo_id: str, *,
             conv = messages_to_sharegpt(msgs) if msgs else []
             if conv:
                 conversations.append(conv)
+    for f in parquet_files:
+        convs, w = parquet_to_conversations(f)
+        conversations.extend(convs)
+        warnings.extend(w)
     if not conversations and doc_files:
         conversations, w = docs_to_rows(
             [(p.name, p.read_text(encoding="utf-8", errors="replace"))
              for p in doc_files[:200]], synth_fn=None)
         warnings.extend(w)
-    label = name or repo_id.replace("/", "--")
+    label = name or repo_id.split("/")[-1]
     res = materialize(home, conversations, name=label, provenance="hub",
                       source={"source_repo": repo_id,
                               "snapshot_dir": str(snap)},
-                      warnings=warnings)
+                      warnings=warnings, title=repo_id)
     return res
 
 
@@ -352,24 +480,48 @@ def docs_to_rows(files: List[Tuple[str, str]], *,
 # ---------------------------------------------------------------- folder
 
 def iter_doc_files(root: Path) -> Tuple[List[Path], List[Path]]:
-    """(data_files, doc_files) under ``root``, recursive, caps applied."""
+    """(data_files, doc_files) under ``root``, recursive, caps applied.
+
+    Vendored-dependency and tool-cache directories (SKIP_DIR_NAMES — .venv,
+    node_modules, site-packages, …) are pruned before descent: pointing the
+    folder source at a repo root should curate the project's docs, not
+    thousands of dependency metadata files. Hidden directories are pruned too
+    (.git and friends), except dot-prefixed *files* inside kept dirs still
+    count (a README-style .md is fine)."""
     data: List[Path] = []
     docs: List[Path] = []
     total = 0
-    for p in sorted(root.rglob("*")):
-        if not p.is_file() or p.is_symlink():
-            continue
-        ext = p.suffix.lower()
-        if ext not in DOC_EXTS and ext not in DATA_EXTS:
-            continue
+
+    def walk(d: Path):
+        nonlocal total
         try:
-            size = p.stat().st_size
+            entries = sorted(d.iterdir())
         except OSError:
-            continue
-        if size > MAX_FILE_BYTES or total + size > MAX_TOTAL_BYTES:
-            continue
-        total += size
-        (data if ext in DATA_EXTS else docs).append(p)
+            return
+        for p in entries:
+            if p.is_symlink():
+                continue
+            if p.is_dir():
+                if p.name in SKIP_DIR_NAMES or (
+                        p.name.startswith(".") and p is not d):
+                    continue
+                walk(p)
+                continue
+            if not p.is_file():
+                continue
+            ext = p.suffix.lower()
+            if ext not in DOC_EXTS and ext not in DATA_EXTS:
+                continue
+            try:
+                size = p.stat().st_size
+            except OSError:
+                continue
+            if size > MAX_FILE_BYTES or total + size > MAX_TOTAL_BYTES:
+                continue
+            total += size
+            (data if ext in DATA_EXTS else docs).append(p)
+
+    walk(root)
     return data, docs
 
 
@@ -377,16 +529,19 @@ def ingest_folder(home: Path, folder: str, *, name: Optional[str] = None,
                   synth_fn: Optional[SynthFn] = None
                   ) -> SourceResult:
     """Recursive local-folder curation (WP3d). .json/.jsonl through importer.py
-    unchanged; prose/doc files through the doc->ShareGPT synthesis pipeline."""
+    unchanged; .parquet through the column-pair reader; prose/doc files
+    through the doc->ShareGPT synthesis pipeline."""
     root = Path(folder).expanduser()
     if not root.is_dir():
         raise ImportError_(f"not a directory: {folder}")
     data_files, doc_files = iter_doc_files(root)
+    json_files = [p for p in data_files if p.suffix.lower() != ".parquet"]
+    parquet_files = [p for p in data_files if p.suffix.lower() == ".parquet"]
     warnings: List[str] = []
     conversations: List[List[Dict[str, Any]]] = []
     skipped: List[str] = []
     from ..curate.importer import _row_to_messages
-    for f in data_files:
+    for f in json_files:
         try:
             rows = read_rows(f)
         except ImportError_ as e:
@@ -407,10 +562,14 @@ def ingest_folder(home: Path, folder: str, *, name: Optional[str] = None,
             conv = messages_to_sharegpt(msgs) if msgs else []
             if conv:
                 conversations.append(conv)
+    for f in parquet_files:
+        convs, w = parquet_to_conversations(f)
+        conversations.extend(convs)
+        warnings.extend(w)
     doc_payload = []
     for p in doc_files:
         try:
-            doc_payload.append((p.name,
+            doc_payload.append((str(p.relative_to(root)),
                                 p.read_text(encoding="utf-8",
                                             errors="replace")))
         except OSError as e:
@@ -418,12 +577,13 @@ def ingest_folder(home: Path, folder: str, *, name: Optional[str] = None,
     conv2, w = docs_to_rows(doc_payload, synth_fn=synth_fn)
     warnings.extend(w)
     conversations.extend(conv2)
+    label = name or root.name
     res = materialize(home, conversations,
-                      name=name or root.name, provenance="local_folder",
+                      name=label, provenance="local_folder",
                       source={"source_path": str(root.resolve()),
                               "files_data": len(data_files),
                               "files_docs": len(doc_files)},
-                      warnings=warnings)
+                      warnings=warnings, title=label)
     res.skipped_files = skipped
     return res
 
@@ -564,12 +724,12 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
         [(urlparse(u).path or "/", t) for u, t in pages],
         synth_fn=synth_fn)
     warnings.extend(w)
+    label = name or (parsed.netloc.split(".")[0] or "site")
     res = materialize(home, conversations,
-                      name=name or (parsed.netloc.split(".")[0] or "site"),
-                      provenance="website",
+                      name=label, provenance="website",
                       source={"source_url": entry,
                               "crawled_urls": [u for u, _ in pages]},
-                      warnings=warnings)
+                      warnings=warnings, title=parsed.netloc or label)
     return res
 
 

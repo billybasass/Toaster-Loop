@@ -528,7 +528,12 @@ class Curater:
         return self.datasets_root / dataset_id
 
     def list_datasets(self) -> List[Dict[str, Any]]:
-        """Manifests of all datasets on disk, oldest first."""
+        """Manifests of all datasets on disk, oldest first.
+
+        Sorted by the manifest created_at (ids are name-first since the
+        readable-id change, so directory order is no longer chronological).
+        Manifests without a usable created_at keep their directory order at
+        the end."""
         out = []
         if not self.datasets_root.is_dir():
             return out
@@ -539,6 +544,7 @@ class Curater:
                     out.append(json.loads(mf.read_text()))
                 except (OSError, json.JSONDecodeError):
                     out.append({"dataset_id": d.name, "error": "manifest unreadable"})
+        out.sort(key=lambda m: str(m.get("created_at") or "\uffff"))
         return out
 
     def load_manifest(self, dataset_id: str) -> Optional[Dict[str, Any]]:
@@ -576,6 +582,20 @@ class Curater:
         warnings: List[str] = []
 
         if rebuild_id:
+            # A source-derived dataset (hub/local_folder/website/imported) has
+            # no trace claims — rebuilding it through the TRACE pipeline would
+            # silently wipe its rows and emit an empty dataset in place (the
+            # exact failure a user hit when a plain curate targeted one of
+            # those ids). Refuse; source datasets are re-created from their
+            # sources, not rebuilt from the buffer.
+            existing = self.load_manifest(rebuild_id) or {}
+            prov = str(existing.get("provenance") or "curated")
+            if existing and prov != "curated":
+                raise ValueError(
+                    f"dataset {rebuild_id} was curated from a "
+                    f"{prov} source, not buffered traces — rebuilding it here "
+                    "would erase its rows. Re-create it from the Datasets "
+                    "page (Ingest folder / Crawl site / Import hub) instead.")
             released = self.store.reset_claims(rebuild_id)
             logger.info("--rebuild %s: released %d claims", rebuild_id, released)
             dataset_id = rebuild_id
@@ -713,6 +733,7 @@ class Curater:
 
             manifest = {
             "dataset_id": dataset_id,
+            "title": name or dataset_id,   # human label for the UI list
             "created_at": _utcnow(),
             "dataset_schema_version": DATASET_SCHEMA_VERSION,
             "trace_schema_version": 1,
@@ -897,20 +918,6 @@ class Curater:
         until manifest.json lands (``list_datasets`` skips it) and any failure
         path rmtree's it. A numeric suffix is appended on collision (rapid
         successive runs). Returns (id, dir)."""
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        if name:
-            safe = "".join(
-                c if (c.isalnum() or c in "-_.") else "-" for c in name
-            ).strip("-_")
-            if safe:
-                stamp = f"{stamp}--{safe}"
-        candidate = stamp
-        n = 2
-        while True:
-            ds_dir = self.dataset_dir(candidate)
-            try:
-                ds_dir.mkdir(parents=True, exist_ok=False)
-                return candidate, ds_dir
-            except FileExistsError:
-                candidate = f"{stamp}-{n}"
-                n += 1
+        from .sources import alloc_dataset_id
+        ds_dir, dataset_id = alloc_dataset_id(self.home, name)
+        return dataset_id, ds_dir

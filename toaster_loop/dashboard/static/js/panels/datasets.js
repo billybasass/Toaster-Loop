@@ -315,7 +315,17 @@ async function detailView(mount, datasetId) {
 
   if (!await loadManifest()) return { destroy() {} };
 
+  // Source-derived datasets (hub/folder/website/import) carry no trace claims;
+  // a trace-pipeline rebuild would erase their rows, so the server refuses —
+  // hide the button and point at the source action instead.
+  const prov = manifest.provenance || "curated";
+  const isSourceBacked = prov !== "curated";
   const rebuildBtn = el("button", { text: "Rebuild (re-curate)" });
+  if (isSourceBacked) {
+    rebuildBtn.disabled = true;
+    rebuildBtn.title = `This dataset was curated from a ${prov} source — ` +
+      "re-create it from that source instead of rebuilding from traces.";
+  }
   rebuildBtn.addEventListener("click", async () => {
     const ok = await confirmDialog({
       title: `Rebuild ${datasetId}?`,
@@ -709,10 +719,11 @@ function listView(mount) {
       diffHost.replaceChildren(diffCard(datasets));
     else
       diffHost.replaceChildren();
-    const rows = [...datasets].reverse(); // newest first
+    const rows = [...datasets].reverse(); // server sorts oldest-first
     tableHost.replaceChildren(table([
-      { label: "id", render: (d) => el("span", { class: "mono" },
-          d.dataset_id || "–") },
+      { label: "name", render: (d) => el("div", {},
+          el("div", { text: d.title || d.dataset_id || "–" }),
+          el("div", { class: "hint mono", text: d.dataset_id || "" })) },
       { label: "created", render: (d) => fmtTime(d.created_at, false) },
       // WP3c/d: provenance chip — curated datasets show nothing extra (the
       // common case stays quiet); hub/folder/website carry a source badge.

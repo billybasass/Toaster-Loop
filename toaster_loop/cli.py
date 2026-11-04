@@ -2993,6 +2993,11 @@ def cmd_curate(args: argparse.Namespace) -> int:
 
         curater = Curater(store, home)
         res = curater.curate(ccfg, name=args.name, rebuild_id=args.rebuild)
+    except ValueError as e:
+        # Rebuild guard: source-derived datasets (hub/folder/website/import)
+        # cannot be rebuilt from the trace buffer — clear message, no traceback.
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     finally:
         store.close()
 

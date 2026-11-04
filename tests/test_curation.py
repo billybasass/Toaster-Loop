@@ -841,7 +841,9 @@ def test_manifest_provenance_fields(toaster_loop_home__test_importer):
     assert mf["provenance"] == "imported"
     assert mf["source_file"].endswith("pub.jsonl")
     assert mf["source_format"] == "alpaca"
-    assert mf["dataset_id"] == res.dataset_id and "--pub" in res.dataset_id
+    # Name-first ids: "<name>-<UTC stamp>" (readable-id change).
+    assert mf["dataset_id"] == res.dataset_id \
+        and res.dataset_id.startswith("pub-")
     assert mf["created_at"]
     assert mf["files"]["sft.jsonl"]["count"] == 1
     assert mf["files"]["sft.jsonl"]["trace_ids"] == []  # no trace provenance

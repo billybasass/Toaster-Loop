@@ -270,20 +270,11 @@ def import_dataset(
             f"conversations ({skipped} skipped) — check the file")
 
     # Dataset dir follows the exact curate layout (no DB: imports claim no
-    # traces). Id scheme mirrors Curater._make_dataset_id: UTC stamp--name.
+    # traces). Id scheme shared with curater/sources: <name>-<UTC stamp>.
+    from .sources import alloc_dataset_id
     datasets_root = Path(home) / "datasets"
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    safe = "".join(
-        c if (c.isalnum() or c in "-_.") else "-" for c in (name or path.stem)
-    ).strip("-_")
-    dataset_id = f"{stamp}--{safe}" if safe else stamp
-    ds_dir = datasets_root / dataset_id
-    n = 2
-    while ds_dir.exists():
-        ds_dir = datasets_root / f"{dataset_id}-{n}"
-        n += 1
-    dataset_id = ds_dir.name
-    ds_dir.mkdir(parents=True, exist_ok=False)
+    label = name or path.stem
+    ds_dir, dataset_id = alloc_dataset_id(Path(home), label)
 
     with open(ds_dir / "sft.jsonl", "w", encoding="utf-8") as f:
         for conv in conversations:
@@ -302,6 +293,7 @@ def import_dataset(
 
     manifest = {
         "dataset_id": dataset_id,
+        "title": label,                    # human label for the UI list
         "created_at": _utcnow(),
         "dataset_schema_version": DATASET_SCHEMA_VERSION,
         "train_yaml_template_version": TRAIN_YAML_TEMPLATE_VERSION,
