@@ -202,6 +202,20 @@ PAGES = {
     "/guide.html": ("<html><body><h2>Install</h2><p>"
                     + "Install steps for the toolkit. " * 8
                     + "</p></body></html>"),
+    # i18n hub page: links into localized mirrors plus the English guide.
+    "/i18n.html": ("<html><body><h2>Docs</h2><p>"
+                   + "Pick your docs language here. " * 6
+                   + "</p>"
+                   "<a href='/guide.html'>en guide</a>"
+                   "<a href='/zh/guide.html'>中文</a>"
+                   "<a href='/ja/guide.html'>日本語</a>"
+                   "</body></html>"),
+    "/zh/guide.html": ("<html><body><h2>安装</h2><p>"
+                       + "工具包的安装步骤说明。" * 10
+                       + "</p></body></html>"),
+    "/ja/guide.html": ("<html><body><h2>インストール</h2><p>"
+                       + "ツールキットのインストール手順です。" * 10
+                       + "</p></body></html>"),
     # SPA-style page: navigable link in real markup, phantom route ONLY inside
     # a <script> body (quoted href= form the crawl regex would otherwise hit).
     "/scripty.html": (
@@ -279,6 +293,101 @@ def test_crawl_respects_robots_disallow(home, site, monkeypatch):
 def test_crawl_refuses_private_by_default(home, site):
     with pytest.raises(CurateImportError):
         src.crawl_website(home, site + "/", sleep_s=0.0)
+
+
+def test_crawl_language_filter(home, site):
+    """lang='en' keeps un-prefixed pages and drops /zh/ + /ja/ mirrors; the
+    skipped count surfaces as a warning."""
+    res = src.crawl_website(home, site + "/i18n.html", max_pages=10,
+                            max_depth=1, sleep_s=0.0, lang="en",
+                            allow_private_networks=True)
+    manifest = json.loads(
+        (home / "datasets" / res.dataset_id / "manifest.json").read_text())
+    crawled = manifest["crawled_urls"]
+    assert any(u.endswith("/guide.html") and "/zh/" not in u
+               and "/ja/" not in u for u in crawled)
+    assert not any("/zh/" in u or "/ja/" in u for u in crawled)
+    assert any("other languages" in w for w in manifest["warnings"])
+
+
+def test_crawl_language_all_keeps_everything(home, site):
+    res = src.crawl_website(home, site + "/i18n.html", max_pages=10,
+                            max_depth=1, sleep_s=0.0, lang="*",
+                            allow_private_networks=True)
+    manifest = json.loads(
+        (home / "datasets" / res.dataset_id / "manifest.json").read_text())
+    crawled = manifest["crawled_urls"]
+    assert any("/zh/guide.html" in u for u in crawled)
+
+
+def test_crawl_entry_page_language_wins(home, site):
+    """Entering the crawl AT a /ja/ mirror crawls Japanese even when the
+    machine language is English (auto-detect must not fight the entry)."""
+    res = src.crawl_website(home, site + "/ja/guide.html", max_pages=10,
+                            max_depth=1, sleep_s=0.0, lang="*",
+                            allow_private_networks=True)
+    manifest = json.loads(
+        (home / "datasets" / res.dataset_id / "manifest.json").read_text())
+    assert any("/ja/guide.html" in u for u in manifest["crawled_urls"])
+
+
+def test_crawl_cancellation_stops_early(home, site):
+    """should_cancel firing mid-crawl aborts with CurateCancelled before the
+    remaining pages are fetched."""
+    flags = {"n": 0}
+
+    def _cancel():
+        flags["n"] += 1
+        return flags["n"] > 2   # let the first page or two through
+
+    with pytest.raises(src.CurateCancelled):
+        src.crawl_website(home, site + "/", max_pages=30, max_depth=2,
+                          sleep_s=0.0, lang="*", should_cancel=_cancel,
+                          allow_private_networks=True)
+
+
+def test_docs_to_rows_cancellation():
+    seen = {"n": 0}
+
+    def _cancel():
+        seen["n"] += 1
+        return seen["n"] > 2
+
+    with pytest.raises(src.CurateCancelled):
+        src.docs_to_rows(
+            [(f"f{i}.md", "# H\n\n## S\n" + "content body. " * 10)
+             for i in range(6)],
+            synth_fn=None, should_cancel=_cancel)
+
+
+# ----------------------------------------------------------- delete endpoint
+
+def test_dataset_delete_endpoint(home):
+    from toaster_loop.dashboard.app import DashboardApp
+
+    _make_hub_snapshot(home)
+    app = DashboardApp(ToasterLoopConfig(), home=home)
+    ds_id = app.handle("POST", "/api/datasets/import_hub",
+                       body={"repo_id": "testorg/Test-Dataset"}
+                       ).body["dataset_id"]
+    assert (home / "datasets" / ds_id / "manifest.json").is_file()
+
+    r = app.handle("DELETE", "/api/datasets/" + ds_id)
+    assert r.status == 200, r.body
+    assert not (home / "datasets" / ds_id).exists()
+    # gone from the list, and a second delete is an honest 404
+    ids = [d["dataset_id"] for d in
+           app.handle("GET", "/api/datasets").body["datasets"]]
+    assert ds_id not in ids
+    assert app.handle("DELETE", "/api/datasets/" + ds_id).status == 404
+
+
+def test_dataset_delete_rejects_bad_ids(home):
+    from toaster_loop.dashboard.app import DashboardApp
+
+    app = DashboardApp(ToasterLoopConfig(), home=home)
+    assert app.handle("DELETE", "/api/datasets/..%2Fescape").status in (400, 404)
+    assert app.handle("DELETE", "/api/datasets/nope-not-here").status == 404
 
 
 # ------------------------------------------------------------- hub import

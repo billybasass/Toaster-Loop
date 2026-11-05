@@ -363,12 +363,36 @@ async function detailView(mount, datasetId) {
     finally { rebuildBtn.disabled = false; }
   });
 
+  // Delete for good: the dataset directory is removed and its trace claims
+  // released (buffer traces become curatable again). Confirm first — there
+  // is no undo; export first if the data matters.
+  const deleteBtn = el("button", { text: "Delete dataset", class: "danger" });
+  deleteBtn.addEventListener("click", async () => {
+    const ok = await confirmDialog({
+      title: `Delete ${datasetId}?`,
+      body: "Permanently removes this dataset (sft.jsonl, dpo.jsonl, manifest, " +
+        "sidecars) and releases its trace claims back to the buffer. This " +
+        "cannot be undone — export it first if you may need it.",
+      confirmLabel: "Delete forever", danger: true });
+    if (!ok) return;
+    deleteBtn.disabled = true;
+    try {
+      await api("/api/datasets/" + encodeURIComponent(datasetId),
+        { method: "DELETE" });
+      toast(`deleted ${datasetId}`, "ok");
+      go("/datasets");
+    } catch (e) {
+      toast(`delete failed: ${e.message}`, "error");
+      deleteBtn.disabled = false;
+    }
+  });
+
   host.replaceChildren(
     el("div", { class: "loghead" },
       el("a", { href: "#/datasets", class: "hint", text: "← datasets" }),
       el("h3", { text: datasetId }),
       copyButton(datasetId, "copy id")),
-    el("div", { class: "btnrow" }, rebuildBtn),
+    el("div", { class: "btnrow" }, rebuildBtn, deleteBtn),
     manifestBlock(),
     tabsBlock(),
     exportBlock());
@@ -512,6 +536,12 @@ function sourcesCard(onDone) {
     placeholder: "entry page URL, e.g. docs.example.org/start.html" });
   const pagesIn = el("input", { type: "number", min: "1", max: "30",
     placeholder: "30", class: "narrow" });
+  // Language filter for localized docs trees (/zh/, /ja/…): empty = auto
+  // (server detects from the system locale); "*" keeps every language.
+  const langIn = el("input", { type: "text", class: "narrow",
+    placeholder: "auto", title:
+      "Only crawl pages in this language on /zh/ /ja/ … mirrored docs trees. " +
+      "Empty = your system language; * = keep all languages." });
   const urlBtn = el("button", { text: "Crawl site" });
   urlBtn.addEventListener("click", async () => {
     if (!urlIn.value.trim()) return toast("URL required", "error");
@@ -520,6 +550,7 @@ function sourcesCard(onDone) {
     try {
       const body = { source: "website", url: urlIn.value.trim() };
       if (pagesIn.value) body.max_pages = Number(pagesIn.value);
+      if (langIn.value.trim()) body.lang = langIn.value.trim();
       if (serverSel.value) body.server = serverSel.value;
       const r = await curateJob(body, "/api/datasets/curate_source",
         setProgress);
@@ -563,6 +594,8 @@ function sourcesCard(onDone) {
       dirBtn),
     el("div", { class: "field" }, el("label", {}, "website"), urlIn,
       el("label", { title: "max pages (bounded crawl)" }, "pages"), pagesIn,
+      el("label", { title: "crawl language (empty = system language, * = all)" },
+        "lang"), langIn,
       urlBtn),
     el("div", { class: "field" },
       el("label", { title: "serving instance used for pair synthesis" },

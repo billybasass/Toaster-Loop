@@ -9,6 +9,7 @@ WP9 analytics and guarded export.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from pathlib import Path
@@ -17,6 +18,8 @@ from urllib.parse import urlparse
 
 from ...curate.curater import Curater
 from .base import ApiContext, ApiResponse, HttpError
+
+logger = logging.getLogger("toaster_loop.dashboard.datasets")
 
 #: WP3b one-click install guard: one datasets-install at a time per process.
 _ENV_INSTALL: Dict[str, Any] = {"lock": threading.Lock(), "running": False,
@@ -106,6 +109,40 @@ WP9 analytics and guarded export.
                     total += 1
         return {"file": fkey, "offset": offset, "limit": limit, "total": total,
                 "truncated": truncated, "rows": rows}
+
+    def h_dataset_delete(self, q: Dict[str, str], b: Dict[str, Any],
+                         dataset_id: str) -> Dict[str, Any]:
+        """DELETE /api/datasets/<id> — remove a dataset directory for good.
+
+        Releases the dataset's trace claims first (the same release the
+        rebuild path uses), so traces claimed from the buffer become curatable
+        again instead of orphaned forever; source-derived datasets hold no
+        claims and just vanish. Refuses ids that could escape the datasets
+        root, and 404s when there is nothing to delete."""
+        import re as _re
+        import shutil
+
+        if not dataset_id or not _re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*",
+                                               dataset_id):
+            raise HttpError(400, "invalid dataset id")
+        ds_dir = (self.home / "datasets").resolve() / dataset_id
+        root = (self.home / "datasets").resolve()
+        if root not in ds_dir.parents:
+            raise HttpError(400, "invalid dataset id")
+        if not (ds_dir / "manifest.json").is_file():
+            raise HttpError(404, "no such dataset")
+        store = self._store()
+        try:
+            released = store.reset_claims(dataset_id)
+        except Exception:  # noqa: BLE001 — claims are best-effort on delete
+            released = 0
+        finally:
+            store.close()
+        shutil.rmtree(ds_dir)
+        logger.info("dataset %s deleted (%d trace claims released)",
+                    dataset_id, released)
+        return {"ok": True, "dataset_id": dataset_id,
+                "claims_released": released}
 
     def h_dataset_diff(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         """Idea #6: diff two dataset versions by manifest + content hashes.
@@ -296,6 +333,7 @@ WP9 analytics and guarded export.
         folders/crawls plus LLM synthesis must never block the HTTP thread.
         The job's final log line carries {"event": "done", "result":
         {dataset_id, rows, warnings}}."""
+        from ...curate.sources import CurateCancelled
         from .base import ApiResponse
 
         source = str(b.get("source") or "").strip().lower()
@@ -349,8 +387,29 @@ WP9 analytics and guarded export.
                 if not reg.mark_running(job_id, os.getpid(), actor="dashboard"):
                     return  # cancelled while queued
                 self._job_observer(job_id, "running")
+
+                def _should_cancel() -> bool:
+                    # Cooperative stop: the Jobs page cancels by stamping the
+                    # registry; the crawl/synthesis loop observes it here and
+                    # aborts within one page/chunk instead of running to the
+                    # page cap.
+                    try:
+                        j = reg.get_job(job_id)
+                        return bool(j and j.state == "cancelled")
+                    except Exception:  # noqa: BLE001 — probe never fatal
+                        return False
+
                 try:
-                    res = self._curate_source_run(b, progress=_progress)
+                    res = self._curate_source_run(b, progress=_progress,
+                                                  should_cancel=_should_cancel)
+                except CurateCancelled:
+                    _log({"event": "cancelled", "job": job_id,
+                          "result": {"message":
+                                     "curation cancelled — partial rows were "
+                                     "not saved"}})
+                    reg.finish_job(job_id, "cancelled", actor="dashboard")
+                    self._job_observer(job_id, "cancelled")
+                    return
                 except Exception as e:  # noqa: BLE001 — job errors are data
                     msg = f"{type(e).__name__}: {e}"
                     if log_path:
@@ -394,14 +453,17 @@ WP9 analytics and guarded export.
                                  "state": "queued"})
 
     def _curate_source_run(self, b: Dict[str, Any], *,
-                           progress: Optional[Any] = None):
+                           progress: Optional[Any] = None,
+                           should_cancel: Optional[Any] = None):
         """Execute a curate_source body (folder or website) with live-model
         synthesis when a server is up. Split out so tests can call it inline.
 
         ``server`` optionally names a serving instance (Phase 6) whose
         chat-completions drive the doc->ShareGPT synthesis; omitted/"default"
         uses the legacy serve endpoint, and nothing serving falls back to the
-        deterministic heading synth."""
+        deterministic heading synth. ``lang`` restricts website crawls to one
+        language (auto-detected from the environment when omitted; "*" = keep
+        everything)."""
         from ...curate.sources import crawl_website, ingest_folder, \
             live_synth_fn
 
@@ -416,14 +478,18 @@ WP9 analytics and guarded export.
         if source == "local_folder":
             return ingest_folder(self.home, str(b.get("path") or ""),
                                  name=name, synth_fn=synth,
-                                 progress=progress)
+                                 progress=progress,
+                                 should_cancel=should_cancel)
         kwargs: Dict[str, Any] = {}
         if b.get("max_pages") is not None:
             kwargs["max_pages"] = int(b["max_pages"])
         if b.get("max_depth") is not None:
             kwargs["max_depth"] = int(b["max_depth"])
+        if str(b.get("lang") or "").strip():
+            kwargs["lang"] = str(b["lang"]).strip()
         return crawl_website(self.home, str(b.get("url") or ""), name=name,
-                             synth_fn=synth, progress=progress, **kwargs)
+                             synth_fn=synth, progress=progress,
+                             should_cancel=should_cancel, **kwargs)
 
     # --------------------------------------------- WP3b: datasets env gate
 

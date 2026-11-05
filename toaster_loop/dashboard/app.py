@@ -275,6 +275,7 @@ dependency wiring only. Route handlers resolve by name via getattr.
         # static path before <dataset_id> (idea #6: version diff)
         ("GET", "/api/datasets/diff", "h_dataset_diff"),
         ("GET", "/api/datasets/<dataset_id>", "h_dataset_get"),
+        ("DELETE", "/api/datasets/<dataset_id>", "h_dataset_delete"),
         ("GET", "/api/datasets/<dataset_id>/rows", "h_dataset_rows"),
         # WP9 analytics: curation funnel history + validation-gate telemetry
         ("GET", "/api/analytics/curation", "h_analytics_curation"),

@@ -77,6 +77,50 @@ ProgressFn = Callable[[str], None]
 """Progress reporter: one line per unit of work (file/page/chunk batch). The
 dashboard writes these into the job log so long crawls aren't silent."""
 
+ShouldCancelFn = Callable[[], bool]
+"""Cooperative cancellation probe: checked between pages/files/chunks. When
+it returns True the pipeline raises CurateCancelled instead of starting the
+next unit of work — a cancelled job must stop in seconds, not finish its crawl."""
+
+
+class CurateCancelled(RuntimeError):
+    """Raised when should_cancel fires mid-build (job cancelled from the UI)."""
+
+
+#: Path segments that mark a localized docs tree (/zh/, /ja/tutorials/, …).
+#: Curated to real language codes so English routes like /id/ or /no/ are not
+#: misread — only these exact segments count as a language prefix.
+LANG_SEGMENTS = {
+    "en", "ar", "cs", "da", "de", "el", "es", "fa", "fi", "fr", "he", "hi",
+    "hu", "id", "it", "ja", "ko", "nl", "no", "pl", "pt", "ro", "ru", "sv",
+    "th", "tr", "uk", "vi", "zh", "zh-cn", "zh-tw", "zh-hans", "zh-hant",
+    "pt-br", "es-419",
+}
+
+
+def _path_lang(path: str) -> Optional[str]:
+    """Language code of a URL path's first matching segment, else None."""
+    for seg in path.lower().strip("/").split("/"):
+        if seg in LANG_SEGMENTS:
+            return seg
+    return None
+
+
+def _lang_ok(path: str, lang: Optional[str]) -> bool:
+    """True when ``path`` may be crawled for the user's language.
+
+    Pages without a recognized language segment always pass (most docs live
+    un-prefixed). A page under /zh/ or /ja/... passes only when it matches the
+    requested language, including prefix forms (lang "zh" accepts "zh-tw")."""
+    if not lang or lang == "*":
+        return True
+    found = _path_lang(path)
+    if found is None:
+        return True
+    want = lang.lower()
+    return found == want or found.split("-")[0] == want \
+        or want.split("-")[0] == found
+
 
 def _looks_like_data(text: str) -> bool:
     """True when a text blob is machine data (JSON/JS/config) rather than prose.
@@ -503,10 +547,37 @@ def _usable_pair(q: str, a: str) -> bool:
     return not _looks_like_data(a)
 
 
+def detect_lang() -> str:
+    """Best-effort user language (BCP-47 base) from the environment.
+
+    Checks LANGUAGE/LC_ALL/LC_MESSAGES/LANG (POSIX) and locale.getlocale();
+    "en" for a US/EU desktop, "ja" on a Japanese one. "*" when undetectable —
+    callers treat that as no filtering."""
+    import os
+
+    for var in ("LANGUAGE", "LC_ALL", "LC_MESSAGES", "LANG"):
+        v = os.environ.get(var, "").strip()
+        if v and not v.startswith(("C.", "C")):
+            code = v.split(":")[0].split(".")[0].replace("@", "_") \
+                   .lower().replace("_", "-")
+            if code:
+                return code
+    try:
+        import locale as _locale
+
+        loc = _locale.getlocale()[0]
+        if loc:
+            return loc.lower().replace("_", "-")
+    except Exception:  # noqa: BLE001 — locale is best-effort
+        pass
+    return "*"
+
+
 def docs_to_rows(files: List[Tuple[str, str]], *,
                  synth_fn: Optional[SynthFn],
                  max_chunks_per_file: int = 20,
                  progress: Optional[ProgressFn] = None,
+                 should_cancel: Optional[ShouldCancelFn] = None,
                  ) -> Tuple[List[List[Dict[str, Any]]], List[str]]:
     """[(name, text)] -> (ShareGPT conversations, warnings).
 
@@ -522,12 +593,17 @@ def docs_to_rows(files: List[Tuple[str, str]], *,
     conversations: List[List[Dict[str, Any]]] = []
     dropped_data = 0
     for fi, (name, text) in enumerate(files):
+        if should_cancel is not None and should_cancel():
+            raise CurateCancelled("curation cancelled before synthesis finished")
         scrubbed = _scrub_machine_lines(text)
         chunks = chunk_text(scrubbed)[:max_chunks_per_file]
         if not chunks:
             continue
         used_fallback = False
         for chunk in chunks:
+            if should_cancel is not None and should_cancel():
+                raise CurateCancelled(
+                    "curation cancelled during synthesis")
             if _looks_like_data(chunk):
                 dropped_data += 1
                 continue
@@ -613,7 +689,8 @@ def iter_doc_files(root: Path) -> Tuple[List[Path], List[Path]]:
 
 def ingest_folder(home: Path, folder: str, *, name: Optional[str] = None,
                   synth_fn: Optional[SynthFn] = None,
-                  progress: Optional[ProgressFn] = None
+                  progress: Optional[ProgressFn] = None,
+                  should_cancel: Optional[ShouldCancelFn] = None
                   ) -> SourceResult:
     """Recursive local-folder curation (WP3d). .json/.jsonl through importer.py
     unchanged; .parquet through the column-pair reader; prose/doc files
@@ -635,7 +712,13 @@ def ingest_folder(home: Path, folder: str, *, name: Optional[str] = None,
     skipped: List[str] = []
     done_units = 0
     from ..curate.importer import _row_to_messages
+
+    def _check_cancel() -> None:
+        if should_cancel is not None and should_cancel():
+            raise CurateCancelled("folder ingest cancelled")
+
     for f in json_files:
+        _check_cancel()
         try:
             rows = read_rows(f)
         except ImportError_ as e:
@@ -663,6 +746,7 @@ def ingest_folder(home: Path, folder: str, *, name: Optional[str] = None,
             progress(f"{f.name}: {len(conversations)} rows "
                      f"({done_units}/{total_units} files)")
     for f in parquet_files:
+        _check_cancel()
         convs, w = parquet_to_conversations(f)
         conversations.extend(convs)
         warnings.extend(w)
@@ -688,7 +772,8 @@ def ingest_folder(home: Path, folder: str, *, name: Optional[str] = None,
 
     conv2, w = docs_to_rows(doc_payload, synth_fn=synth_fn,
                             progress=_doc_progress if progress is not None
-                            or logger.isEnabledFor(logging.INFO) else None)
+                            or logger.isEnabledFor(logging.INFO) else None,
+                            should_cancel=should_cancel)
     warnings.extend(w)
     conversations.extend(conv2)
     label = name or root.name
@@ -789,12 +874,17 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
                   synth_fn: Optional[SynthFn] = None,
                   allow_private_networks: bool = False,
                   sleep_s: float = 0.2,
-                  progress: Optional[ProgressFn] = None) -> SourceResult:
+                  progress: Optional[ProgressFn] = None,
+                  should_cancel: Optional[ShouldCancelFn] = None,
+                  lang: Optional[str] = None) -> SourceResult:
     """Bounded same-origin crawl -> HTML text -> doc->ShareGPT pipeline.
 
     Politeness + safety: robots.txt honored (crawl-delay-free fixed sleep),
     same-origin only, page/depth caps, per-page fetch re-validated through the
     web_fetch SSRF posture (private targets refused unless explicitly allowed).
+    ``lang`` restricts the crawl to one language on localized docs trees:
+    pages under a foreign language prefix (/zh/, /ja/…) are skipped without
+    fetching; None = auto-detect from the environment, "*" disables filtering.
     Source URLs land in the manifest for provenance."""
     entry = url.strip()
     if not entry:
@@ -802,6 +892,15 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
     parsed = urlparse(entry)
     if parsed.scheme not in ("http", "https"):
         raise ImportError_("only http(s) URLs can be crawled")
+    explicit_lang = lang is not None
+    lang = detect_lang() if lang is None else str(lang).strip().lower() or "*"
+    # An entry page that IS a language mirror (site/zh/...) crawls that
+    # language unless the caller said otherwise — auto-detect must not fight
+    # an intentional deep entry.
+    if not explicit_lang and lang != "*":
+        entry_lang = _path_lang(parsed.path)
+        if entry_lang:
+            lang = entry_lang
     origin = f"{parsed.scheme}://{parsed.netloc}"
     allowed = _robots_allows(origin, parsed.path or "/",
                              allow_private=allow_private_networks)
@@ -812,18 +911,28 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
     warnings: List[str] = []
     pages: List[Tuple[str, str]] = []      # (url, text)
     fetched: Dict[str, str] = {}           # url -> depth
+    skipped_lang = 0
     queue: List[Tuple[str, int]] = [(entry, 0)]
-    logger.info("crawl start %s (max_pages=%d max_depth=%d)",
-                entry, max_pages, max_depth)
+    logger.info("crawl start %s (max_pages=%d max_depth=%d lang=%s)",
+                entry, max_pages, max_depth, lang)
     if progress is not None:
-        progress(f"start crawl {entry} (up to {max_pages} pages)")
+        progress(f"start crawl {entry} (up to {max_pages} pages, "
+                 f"language {lang})")
     while queue and len(fetched) < max_pages:
+        if should_cancel is not None and should_cancel():
+            raise CurateCancelled("website crawl cancelled")
         u, depth = queue.pop(0)
         u = urldefrag(u)[0]
         if u in fetched:
             continue
         # Asset URLs are dropped without fetching — no warning noise.
         if urlparse(u).path.lower().endswith(_ASSET_SUFFIXES):
+            continue
+        # Foreign-language pages (docs mirrors under /zh/, /ja/…) are skipped
+        # silently: they are real pages, just not in the user's language.
+        if u != entry and not _lang_ok(urlparse(u).path, lang):
+            fetched[u] = str(depth)
+            skipped_lang += 1
             continue
         fetched[u] = str(depth)
         html, err = _fetch_guarded(u, allow_private=allow_private_networks)
@@ -856,14 +965,23 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
                     continue
                 if urlparse(nu).path.lower().endswith(_ASSET_SUFFIXES):
                     continue
+                # Never queue a foreign-language mirror (never counted as
+                # fetched either, so it stays cheap).
+                if not _lang_ok(urlparse(nu).path, lang):
+                    skipped_lang += 1
+                    continue
                 queue.append((nu, depth + 1))
         time.sleep(max(0.0, sleep_s))
     if not pages:
         raise ImportError_(f"crawl produced no readable pages from {entry}")
+    if skipped_lang:
+        warnings.append(
+            f"skipped {skipped_lang} page(s) in other languages "
+            f"(keeping '{lang}')")
     if progress is not None:
         progress(f"crawled {len(pages)} readable pages; synthesizing…")
-    logger.info("crawl done %s: %d readable pages, synthesizing",
-                entry, len(pages))
+    logger.info("crawl done %s: %d readable pages (%d other-language skipped),"
+                " synthesizing", entry, len(pages), skipped_lang)
 
     def _synth_progress(msg: str) -> None:
         if progress is not None:
@@ -874,7 +992,8 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
         [(urlparse(u).path or "/", t) for u, t in pages],
         synth_fn=synth_fn,
         progress=_synth_progress if progress is not None
-        or logger.isEnabledFor(logging.INFO) else None)
+        or logger.isEnabledFor(logging.INFO) else None,
+        should_cancel=should_cancel)
     warnings.extend(w)
     label = name or (parsed.netloc.split(".")[0] or "site")
     res = materialize(home, conversations,
