@@ -220,8 +220,19 @@ rft/mine_goldens) and the train check/estimate endpoints.
 
     def submit_train(self, b: Dict[str, Any]) -> Dict[str, Any]:
         dataset_id = str(b.get("dataset") or b.get("dataset_id") or "")
-        if not dataset_id:
+        extra_ids = [str(x).strip() for x in (b.get("datasets") or [])
+                     if str(x).strip()]
+        # Multi-dataset training: `datasets` may carry several ids (UI
+        # multi-picker); a single `dataset` string may also be comma-list.
+        ids = ([dataset_id] if dataset_id else []) + extra_ids
+        seen: set = set()
+        ids = [x for x in ids if not (x in seen or seen.add(x))]
+        if not ids:
             raise HttpError(400, "dataset required")
+        if len(ids) > 1:
+            dataset_id = self._merge_datasets(ids)
+        else:
+            dataset_id = ids[0]
         kind = str(b.get("kind") or "sft")
         if kind not in ("sft", "dpo", "grpo"):
             raise HttpError(400, "kind must be sft, dpo or grpo")
@@ -231,7 +242,21 @@ rft/mine_goldens) and the train check/estimate endpoints.
         # Per-request base-model override (the Train wizard's discovered-models
         # dropdown) beats the configured training.base_model.
         if b.get("base_model"):
-            tc.base_model = str(b["base_model"])
+            base = str(b["base_model"])
+            # GGUF is a serving artifact; trainers need HF safetensors (D-7).
+            # Reject here with the actionable path instead of letting the
+            # worker fail deep in load — the UI resolve panel
+            # (GET /api/model_base) finds/downloads the real base.
+            if base.lower().endswith(".gguf"):
+                raise HttpError(
+                    400,
+                    f"{base!r} is a GGUF (serve-only). Resolve its HF base "
+                    "first: GET /api/model_base?gguf=<path> finds or downloads "
+                    "the matching safetensors checkpoint — training always "
+                    "runs on real HF weights.",
+                    code="gguf_not_trainable",
+                )
+            tc.base_model = base
         reg = self._registry()
         max_par = max(1, int(tc.max_parallel_jobs or 1))
         try:
@@ -256,14 +281,19 @@ rft/mine_goldens) and the train check/estimate endpoints.
                     code="already_running",
                 )
             sched = self._scheduler(reg)
+            params: Dict[str, Any] = {
+                "train_yaml": str(self.home / "datasets" / dataset_id / "train.yaml"),
+                "dataset_dir": str(self.home / "datasets" / dataset_id),
+                "base_model": tc.base_model or "",
+                "dry_run": dry_run,
+            }
+            # Optional human name for the trained artifacts (recorded on the
+            # job; the iterate/easy loops propagate it to the model row).
+            if str(b.get("model_name") or "").strip():
+                params["model_name"] = str(b["model_name"]).strip()[:80]
             job = sched.submit(
                 kind, dataset_id=dataset_id, log_dir=self.home / "train_runs",
-                params={
-                    "train_yaml": str(self.home / "datasets" / dataset_id / "train.yaml"),
-                    "dataset_dir": str(self.home / "datasets" / dataset_id),
-                    "base_model": tc.base_model or "",
-                    "dry_run": dry_run,
-                },
+                params=params,
             )
         finally:
             reg.close()
@@ -302,6 +332,84 @@ rft/mine_goldens) and the train check/estimate endpoints.
 
         threading.Thread(target=_run, args=(job.job_id,), daemon=True).start()
         return {"ok": True, "job_id": job.job_id, "state": "queued"}
+
+    def _merge_datasets(self, ids: List[str]) -> str:
+        """Materialize a merged dataset from several existing ones.
+
+        Concatenates sft.jsonl / dpo.jsonl rows (in pick order) into a new
+        curate-layout dataset (provenance "merged", source_ids recorded in the
+        manifest for provenance). The originals are untouched — their trace
+        claims stay put, so deleting the merge later releases nothing extra.
+        Raises HttpError when any id is missing or has no readable rows."""
+        import json as _json
+
+        from datetime import datetime, timezone
+
+        from ...curate.curater import CurationConfig, render_train_yaml
+        from ...curate.sources import alloc_dataset_id
+
+        roots = self.home / "datasets"
+        sft_rows: List[str] = []
+        dpo_rows: List[str] = []
+        for did in ids:
+            d = roots / did
+            if not (d / "manifest.json").is_file():
+                raise HttpError(404, f"no such dataset: {did}")
+            for fname, bucket in (("sft.jsonl", sft_rows),
+                                  ("dpo.jsonl", dpo_rows)):
+                f = d / fname
+                if not f.is_file():
+                    continue
+                try:
+                    for line in f.read_text(encoding="utf-8").splitlines():
+                        if line.strip():
+                            bucket.append(line)
+                except OSError as e:
+                    raise HttpError(400,
+                                    f"cannot read {did}/{fname}: {e}") from e
+        if not sft_rows and not dpo_rows:
+            raise HttpError(400, "selected datasets contain no rows")
+
+        ds_dir, merged_id = alloc_dataset_id(self.home, "merged")
+        try:
+            for fname, bucket in (("sft.jsonl", sft_rows),
+                                  ("dpo.jsonl", dpo_rows)):
+                with open(ds_dir / fname, "w", encoding="utf-8") as f:
+                    for line in bucket:
+                        f.write(line.rstrip("\n") + "\n")
+            manifest = {
+                "dataset_id": merged_id,
+                "title": "merged: " + ", ".join(ids),
+                "created_at": datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"),
+                "provenance": "merged",
+                "source_ids": list(ids),
+                "skipped_rows": 0,
+                "filters": None,
+                "files": {
+                    "sft.jsonl": {"count": len(sft_rows), "trace_ids": [],
+                                  "format": "sharegpt"},
+                    "dpo.jsonl": {"count": len(dpo_rows), "trace_ids": [],
+                                  "format": "trl-preference"},
+                },
+                "format_hints": {"sft_format_type": "sharegpt",
+                                 "train_yaml": "train.yaml"},
+                "warnings": [f"merged from {len(ids)} datasets: "
+                             + ", ".join(ids)],
+            }
+            (ds_dir / "manifest.json").write_text(
+                _json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8")
+            (ds_dir / "train.yaml").write_text(
+                render_train_yaml(ds_dir, CurationConfig(), merged_id),
+                encoding="utf-8")
+        except Exception:
+            import shutil
+            shutil.rmtree(ds_dir, ignore_errors=True)
+            raise
+        logger.info("merged datasets %s -> %s (%d sft, %d dpo)",
+                    ",".join(ids), merged_id, len(sft_rows), len(dpo_rows))
+        return merged_id
 
     def h_rft(self, q: Dict[str, str], b: Dict[str, Any]) -> ApiResponse:
         return ApiResponse(202, self.submit_rft(b))

@@ -345,3 +345,44 @@ payload rather than dropping work.
   so) — same degradation rule as thread lineage today.
 Implementation spec: `plans/delegation-inbox.md` (phases, state machines,
 config keys, recovery table, test plan).
+
+## D-18 — GGUF-as-pointer: resolve the HF base instead of converting weights
+**Decision.** A GGUF is never a training input and is never converted back to
+HF. When a user has only a GGUF, toaster_loop treats it as a *pointer* to its
+canonical HF base: the GGUF KV metadata (`general.basename`,
+`general.architecture`) plus hub provenance (the `models--org--name` layout /
+download manifests / the GGUF repo card's `base_model` field) resolve to an HF
+repo, which is either already on disk or downloaded through the normal
+Resource Hub path. New modules: `core/gguf_meta.py` (stdlib GGUF KV reader —
+header + KV only, microsecond cost on any quant size) and `core/gguf_base.py`
+(local-checkpoint scan → card provenance → hub search, non-GGUF repos only).
+API mirrors the mmproj pattern: `GET /api/model_base?gguf=` (status + local +
+remote candidates) and `POST /api/model_base/download` (reuses
+`ModelHub.start_download`; the checkpoint lands in the hub cache where
+discovery picks it up). The Train picker's GGUF entries became actionable
+("pick HF base…") instead of dead serve-only rows, and `submit_train` now
+rejects a `.gguf` base_model with `gguf_not_trainable` pointing at the resolve
+endpoint (defense in depth — previously workers failed deep in load).
+**Rationale.** The Unsloth-Studio alternative (GGUF→HF dequantize → train →
+re-export) is lossy, per-arch third-party territory, and turns every quant
+variant into a distinct training identity — polluting the registry lineage
+model (`base_model + dataset → vN`), where quant is a deployment choice. A
+silently mis-mapped tensor yields a corrupt-but-loadable artifact, the exact
+failure mode D-14 was written to prevent. Serving stays llama.cpp/GGUF (D-4):
+training was never GGUF's job; running is where GGUF shines. The GGUF KV
+metadata makes the mapping *declared by the file itself*, so resolution is a
+lookup, not a guess — and an unresolvable GGUF degrades to manual repo-id
+entry rather than a silent conversion.
+**Consequences.**
+- Training truth stays HF safetensors for every path (peft + streamed); the
+  D-7 artifact flow (adapter → merge → convert/quantize at promotion) and the
+  D-13 GGUF-LoRA bridge are untouched.
+- `general.basename` is a display name, not a repo id: resolution folds names
+  (strip quant tags/separators) and *ranks candidates*; it never auto-picks a
+  download. The user confirms the base.
+- The reader parses v1–v3 headers best-effort and keeps partially-parsed KV
+  (`general.basename` sits early), so truncated/corrupt headers degrade to
+  "no metadata" exactly like an unattested provenance row — never a crash.
+- Known follow-up (not in this change): record the resolved `base_hf_repo` on
+  the registry row's `provenance_json` at train time, so lineage names the HF
+  source of any model trained from a GGUF-derived setup.

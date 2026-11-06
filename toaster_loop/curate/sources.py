@@ -868,6 +868,19 @@ _ASSET_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".css", ".js", ".mjs",
                    ".map", ".xml", ".txt.gz", ".avif")
 
 
+def _scope_prefix(entry_path: str) -> str:
+    """Docs-tree prefix of an entry page path: the directory containing it.
+
+    ``/documentation/unreal-engine/unreal-engine-5-8-documentation`` scopes to
+    ``/documentation/unreal-engine/`` — so a crawl started on a docs page never
+    wanders into sibling sections of the same host (forums, news, store). An
+    entry at the site root scopes to "/" (whole-site, unchanged behavior)."""
+    p = entry_path or "/"
+    if p.endswith("/"):
+        return p
+    return p.rsplit("/", 1)[0] + "/"
+
+
 def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
                   max_pages: int = CRAWL_MAX_PAGES,
                   max_depth: int = CRAWL_MAX_DEPTH,
@@ -876,7 +889,8 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
                   sleep_s: float = 0.2,
                   progress: Optional[ProgressFn] = None,
                   should_cancel: Optional[ShouldCancelFn] = None,
-                  lang: Optional[str] = None) -> SourceResult:
+                  lang: Optional[str] = None,
+                  path_prefix: Optional[str] = None) -> SourceResult:
     """Bounded same-origin crawl -> HTML text -> doc->ShareGPT pipeline.
 
     Politeness + safety: robots.txt honored (crawl-delay-free fixed sleep),
@@ -885,7 +899,11 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
     ``lang`` restricts the crawl to one language on localized docs trees:
     pages under a foreign language prefix (/zh/, /ja/…) are skipped without
     fetching; None = auto-detect from the environment, "*" disables filtering.
-    Source URLs land in the manifest for provenance."""
+    ``path_prefix`` bounds the crawl to one subtree of the host (e.g.
+    "/documentation/unreal-engine/"). Default is derived from the entry page's
+    directory, so a docs-page entry never crawls the site's forums/news/store;
+    pass "" to opt back into whole-same-origin crawling. Source URLs land in
+    the manifest for provenance."""
     entry = url.strip()
     if not entry:
         raise ImportError_("url required")
@@ -912,12 +930,15 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
     pages: List[Tuple[str, str]] = []      # (url, text)
     fetched: Dict[str, str] = {}           # url -> depth
     skipped_lang = 0
+    skipped_scope = 0
+    scope = (_scope_prefix(parsed.path) if path_prefix is None
+             else str(path_prefix))
     queue: List[Tuple[str, int]] = [(entry, 0)]
-    logger.info("crawl start %s (max_pages=%d max_depth=%d lang=%s)",
-                entry, max_pages, max_depth, lang)
+    logger.info("crawl start %s (max_pages=%d max_depth=%d lang=%s "
+                "scope=%s)", entry, max_pages, max_depth, lang, scope or "/")
     if progress is not None:
         progress(f"start crawl {entry} (up to {max_pages} pages, "
-                 f"language {lang})")
+                 f"language {lang}, under {scope or '/'})")
     while queue and len(fetched) < max_pages:
         if should_cancel is not None and should_cancel():
             raise CurateCancelled("website crawl cancelled")
@@ -963,6 +984,12 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
                 nu = urljoin(u, href)
                 if urlparse(nu).netloc != parsed.netloc or nu in fetched:
                     continue
+                # Subtree scope: links outside the entry page's docs tree
+                # (forums, news, marketing pages on the same host) are never
+                # queued — the crawl follows the documentation, not the site.
+                if scope and not urlparse(nu).path.startswith(scope):
+                    skipped_scope += 1
+                    continue
                 if urlparse(nu).path.lower().endswith(_ASSET_SUFFIXES):
                     continue
                 # Never queue a foreign-language mirror (never counted as
@@ -978,6 +1005,10 @@ def crawl_website(home: Path, url: str, *, name: Optional[str] = None,
         warnings.append(
             f"skipped {skipped_lang} page(s) in other languages "
             f"(keeping '{lang}')")
+    if skipped_scope:
+        warnings.append(
+            f"skipped {skipped_scope} link(s) outside the docs subtree "
+            f"'{scope or '/'}' (pass a wider scope path to include them)")
     if progress is not None:
         progress(f"crawled {len(pages)} readable pages; synthesizing…")
     logger.info("crawl done %s: %d readable pages (%d other-language skipped),"

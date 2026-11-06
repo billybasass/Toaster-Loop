@@ -225,6 +225,19 @@ PAGES = {
         + "<script>var state = '<ul>';"
         + "state += '<li><a href=\"/from-script-payload\">phantom</a></li>';"
         + "</script></body></html>"),
+    # docs-tree pages for the subtree-scope tests: index links to its own
+    # tree AND to a sibling forum section that must NOT be crawled by default.
+    "/docs/index.html": ("<html><body><h2>Docs Home</h2><p>"
+                         + "The documentation home page text. " * 6
+                         + "</p><a href='/docs/page2.html'>next</a>"
+                         + "<a href='/forum/post.html'>forum</a>"
+                         + "</body></html>"),
+    "/docs/page2.html": ("<html><body><h2>Second Doc</h2><p>"
+                         + "Second page of the docs tree here. " * 6
+                         + "</p></body></html>"),
+    "/forum/post.html": ("<html><body><h2>Forum Post</h2><p>"
+                         + "Community chatter not part of the docs. " * 6
+                         + "</p></body></html>"),
 }
 
 
@@ -344,6 +357,124 @@ def test_crawl_cancellation_stops_early(home, site):
         src.crawl_website(home, site + "/", max_pages=30, max_depth=2,
                           sleep_s=0.0, lang="*", should_cancel=_cancel,
                           allow_private_networks=True)
+
+
+def test_crawl_scope_defaults_to_entry_dir(home, site):
+    """A crawl started on /docs/index.html stays inside /docs/ — the forum
+    link on the same host is never fetched (the Unreal Engine docs complaint)."""
+    res = src.crawl_website(home, site + "/docs/index.html", max_pages=10,
+                            max_depth=2, sleep_s=0.0, lang="*",
+                            allow_private_networks=True)
+    manifest = json.loads(
+        (home / "datasets" / res.dataset_id / "manifest.json").read_text())
+    crawled = manifest["crawled_urls"]
+    assert any(u.endswith("/docs/page2.html") for u in crawled)
+    assert not any("/forum/" in u for u in crawled)
+    assert any("outside the docs subtree" in w for w in manifest["warnings"])
+
+
+def test_crawl_scope_star_crawls_whole_origin(home, site):
+    """path_prefix='' opts back into whole-same-origin crawling."""
+    res = src.crawl_website(home, site + "/docs/index.html", max_pages=10,
+                            max_depth=2, sleep_s=0.0, lang="*",
+                            path_prefix="", allow_private_networks=True)
+    crawled = json.loads(
+        (home / "datasets" / res.dataset_id / "manifest.json").read_text()
+    )["crawled_urls"]
+    assert any("/forum/post.html" in u for u in crawled)
+
+
+# ---------------------------------------------------- multi-dataset training
+
+def test_train_merges_multiple_datasets(home, monkeypatch):
+    """POST /api/train {datasets: [a, b]} materializes a merged dataset whose
+    rows are the concatenation, and the job params point at the merge."""
+    import time as _t
+
+    from toaster_loop.dashboard.app import DashboardApp
+
+    def _mk_folder(name, body):
+        f = home / name
+        f.mkdir()
+        (f / "d.md").write_text("# H\n\n## S\n" + body * 12)
+        return f
+
+    a = src.ingest_folder(home, str(_mk_folder("fa", "alpha doc content. ")))
+    b = src.ingest_folder(home, str(_mk_folder("fb", "beta doc content. ")))
+
+    captured = {}
+
+    def fake_run_claimed(self, job):
+        captured["job"] = job
+        return job
+
+    monkeypatch.setattr("toaster_loop.training.scheduler.Scheduler.run_claimed",
+                        fake_run_claimed)
+    app = DashboardApp(ToasterLoopConfig(), home=home)
+    r = app.handle("POST", "/api/train",
+                   body={"datasets": [a.dataset_id, b.dataset_id],
+                         "kind": "sft", "dry_run": True})
+    assert r.status == 202, r.body
+    deadline = _t.monotonic() + 5
+    while _t.monotonic() < deadline and "job" not in captured:
+        _t.sleep(0.02)
+    job = captured["job"]
+    merged_id = job.dataset_id
+    assert merged_id not in (a.dataset_id, b.dataset_id)
+    mdir = home / "datasets" / merged_id
+    manifest = json.loads((mdir / "manifest.json").read_text())
+    assert manifest["provenance"] == "merged"
+    assert manifest["source_ids"] == [a.dataset_id, b.dataset_id]
+    n_a = int(json.loads((home / "datasets" / a.dataset_id / "manifest.json")
+                         .read_text())["files"]["sft.jsonl"]["count"])
+    n_b = int(json.loads((home / "datasets" / b.dataset_id / "manifest.json")
+                         .read_text())["files"]["sft.jsonl"]["count"])
+    assert manifest["files"]["sft.jsonl"]["count"] == n_a + n_b
+    # originals untouched
+    assert (home / "datasets" / a.dataset_id / "manifest.json").is_file()
+    assert job.params["dataset_dir"].endswith(merged_id)
+
+
+def test_train_merge_rejects_missing_dataset(home):
+    from toaster_loop.dashboard.app import DashboardApp
+
+    app = DashboardApp(ToasterLoopConfig(), home=home)
+    r = app.handle("POST", "/api/train",
+                   body={"datasets": ["nope-a", "nope-b"]})
+    assert r.status == 404
+
+
+def test_model_name_reaches_job_params(home):
+    """model_name (trained-model naming) rides on the job params."""
+    from toaster_loop.dashboard.app import DashboardApp
+
+    folder = home / "f"
+    folder.mkdir()
+    (folder / "d.md").write_text("# H\n\n## S\n" + "content words. " * 12)
+    res = src.ingest_folder(home, str(folder))
+
+    captured = {}
+    import toaster_loop.training.scheduler as sched_mod
+
+    def fake_run_claimed(self, job):
+        captured["job"] = job
+        return job
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(sched_mod.Scheduler, "run_claimed", fake_run_claimed)
+    try:
+        app = DashboardApp(ToasterLoopConfig(), home=home)
+        r = app.handle("POST", "/api/train",
+                       body={"dataset": res.dataset_id, "dry_run": True,
+                             "model_name": "my-special-model"})
+        assert r.status == 202
+        import time as _t
+        deadline = _t.monotonic() + 5
+        while _t.monotonic() < deadline and "job" not in captured:
+            _t.sleep(0.02)
+        assert captured["job"].params.get("model_name") == "my-special-model"
+    finally:
+        monkeypatch.undo()
 
 
 def test_docs_to_rows_cancellation():

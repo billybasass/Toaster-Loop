@@ -48,7 +48,11 @@ export default {
         { label: "id", render: (m) => {
             // Backlog #15: catalog-style detail line under the name,
             // composed server-side ("dataset · N steps · date · loss").
+            // The user-chosen display name (when set) rides beside the
+            // canonical model_id — ids stay the key everywhere.
             const cell = el("div");
+            if (m.display_name)
+              cell.appendChild(el("span", { text: m.display_name + " " }));
             cell.appendChild(el("span", { class: "mono" },
               m.model_id, m.model_id === data.active_model ? " ★" : ""));
             if (m.detail)

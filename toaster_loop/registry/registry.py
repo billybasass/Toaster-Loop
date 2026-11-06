@@ -98,7 +98,8 @@ CREATE TABLE models (
     provenance_json TEXT,               -- pass3 #23
     last_used_at    TEXT,               -- pass4 #29
     shadow_json   TEXT,                 -- pass4 #32
-    transfers_json TEXT                 -- pass4 #37: ALTER order — keep last
+    transfers_json TEXT,                -- pass4 #37: ALTER order — keep last
+    display_name TEXT                   -- user-chosen model name; ALTER last
 );
 """
 
@@ -147,10 +148,11 @@ CREATE TABLE IF NOT EXISTS models (
     shadow_json   TEXT,                 -- pass4 #32: latest shadow-baseline
                                         -- comparison JSON (judge-scored replay
                                         -- vs the active model)
-    transfers_json TEXT                 -- pass4 #37: cross-profile transfer
+    transfers_json TEXT,                -- pass4 #37: cross-profile transfer
                                         -- probe history (JSON list, newest
-                                        -- first, capped); ALTER order — must
-                                        -- stay the last column
+                                        -- first, capped)
+    display_name TEXT                   -- optional human name for the trained
+                                        -- model; ALTER order — must stay last
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -240,6 +242,10 @@ class ModelRow:
     # candidate-only probe). Newest first, capped at TRANSFERS_CAP. Tolerant
     # read: missing/corrupt hydrates to [], never an error.
     transfers: List[Dict[str, Any]] = field(default_factory=list)
+    # Optional human name for the trained model (Train/Iterate/Easy panels);
+    # model_id stays the canonical key everywhere. Tolerant read: absent
+    # column hydrates to None.
+    display_name: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -303,6 +309,7 @@ class ModelRegistry:
             self._migrate_last_used_at()
             self._migrate_shadow_column()
             self._migrate_transfers_column()
+            self._migrate_display_name_column()
             self._migrate_jobs_depends_column()
             self._conn.executescript(_SCHEMA)
             self._migrate_job_kinds()
@@ -329,6 +336,21 @@ class ModelRegistry:
         if "depends_on_json" not in cols:
             self._conn.execute(
                 "ALTER TABLE jobs ADD COLUMN depends_on_json TEXT")
+
+    def _migrate_display_name_column(self) -> None:
+        """Add models.display_name to pre-training-naming tables.
+
+        Same shape-detection style as _migrate_transfers_column: idempotent,
+        and reads stay tolerant (_row_to_model defaults an absent column to
+        None). Runs BEFORE the table-rebuild migrations so their positional
+        ``INSERT INTO models SELECT *`` copies see matching column order
+        (display_name last in both DDLs)."""
+        cols = {r[1] for r in self._conn.execute(
+            "PRAGMA table_info(models)").fetchall()}
+        if not cols:  # fresh DB — _SCHEMA creates the column directly
+            return
+        if "display_name" not in cols:
+            self._conn.execute("ALTER TABLE models ADD COLUMN display_name TEXT")
 
     def _migrate_transfers_column(self) -> None:
         """Add models.transfers_json to pre-pass4 tables (inspiration pass 4 #37).
@@ -612,13 +634,15 @@ class ModelRegistry:
         parent_adapter: Optional[str] = None,
         actor: str = "cli",
         intent: Optional[str] = None,
+        display_name: Optional[str] = None,
     ) -> ModelRow:
         """Register a new candidate model with auto vN id.
 
         ``parent_adapter`` defaults to the currently active model for this
         base_model (lineage chain), or None when nothing is promoted yet.
         ``intent`` (pass-4 #36) is the optional "why" recorded on the ledger
-        entry ("we trained on D expecting Y").
+        entry ("we trained on D expecting Y"). ``display_name`` is the
+        user-chosen label for the model (UI only; model_id stays canonical).
         """
         with self._lock:
             if parent_adapter is None:
@@ -646,15 +670,16 @@ class ModelRegistry:
                 status="candidate",
                 created_at=_utcnow(),
                 validation=None,
+                display_name=(str(display_name).strip() or None),
             )
             self._conn.execute(
                 "INSERT INTO models (model_id, base_model, parent_adapter, dataset_id,"
                 " manifest_hash, adapter_dir, gguf_path, quant, status, created_at,"
-                " validation_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " validation_json, display_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     row.model_id, row.base_model, row.parent_adapter, row.dataset_id,
                     row.manifest_hash, row.adapter_dir, row.gguf_path, row.quant,
-                    row.status, row.created_at, None,
+                    row.status, row.created_at, None, row.display_name,
                 ),
             )
             record(self._conn, actor, "register", model_id, before=None,
@@ -1711,11 +1736,14 @@ def _row_to_model(r: sqlite3.Row) -> ModelRow:
     # Pass4 #37: transfers_json tolerant read — missing/corrupt hydrates to
     # [] so a bad blob can never crash row hydration.
     transfers = _loads_transfers(d.pop("transfers_json", None))
+    # display_name tolerant read (pre-naming rows/columns lack it).
+    display_name = d.pop("display_name", None)
     return ModelRow(validation=validation, train_loss=train_loss,
                     eval_loss=eval_loss, promoted_at=promoted_at,
                     pinned=pinned, pre_archive=pre_archive,
                     provenance=provenance, last_used_at=last_used_at,
-                    shadow=shadow, transfers=transfers, **d)
+                    shadow=shadow, transfers=transfers,
+                    display_name=display_name, **d)
 
 
 def _loads_transfers(raw: Optional[str]) -> List[Dict[str, Any]]:

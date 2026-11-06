@@ -304,11 +304,17 @@ export default {
       for (const g of (gate.reasons || [])) nextSteps.push(g);
 
       const trainBtn = el("button", { class: "primary", text: "Train now" });
+      // Optional human name for the model this run produces (registry
+      // display_name + artifact filenames); model_id stays canonical.
+      const nameIn = el("input", { type: "text", class: "narrow",
+        placeholder: "model name (optional)", maxlength: "80" });
       trainBtn.addEventListener("click", async () => {
         trainBtn.disabled = true;
         try {
+          const body = { profile: a.profile };
+          if (nameIn.value.trim()) body.model_name = nameIn.value.trim();
           const res = await api("/api/easy/run", { method: "POST",
-            body: { profile: a.profile } });
+            body });
           toast(`easy run ${res.run_id} started for “${a.profile}”`, "ok");
           activeId = res.run_id;
           activeRun = { run_id: res.run_id, state: "running",
@@ -350,7 +356,7 @@ export default {
             "the cron entrypoint (train auto-check --trigger) do it." }))
           : el("ul", { class: "hint" },
             ...nextSteps.map((s) => el("li", { text: s }))),
-        el("div", { class: "btnrow" }, trainBtn, removeBtn));
+        el("div", { class: "btnrow" }, nameIn, trainBtn, removeBtn));
     }
 
     function renderStatus() {

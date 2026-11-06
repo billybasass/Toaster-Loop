@@ -26,10 +26,82 @@ model catalog (#15) and vision-projector (mmproj) endpoints.
     def h_model_catalog(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         """Models discovered on disk under the base model folder (config
         `models_dir` / TOASTER_LOOP_MODELS_DIR / HF hub cache fallback). Optional
-        ?dir= overrides the folder for this request only."""
+        ?dir= overrides the folder for this request only.
+
+        When nothing explicit is configured, also scan <home>/models — that is
+        where the Resource Hub downloads land when no models_dir/HF cache
+        exists (ModelHub.base_dir fallback), and discovery used to miss them,
+        so the Train/Serve pickers showed less than the Hub's On Device tab.
+        Results are merged and de-duplicated by path."""
         from ...core.model_discovery import discover_models
 
-        return discover_models(q.get("dir") or self.cfg.models_dir)
+        override = q.get("dir") or self.cfg.models_dir
+        result = discover_models(override)
+        if not override:
+            extra = discover_models(str(self.home / "models"))
+            if extra.get("exists"):
+                have = {m["path"] for m in result["gguf"]}
+                result["gguf"].extend(
+                    m for m in extra["gguf"] if m["path"] not in have)
+                have_b = {m["path"] for m in result["base_models"]}
+                result["base_models"].extend(
+                    m for m in extra["base_models"]
+                    if m["path"] not in have_b)
+                if not result.get("exists"):
+                    result.update({"exists": True,
+                                   "models_dir": extra.get("models_dir")})
+        return result
+
+    def h_model_base_status(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
+        """Resolve the HF training base behind a GGUF (core/gguf_base.py):
+        {gguf, basename, arch, source_repo, local[], remote[], reason}.
+
+        The Train picker uses this to turn a serve-only GGUF entry into an
+        actionable one: ``local`` already trains today, ``remote`` is one hub
+        download away (POST /api/model_base/download). Nothing converts GGUF
+        weights — the GGUF stays a serving artifact and training always runs
+        on real HF safetensors."""
+        from ...core.gguf_base import resolve_gguf_base
+
+        gguf = (q.get("gguf") or "").strip()
+        if not gguf:
+            raise HttpError(400, "gguf query param required")
+        from pathlib import Path as _P
+
+        if not _P(gguf).expanduser().is_file():
+            raise HttpError(404, f"GGUF not found: {gguf}")
+        return resolve_gguf_base(gguf, home=self.home,
+                                 models_dir=self.cfg.models_dir)
+
+    def h_model_base_download(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
+        """Start a hub download of the HF base repo for a GGUF (full safetensors
+        variant). Poll GET /api/hub/downloads/<job_id> — same job machinery as
+        the Resource Hub tab; lands in the hub cache where discovery picks it
+        up automatically."""
+        from ...core.modelhub import HubError, validate_repo_id
+
+        repo = str(b.get("repo") or "").strip()
+        if not repo:
+            raise HttpError(400, "repo required")
+        try:
+            validate_repo_id(repo)
+        except HubError as e:
+            raise HttpError(400, str(e)) from e
+        hub = getattr(self, "_hub", None)
+        if hub is None:
+            from ...core.modelhub import ModelHub
+
+            hub = ModelHub(models_dir=self.cfg.models_dir, home=self.home)
+            self._hub = hub
+        try:
+            # variant "" -> the repo's default (non-GGUF repos expose one
+            # pseudo-variant "full" covering every file).
+            job_id = hub.start_download(repo, "", "models")
+        except HubError as e:
+            raise HttpError(400, str(e)) from e
+        return {"ok": True, "job_id": job_id, "repo": repo,
+                "note": "poll GET /api/hub/downloads/<job_id>; the base model "
+                        "appears in the Train picker once downloaded"}
 
     def h_mmproj_status(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         """Vision-projector state for one GGUF: {gguf, local, repo_id,

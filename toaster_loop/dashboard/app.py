@@ -284,6 +284,9 @@ dependency wiring only. Route handlers resolve by name via getattr.
         ("GET", "/api/models", "h_models_list"),
         # discovered models on disk (base folder / HF hub cache)
         ("GET", "/api/model_catalog", "h_model_catalog"),
+        # GGUF -> HF base resolution (train on real weights, never dequantize)
+        ("GET", "/api/model_base", "h_model_base_status"),
+        ("POST", "/api/model_base/download", "h_model_base_download"),
         # vision projector (mmproj): status + download into the GGUF's folder
         ("GET", "/api/mmproj", "h_mmproj_status"),
         ("POST", "/api/mmproj/download", "h_mmproj_download"),

@@ -373,6 +373,7 @@ def run_iterate(
     on_stage: Optional[Callable[[str, str], None]] = None,
     intent: Optional[str] = None,
     auto: bool = False,
+    display_name: Optional[str] = None,
 ) -> PipelineResult:
     """Execute the full loop. Never raises for expected failures — they land
     in the result (stage/error) so the CLI prints a clean report.
@@ -381,6 +382,11 @@ def run_iterate(
     (``train auto-check --trigger``). Automatic promotion then requires the
     derived capability tier >= ``validation.min_tier_auto_deploy``; attended
     runs (manual ``iterate``) stay permissive like manual promote.
+
+    ``display_name``: optional human name for the trained model (UI Train/
+    Iterate/Easy forms). It labels the registry row and flavors the artifact
+    directory + GGUF filename; model_id stays the canonical key, so two runs
+    with the same chosen name never collide.
     """
     home = Path(home)
     res = PipelineResult()
@@ -458,9 +464,20 @@ def run_iterate(
         manifest_hash=manifest_hash,
         quant=quant,
         intent=intent,  # pass4 #36: "we trained on D expecting Y"
+        display_name=display_name,
     )
     res.model_id = model.model_id
     stage_done("register")
+
+    # Artifact slug: a user-chosen name makes train_runs/<...> and the GGUF
+    # readable ("<name>-v3-q4_k_m.gguf"); the model_id suffix keeps them
+    # unique across runs even when names repeat. Unnamed runs are byte-identical
+    # to before (plain vN).
+    import re as _re
+    name_slug = _re.sub(r"[^A-Za-z0-9._-]+", "-",
+                        str(display_name or "").strip()).strip("-._")[:48]
+    artifact_slug = f"{name_slug}-{model.model_id}" if name_slug \
+        else model.model_id
 
     # ---- 3. train -----------------------------------------------------------
     train_run = home / "train_runs"
@@ -468,7 +485,7 @@ def run_iterate(
     # train.yaml here (the single resolution point both `iterate` and CLI
     # runs share) and logged into the job log for provenance.
     train_yaml, applied_overrides = _resolved_train_yaml(
-        dataset_dir, train_run / model.model_id, training_cfg.base_model,
+        dataset_dir, train_run / artifact_slug, training_cfg.base_model,
         eval_fraction=training_cfg.eval_fraction,
         eval_seed=training_cfg.eval_seed,
         config_overrides=config_overrides,
@@ -503,7 +520,7 @@ def run_iterate(
                              f"{finished.error}")
     stage_done("train")
 
-    adapter_dir = train_run / model.model_id / "adapter"
+    adapter_dir = train_run / artifact_slug / "adapter"
     if not adapter_dir.is_dir():
         # Worker contract: adapters land under the resolved output_dir.
         alt = dataset_dir / "outputs" / "adapter"
@@ -566,7 +583,7 @@ def run_iterate(
     # ---- 4. export -----------------------------------------------------------
     gguf_dir = home / "models" / "gguf"
     gguf_dir.mkdir(parents=True, exist_ok=True)
-    gguf_out = gguf_dir / f"{model.model_id}-{quant}.gguf"
+    gguf_out = gguf_dir / f"{artifact_slug}-{quant}.gguf"
     export_job = scheduler.submit(
         "export",
         dataset_id=dataset_id,
@@ -574,7 +591,7 @@ def run_iterate(
         log_dir=train_run,
         params={
             "train_yaml": str(_resolved_train_yaml(
-                dataset_dir, train_run / model.model_id, training_cfg.base_model
+                dataset_dir, train_run / artifact_slug, training_cfg.base_model
             )[0]),
             "adapter_dir": str(adapter_dir),
             "gguf_out": str(gguf_out),

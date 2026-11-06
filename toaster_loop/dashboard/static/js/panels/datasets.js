@@ -477,6 +477,57 @@ async function curateForm(onDone) {
   return host;
 }
 
+// ------------------------------------------------- running-curates banner
+// The curateJob poller lives in the panel's closure, so navigating to Chat and
+// back used to silently lose the progress display (the job itself keeps
+// running server-side). This card re-attaches from the jobs API — the durable
+// source of truth — so any queued/running curate or curate_source job shows its
+// newest progress line again immediately, even after a full page reload. When
+// the last one finishes it triggers a dataset-list refresh.
+function runningCurationCard(onFinished) {
+  const host = el("div", { class: "card hidden" });
+  let stopped = false;
+  let hadLive = false;
+  async function tick() {
+    if (stopped) return;
+    let jobs = [];
+    try { jobs = (await api("/api/jobs?tail=30")).jobs || []; }
+    catch { return; } // transient — next tick retries
+    const live = jobs.filter((j) =>
+      (j.kind === "curate" || j.kind === "curate_source") &&
+      (j.state === "queued" || j.state === "running"));
+    if (!live.length) {
+      host.classList.add("hidden");
+      host.replaceChildren();
+      if (hadLive) { hadLive = false; onFinished(); }
+      return;
+    }
+    hadLive = true;
+    const rows = live.map((j) => {
+      let msg = j.state;
+      for (const line of [...(j.log_tail || [])].reverse()) {
+        try {
+          const rec = JSON.parse(line);
+          if (rec.event === "progress" && rec.message) { msg = rec.message; break; }
+        } catch { /* non-JSON log lines are fine */ }
+      }
+      return el("div", { class: "field" },
+        badge(j.state, j.state === "running" ? "done" : "queued"),
+        el("span", { class: "mono hint", text: j.job_id + " " }),
+        el("span", { class: "hint", text: msg }));
+    });
+    host.replaceChildren(
+      el("h3", { text: "Running curation jobs" }),
+      ...rows,
+      el("p", { class: "hint", text:
+        "Progress keeps streaming here even after you leave and return to this " +
+        "page. The Jobs panel has the full log." }));
+  }
+  const timer = setInterval(tick, 2500);
+  tick();
+  return { node: host, destroy() { stopped = true; clearInterval(timer); } };
+}
+
 // ------------------------------------------------- WP3d: source curation card
 // Local folder / website ingestion + hub-snapshot import. Folder and website
 // run as queued kind="curate_source" jobs (202+poll, same contract as
@@ -542,6 +593,13 @@ function sourcesCard(onDone) {
     placeholder: "auto", title:
       "Only crawl pages in this language on /zh/ /ja/ … mirrored docs trees. " +
       "Empty = your system language; * = keep all languages." });
+  // Crawl scope: by default the crawl stays inside the entry page's docs
+  // subtree (e.g. /documentation/unreal-engine/) so it never wanders into the
+  // host's forums/news/marketing pages. Empty = auto; "*" = whole same-origin.
+  const scopeIn = el("input", { type: "text", class: "narrow",
+    placeholder: "auto", title:
+      "Path subtree to crawl, e.g. /documentation/unreal-engine/. " +
+      "Empty = the entry page's folder (recommended); * = entire same-origin site." });
   const urlBtn = el("button", { text: "Crawl site" });
   urlBtn.addEventListener("click", async () => {
     if (!urlIn.value.trim()) return toast("URL required", "error");
@@ -551,6 +609,8 @@ function sourcesCard(onDone) {
       const body = { source: "website", url: urlIn.value.trim() };
       if (pagesIn.value) body.max_pages = Number(pagesIn.value);
       if (langIn.value.trim()) body.lang = langIn.value.trim();
+      if (scopeIn.value.trim())
+        body.scope = scopeIn.value.trim() === "*" ? "" : scopeIn.value.trim();
       if (serverSel.value) body.server = serverSel.value;
       const r = await curateJob(body, "/api/datasets/curate_source",
         setProgress);
@@ -596,6 +656,8 @@ function sourcesCard(onDone) {
       el("label", { title: "max pages (bounded crawl)" }, "pages"), pagesIn,
       el("label", { title: "crawl language (empty = system language, * = all)" },
         "lang"), langIn,
+      el("label", { title: "path subtree to stay inside (empty = entry page's folder, * = whole site)" },
+        "scope"), scopeIn,
       urlBtn),
     el("div", { class: "field" },
       el("label", { title: "serving instance used for pair synthesis" },
@@ -777,6 +839,8 @@ function listView(mount) {
   const diffHost = el("div");
   const funnelHost = el("div");
   let datasets = [];
+  const runningCard = runningCurationCard(() => load());
+  unsubs.push(() => runningCard.destroy());
 
   async function load() {
     try {
@@ -827,7 +891,8 @@ function listView(mount) {
   const envHost = el("div");
   const sourcesHost = el("div");
   mount.replaceChildren(
-    el("h2", { text: "Datasets" }), tableHost, funnelHost, diffHost);
+    el("h2", { text: "Datasets" }), runningCard.node, tableHost, funnelHost,
+    diffHost);
   funnelHost.replaceChildren(funnelCard());
   // WP3b/d: training-env package gate first (it blocks training, so it goes
   // above the work), then the extra curation sources next to Curate.

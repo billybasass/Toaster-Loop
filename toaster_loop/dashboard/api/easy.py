@@ -541,6 +541,9 @@ the one-shot feature preset enable-all.
                 "kind": str(b.get("kind") or "sft"),
                 "dry_run": dry_run,
                 "profile": target,
+                # Optional human name for the trained model (UI); forwarded to
+                # the iterate pipeline as display_name.
+                "model_name": str(b.get("model_name") or "").strip()[:80] or None,
             },
             on_done=lambda record: self._easy_after_run(
                 record.get("run_id", ""), record, ec.for_profile(target), prof),

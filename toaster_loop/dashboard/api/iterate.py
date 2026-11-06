@@ -49,6 +49,9 @@ class IterateRoutes(ApiContext):
         # Per-request base-model override (discovered-models dropdown), same
         # contract as submit_train.
         base_model_override = str(b["base_model"]) if b.get("base_model") else None
+        # Optional human name for the trained model (registry display_name +
+        # artifact filenames). model_id stays canonical regardless.
+        model_name = str(b.get("model_name") or "").strip()[:80] or None
         # Curation scope (easy training): only traces stamped with this agent
         # profile feed the dataset. None => unscoped, same as before.
         curate_profile = str(b["profile"]) if b.get("profile") else None
@@ -84,6 +87,20 @@ class IterateRoutes(ApiContext):
         _iter_tc = self._training_config()
         if base_model_override:
             _iter_tc.base_model = base_model_override
+        # GGUF is a serving artifact; trainers need HF safetensors (D-18).
+        # Covers BOTH the per-request override and the configured
+        # training.base_model — easy training sends no override, so without
+        # this check a GGUF in config would only fail deep inside the worker.
+        _base = str(_iter_tc.base_model or "")
+        if _base.lower().endswith(".gguf"):
+            raise HttpError(
+                400,
+                f"{_base!r} is a GGUF (serve-only). Resolve its HF base "
+                "first: GET /api/model_base?gguf=<path> finds or downloads "
+                "the matching safetensors checkpoint — training always "
+                "runs on real HF weights.",
+                code="gguf_not_trainable",
+            )
         record_path = runs_dir / f"{run_id}.json"
 
         def _save() -> None:
@@ -131,6 +148,7 @@ class IterateRoutes(ApiContext):
                     validation_cfg=_validation_cfg_from(self.cfg, home=self.home),
                     name=str(name or "ui"), kind=kind, dataset_id=dataset_id,
                     dry_run=dry_run, on_stage=_on_stage,
+                    display_name=model_name,
                 )
                 record["result"] = res.to_dict()
                 record["state"] = "done" if res.ok else "failed"

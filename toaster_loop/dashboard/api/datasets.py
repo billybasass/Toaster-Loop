@@ -487,6 +487,10 @@ WP9 analytics and guarded export.
             kwargs["max_depth"] = int(b["max_depth"])
         if str(b.get("lang") or "").strip():
             kwargs["lang"] = str(b["lang"]).strip()
+        # Optional crawl scope override (path subtree on the same host). The
+        # default derives from the entry page's directory; "" = whole origin.
+        if b.get("scope") is not None:
+            kwargs["path_prefix"] = str(b["scope"])
         return crawl_website(self.home, str(b.get("url") or ""), name=name,
                              synth_fn=synth, progress=progress,
                              should_cancel=should_cancel, **kwargs)
