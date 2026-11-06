@@ -2339,6 +2339,30 @@ def test_estimate_checkpointing_and_flash_reduce():
     assert flash.activations_mib <= gc.activations_mib
 
 
+def test_estimate_sdpa_not_quadratic_across_layers():
+    """Regression: sdpa was charged the full b*heads*s^2 score matrix for
+    EVERY layer — a 27B-class model at 16k context estimated ~1 TiB and the
+    scheduler gate queued-with-reason forever. sdpa is fused like flash, and
+    under GC at most one layer's scores exist at a time."""
+    big = ModelDims(hidden_size=5120, num_hidden_layers=64,
+                    num_attention_heads=24, num_key_value_heads=4,
+                    intermediate_size=17408, vocab_size=248320, head_dim=256,
+                    tie_word_embeddings=False)
+    kw: dict = dict(lora_r=64, batch_size=2, max_seq_length=16384,
+                    gradient_checkpointing=True)
+    sdpa = estimate_train_vram_mib(big, attn_implementation="sdpa", **kw)
+    flash = estimate_train_vram_mib(big, attn_implementation="flash_attention_2",
+                                    **kw)
+    eager = estimate_train_vram_mib(big, attn_implementation="eager", **kw)
+    assert sdpa.activations_mib == flash.activations_mib
+    # The historical bug: ~1 046 491 MiB total. Keep a generous ceiling that
+    # still catches any all-layers quadratic regression (a TiB-class model's
+    # LoRA run must not predict more than a few hundred GiB).
+    assert sdpa.total_mib < 300 * 1024
+    # eager under GC is honest too: one transient score matrix, not 64.
+    assert eager.activations_mib <= sdpa.activations_mib * 12
+
+
 def test_estimate_full_finetune_trainable_side():
     e = estimate_train_vram_mib(dims(), train_full=True, optim="adamw")
     n = base_param_count(dims())

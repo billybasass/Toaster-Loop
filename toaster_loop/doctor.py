@@ -129,10 +129,21 @@ def check_deps(find_spec: Callable[[str], Any] = importlib.util.find_spec
     for name, mod in core.items():
         lines.append(f"{name}: {'present' if find_spec(mod) else 'MISSING'}")
     extras = ["torch", "transformers", "peft", "trl"]
+    # Loader add-ons that are NOT hard pyproject deps but kill a run when
+    # absent for specific checkpoints: compressed-tensors (NVFP4/FP8 HF
+    # releases fail at from_pretrained without it), bitsandbytes (runtime
+    # nf4 QLoRA). Detected-but-not-gated: warn with the exact fix.
+    optional_loaders = ["compressed_tensors", "bitsandbytes"]
     have = [m for m in extras if find_spec(m) is not None]
+    missing_optional = [m for m in optional_loaders
+                        if find_spec(m) is None]
     lines.append(
         f"[training] extras: {len(have)}/{len(extras)} present"
         + ("" if have else " (train/export jobs need `pip install -e '.[training]'`)"))
+    if have and missing_optional:
+        lines.append("optional loaders missing: " + ", ".join(missing_optional)
+                     + " (pre-quantized checkpoints need compressed-tensors;"
+                     " 4-bit QLoRA needs bitsandbytes)")
     if "torch" in have:
         # Build-flavor check: a CUDA wheel on a ROCm box (the silent-CPU-
         # training incident) imports happily and passes every other check.
@@ -151,6 +162,11 @@ def check_deps(find_spec: Callable[[str], Any] = importlib.util.find_spec
     if missing:
         return CheckResult("deps", "problem", lines,
                            next_commands=["run: pip install -e ."])
+    if have and missing_optional:
+        return CheckResult(
+            "deps", "warn", lines,
+            next_commands=["pip install 'compressed-tensors>=0.15'"
+                           " bitsandbytes  (or re-run ./setup.sh)"])
     return CheckResult("deps", "ok", lines)
 
 

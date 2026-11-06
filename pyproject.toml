@@ -29,6 +29,10 @@ training = [
   "datasets>=3.0",
   "accelerate>=0.34",
   "bitsandbytes>=0.43; platform_system == 'Linux'",
+  # Pre-quantized HF checkpoints (compressed-tensors format, e.g. NVFP4/
+  # FP8 releases) carry a quantization_config transformers cannot even parse
+  # without this package — the worker died at from_pretrained without it.
+  "compressed-tensors>=0.15",
 ]
 
 [project.scripts]

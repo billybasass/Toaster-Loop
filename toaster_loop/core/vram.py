@@ -24,9 +24,11 @@ Model (LoRA fine-tune — the only mode toaster_loop trains):
   * ``gradients``    trainable params x grad bytes (bf16 = 2).
   * ``optimizer``    trainable params x table lookup (fp32 m+v = 8 B;
                      8-bit optimizers = 4 B; adafactor ~= 2 B).
-  * ``activations``  per-layer saved-activation formula, quadratic attention
-                     term zeroed for flash-attention, heavily reduced under
-                     gradient checkpointing.
+  * ``activations``  per-layer saved-activation formula, heavily reduced under
+                     gradient checkpointing; the quadratic score-matrix term
+                     is a transient peak (one layer's worth under GC, all
+                     layers under eager) and is floored — not paid in full —
+                     for any fused attention impl (flash *or* sdpa).
   * ``context``      CUDA/HIP context + fragmentation slack (fixed MiB plus a
                      fraction of weights).
 
@@ -70,12 +72,12 @@ CONTEXT_OVERHEAD_MIB = 600.0
 FRAGMENTATION_FRACTION = 0.10
 
 # Activation constants (elements per layer, Eymard-style decomposition):
-#   elems/layer = b*s*h * (ACT_LINEAR_TERMS + ACT_ATTN_QUADRATIC * heads*s/h)
-# gradient checkpointing keeps only layer inputs (+ small recompute peak):
-ACT_LINEAR_TERMS = 34.0
+#   elems/layer = b*s*h * ACT_LINEAR_TERMS   (+ separate transient score term)
+# Under gradient checkpointing only block inputs (+ norm copies) are saved:
+ACT_LINEAR_TERMS = 34.0       # no-GC: all per-block activations kept
+ACT_GC_TERMS = 2.0            # GC: block input + norm copy, per layer
 ACT_ATTN_QUADRATIC = 5.0
-ACT_GC_FACTOR = 0.12          # GC keeps ~12% of the no-GC footprint
-ACT_FLASH_FACTOR = 0.10       # flash/sdpa kills the quadratic term (floor kept)
+ACT_FLASH_FACTOR = 0.10       # fused impls (flash AND sdpa) floor the score term
 ACT_MIN_BYTES_PER_ELEM = 2    # bf16 activations
 
 
@@ -258,17 +260,29 @@ def estimate_train_vram_mib(
     optimizer_mib = int(trainable * opt_bytes / MIB)
 
     # --- activations --------------------------------------------------------
+    # Saved-per-layer term (inputs to every block), reduced by GC. Kept
+    # separate from the score-matrix term because they scale differently:
+    # saved activations are linear in s and exist for ALL layers, while the
+    # b*heads*s*s attention scores are a TRANSIENT peak — autograd saves them
+    # per layer only without checkpointing; under GC (or fused kernels) at
+    # most one layer's scores exist at a time. Multiplying the quadratic term
+    # into the all-layers sum inflated a 27B/16k-context estimate to ~1 TiB
+    # and starved the scheduler gate forever.
     b = max(1, int(batch_size))
     s = max(1, int(max_seq_length))
     h = dims.hidden_size
-    elems_per_layer = b * s * h * ACT_LINEAR_TERMS
-    quadratic = ACT_ATTN_QUADRATIC * dims.num_attention_heads * s / h
-    if str(attn_implementation).lower() in ("flash_attention_2", "flash"):
-        quadratic *= ACT_FLASH_FACTOR
-    elems_per_layer += b * s * h * quadratic
-    act_elems = elems_per_layer * dims.num_hidden_layers
     if gradient_checkpointing:
-        act_elems *= ACT_GC_FACTOR
+        act_elems = b * s * h * ACT_GC_TERMS * dims.num_hidden_layers
+        score_layers = 1  # recomputed per layer: one score matrix at a time
+    else:
+        act_elems = b * s * h * ACT_LINEAR_TERMS * dims.num_hidden_layers
+        score_layers = dims.num_hidden_layers
+    quadratic = ACT_ATTN_QUADRATIC * dims.num_attention_heads * s / h
+    # Only "eager" materializes the full score matrix; flash AND sdpa use
+    # fused kernels that never allocate it (floor kept as slack).
+    if str(attn_implementation).lower() != "eager":
+        quadratic *= ACT_FLASH_FACTOR
+    act_elems += b * s * h * quadratic * score_layers
     activations_mib = int(act_elems * ACT_MIN_BYTES_PER_ELEM / MIB)
 
     # --- overhead -------------------------------------------------------------

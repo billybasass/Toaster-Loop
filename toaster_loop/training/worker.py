@@ -929,7 +929,22 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         # full-FT footprint of Qwen3-0.6B; "auto" on an fp32 checkpoint
         # would train fp32 and 4x the optimizer memory).
         load_kwargs["torch_dtype"] = torch.bfloat16
-    if load_in_4bit and torch.cuda.is_available():
+    # Pre-quantized checkpoints (NVFP4/FP8/int4 compressed-tensors releases)
+    # carry their own quantization_config in config.json. Stacking a
+    # BitsAndBytesConfig on top makes transformers merge two quantizers and
+    # die (or silently requantize); the right move is to load as-is — it is
+    # already smaller than nf4 would make it.
+    _prequantized = False
+    try:
+        import json as _json
+        _cfgj = Path(str(cfg["model"])).expanduser() / "config.json"
+        if _cfgj.is_file():
+            _prequantized = "quantization_config" in _json.loads(
+                _cfgj.read_text())
+    except (OSError, ValueError):
+        pass
+
+    if load_in_4bit and torch.cuda.is_available() and not _prequantized:
         try:
             from transformers import BitsAndBytesConfig  # type: ignore[import-not-found]
 
@@ -942,6 +957,10 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         except ImportError:
             _emit(log_path, "warning",
                   message="bitsandbytes missing — loading in bf16/fp16 instead of 4-bit")
+    elif load_in_4bit and _prequantized:
+        _emit(log_path, "warning", message=(
+            "checkpoint is pre-quantized (config.json quantization_config)"
+            " — loading as-is; runtime nf4 skipped"))
     elif load_in_4bit:
         _emit(log_path, "warning",
               message="no CUDA device — ignoring load_in_4bit, loading at native precision")
