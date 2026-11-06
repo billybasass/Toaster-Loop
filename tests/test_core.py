@@ -2395,6 +2395,9 @@ def test_estimate_from_train_yaml(tmp_path, monkeypatch):
     # 4-bit load mode only applies when a GPU is present (the worker ignores
     # load_in_4bit without CUDA), so pin the probe for deterministic math.
     monkeypatch.setattr(vram_mod, "_cuda_available", lambda: True)
+    # And pin the ROCm-no-bnb guard (this test runs on AMD boxes where
+    # rocm-smi exists and would legitimately force bf16).
+    monkeypatch.setattr(vram_mod, "_bnb_unavailable_rocm", lambda: False)
     est = estimate_from_train_yaml(str(ydir / "train.yaml"), str(model_dir))
     assert est is not None and est.load_mode == "nf4"
     # lora r=32 two modules -> smaller trainable side than default 7x64.

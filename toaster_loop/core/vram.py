@@ -350,6 +350,12 @@ def estimate_from_train_yaml(
     if load_in_4bit and _is_prequantized(model):
         load_in_4bit = False
         tier_reason += "; pre-quantized ckpt loads dequantized bf16"
+    # ROCm: the PyPI bitsandbytes has no kernels for recent AMD GPUs (it
+    # SIGSEGVs — the rc=-11 incident), so the worker falls back to bf16
+    # there. The gate must price the SAME load, not the nf4 that never runs.
+    if load_in_4bit and _bnb_unavailable_rocm():
+        load_in_4bit = False
+        tier_reason += "; ROCm without ROCm-built bitsandbytes -> bf16 base"
     est = estimate_train_vram_mib(
         dims,
         lora_r=int(lora.get("lora_r", 64)),
@@ -381,6 +387,22 @@ def _is_prequantized(model_path: str) -> bool:
             cfg_json.read_text())
     except (OSError, ValueError):
         return False
+
+
+def _bnb_unavailable_rocm() -> bool:
+    """Mirror the worker's ROCm bitsandbytes guard on the gate side.
+
+    The worker skips runtime nf4 when torch is a ROCm build unless
+    TOASTER_LOOP_BNB_ROCM forces it. Without importing torch here, an AMD
+    machine is identified by rocm-smi present and nvidia-smi absent (a true
+    hybrid would set the env override on both sides)."""
+    import os as _os
+    import shutil
+
+    if str(_os.environ.get("TOASTER_LOOP_BNB_ROCM", "")).strip().lower() \
+            in ("1", "true", "yes", "on"):
+        return False
+    return bool(shutil.which("rocm-smi")) and not shutil.which("nvidia-smi")
 
 
 # --------------------------------------------------------- 4-bit tier policy

@@ -944,7 +944,16 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     except (OSError, ValueError):
         pass
 
-    if load_in_4bit and torch.cuda.is_available() and not _prequantized:
+    # bitsandbytes on ROCm: the standard PyPI wheel has no kernels for
+    # recent AMD gfx targets (verified: importing + touching it SIGSEGVs on
+    # Strix Halo / ROCm 7.1 — the job died rc=-11 with no Python traceback).
+    # Skip runtime nf4 unless explicitly forced via TOASTER_LOOP_BNB_ROCM=1
+    # (for users with a ROCm bnb build); transformers then loads bf16.
+    _bnb_rocm_blocked = bool(torch.version.hip) and \
+        os.environ.get("TOASTER_LOOP_BNB_ROCM", "").strip() not in ("1", "true", "yes", "on")
+
+    if load_in_4bit and torch.cuda.is_available() and not _prequantized \
+            and not _bnb_rocm_blocked:
         try:
             from transformers import BitsAndBytesConfig  # type: ignore[import-not-found]
 
@@ -957,6 +966,14 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         except ImportError:
             _emit(log_path, "warning",
                   message="bitsandbytes missing — loading in bf16/fp16 instead of 4-bit")
+    elif load_in_4bit and _bnb_rocm_blocked:
+        load_in_4bit = False
+        _emit(log_path, "warning", message=(
+            f"ROCm torch ({torch.version.hip}): the PyPI bitsandbytes has no"
+            " kernels for this GPU and SIGSEGVs — skipping runtime 4-bit,"
+            " loading bf16 instead (needs ~2x the RAM of nf4; lower"
+            " max_seq_length if it OOMs). Set TOASTER_LOOP_BNB_ROCM=1 to"
+            " force bitsandbytes when you have a ROCm build."))
     elif load_in_4bit and _prequantized:
         _emit(log_path, "warning", message=(
             "checkpoint is pre-quantized (config.json quantization_config)"
@@ -964,6 +981,51 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     elif load_in_4bit:
         _emit(log_path, "warning",
               message="no CUDA device — ignoring load_in_4bit, loading at native precision")
+
+    # GPU sanity preflight (Strix Halo rc=-11 saga): on unified-memory AMD
+    # boxes, torch/ROCm SIGSEGVs on the FIRST allocation when the GTT pool is
+    # already saturated by other processes (verified: even a 4x4 tensor dies
+    # while a 250k-context llama-server holds ~76 GiB). A segfault here would
+    # kill the job with no traceback, so probe in a THROWAWAY CHILD and fail
+    # the job honestly with who is holding memory instead.
+    if torch.cuda.is_available() and not os.environ.get(
+            "TOASTER_LOOP_SKIP_GPU_PROBE"):
+        _probe = subprocess.run(
+            [sys.executable, "-c",
+             "import torch; t=torch.empty(256*1024*1024, dtype=torch.uint8,"
+             " device='cuda'); print('ok', t.numel())"],
+            capture_output=True, text=True, timeout=300)
+        if _probe.returncode != 0:
+            _diag = []
+            try:
+                from ..core import gpumem
+                _pool = gpumem.unified_pool()
+                if _pool is not None:
+                    _diag.append(
+                        f"GPU pool: {_pool.free_mib // 1024} GiB free of "
+                        f"{_pool.total_mib // 1024} GiB (gtt_used="
+                        f"{_pool.gtt_used_mib // 1024} GiB)")
+            except Exception:
+                pass
+            try:
+                _f = subprocess.run(["fuser", "-v", "/dev/dri/renderD128"],
+                                    capture_output=True, text=True, timeout=10)
+                _holders = " ".join(sorted(
+                    {l.split()[-1] for l in _f.stdout.splitlines()[1:]
+                     if len(l.split()) >= 6}))
+                if _holders:
+                    _diag.append(f"GPU device held by: {_holders}")
+            except Exception:
+                pass
+            _tail = (_probe.stderr or "").strip().splitlines()[-3:]
+            raise RuntimeError(
+                "GPU preflight failed: torch cannot allocate even 256 MiB on "
+                "cuda (child exited rc=" + str(_probe.returncode) + "). On "
+                "unified-memory AMD systems this means the GPU memory pool is"
+                " exhausted by OTHER processes — close the model server(s)"
+                " holding it (Unsloth Studio / llama-server / Toaster Loop"
+                " serving) and retry. " + " | ".join(_diag)
+                + ((" | child: " + " ".join(_tail)) if _tail else ""))
 
     if _prequantized and not train_full:
         # Pre-quantized serving checkpoints (FP8/NVFP4 compressed-tensors)
@@ -1298,6 +1360,10 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     while True:
         callback = make_protocol_callback(
             log_path, scaler if scaler.enabled else None)
+        # Emit BEFORE the (heavy) Trainer build: Trainer construction itself
+        # is a known native-crash site, and this event distinguishes "died
+        # building the trainer" from "died in the first steps".
+        _emit(log_path, "phase", phase="build_trainer", rank=current_r)
         trainer = _build_trainer(model, callback)
         _emit(log_path, "phase", phase="train", rank=current_r)
         result = trainer.train(resume_from_checkpoint=resume_from)
@@ -1984,6 +2050,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--quant", default="q4_k_m")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
+
+    # Native-crash forensics: a SIGSEGV (rc=-11) inside torch/ROCm leaves no
+    # Python traceback and the job log just stops (observed repeatedly on
+    # Strix Halo). faulthandler dumps the C-level-triggering Python stack —
+    # but note the scheduler spawns us with stderr merged into DEVNULL, so
+    # enabling onto stderr would be swallowed: point it AT THE JOB LOG file.
+    # Without this these crashes are undiagnosable. Stdlib, zero cost.
+    import faulthandler
+
+    try:
+        if args.log_path:
+            _fh = open(args.log_path, "a", encoding="utf-8")
+            faulthandler.enable(file=_fh)
+        else:
+            faulthandler.enable()
+    except Exception:  # pragma: no cover - exotic envs
+        pass
 
     _emit(args.log_path, "start", job=args.job, kind=args.kind, dry_run=args.dry_run)
     try:
