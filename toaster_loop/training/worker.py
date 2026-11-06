@@ -965,6 +965,20 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         _emit(log_path, "warning",
               message="no CUDA device — ignoring load_in_4bit, loading at native precision")
 
+    if _prequantized and not train_full:
+        # Pre-quantized serving checkpoints (FP8/NVFP4 compressed-tensors)
+        # are not trainable adapters-in-place: peft dies with "'Linear' object
+        # has no attribute 'weight'" on the quantized modules, and where they
+        # do load, transformers dequantizes to bf16 (27B -> ~50 GiB) and the
+        # run OOM-kills. Fail fast with the fix instead of a segfault.
+        raise RuntimeError(
+            f"{cfg['model']} is a pre-quantized checkpoint (config.json"
+            " quantization_config, e.g. FP8/NVFP4). Those are serve-only:"
+            " LoRA cannot be injected into quantized linear layers and the"
+            " dequantized weights would OOM most machines. Pick the bf16"
+            " HF base instead (the Models panel's resolve step finds it) —"
+            " training auto-applies 4-bit QLoRA for large models anyway.")
+
     model = AutoModelForCausalLM.from_pretrained(cfg["model"], **load_kwargs)
     try:
         model.config.use_cache = False  # required with gradient checkpointing

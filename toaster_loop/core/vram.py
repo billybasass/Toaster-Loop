@@ -342,6 +342,14 @@ def estimate_from_train_yaml(
     load_in_4bit, tier_reason = resolve_load_in_4bit(
         explicit=load_in_4bit_explicit, dims=dims, train_full=train_full,
         gpu_available=has_cuda)
+    # Pre-quantized checkpoints (compressed-tensors FP8/NVFP4 etc.) are NOT
+    # loaded as nf4: the worker skips runtime 4-bit and transformers
+    # dequantizes them to bf16 on non-NVIDIA hardware. Charging the gate
+    # 0.56 B/param let a 27B FP8 run through at an ~70 GiB estimate while
+    # really needing ~50 GiB of weights alone — then it OOM-died. Be honest.
+    if load_in_4bit and _is_prequantized(model):
+        load_in_4bit = False
+        tier_reason += "; pre-quantized ckpt loads dequantized bf16"
     est = estimate_train_vram_mib(
         dims,
         lora_r=int(lora.get("lora_r", 64)),
@@ -363,6 +371,16 @@ def _cuda_available() -> bool:
     import shutil
 
     return bool(shutil.which("nvidia-smi") or shutil.which("rocm-smi"))
+
+
+def _is_prequantized(model_path: str) -> bool:
+    """True when a local model dir's config.json carries quantization_config."""
+    try:
+        cfg_json = Path(str(model_path)).expanduser() / "config.json"
+        return cfg_json.is_file() and "quantization_config" in json.loads(
+            cfg_json.read_text())
+    except (OSError, ValueError):
+        return False
 
 
 # --------------------------------------------------------- 4-bit tier policy
