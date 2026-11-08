@@ -30,6 +30,10 @@ export const SPEC_MODES = [
 ];
 
 function field(labelText, input, hint) {
+  // Hover tooltip: the inline hint doubles as the control's title so every
+  // knob explains itself on hover (widgets with their own title are left alone).
+  if (hint && input && input.setAttribute && !input.getAttribute("title"))
+    input.setAttribute("title", String(hint));
   return el("div", { class: "field" }, el("label", { text: labelText }),
     input, hint ? el("span", { class: "hint", text: hint }) : null);
 }
@@ -127,14 +131,25 @@ export function runSettingsEditor(initial = {}, opts = {}) {
   extraTa.value = rs.extra_args || "";
 
   const kids = [
-    field("KV cache dtype", kvSel, "-ctk/-ctv (q8_0 saves VRAM)"),
-    field("Flash attention", faSel, "--flash-attn"),
+    field("KV cache dtype", kvSel,
+      "-ctk/-ctv: quantize the attention caches. q8_0 roughly halves their VRAM " +
+      "with a tiny quality cost; blank = llama.cpp default (f16)."),
+    field("Flash attention", faSel,
+      "--flash-attn: faster long-context attention, less KV-cache memory. " +
+      "Recommended on when the build supports it."),
     field("Parallel slots / batch / micro-batch",
-      el("span", {}, parIn, bsIn, ubIn), "-np · -b · -ub"),
-    field("Tensor parallelism", tpSel, "--tensor-parallel"),
+      el("span", { title: "-np concurrent requests · -b logical batch · -ub physical " +
+        "micro-batch. Bigger = more throughput, more VRAM. Blank = auto." },
+        parIn, bsIn, ubIn),
+      "-np · -b · -ub"),
+    field("Tensor parallelism", tpSel,
+      "--tensor-parallel: split layers across several GPUs (multi-GPU machines only)."),
     field("VRAM budget %", vramPctIn,
       "scales GPU layer offload when gpu_layers is auto (VRAM budget percentage)"),
-    field("mmap / mlock", el("span", {}, mmapSel, mlockSel), "no-mmap · mlock"),
+    field("mmap / mlock", el("span", { title:
+      "no-mmap reads weights directly instead of memory-mapping (helps when the OS " +
+      "evicts pages); mlock pins them in RAM so they are never paged out." },
+      mmapSel, mlockSel), "no-mmap · mlock"),
     field("Speculative decoding", el("span", {}, specSel, specNMaxIn),
       "--spec-type (n-gram self-speculation is free VRAM-wise; mtp needs an MTP model)"),
   ];
@@ -216,14 +231,19 @@ export function imageSettingsEditor(initial = {}) {
   extraTa.value = im.extra_args || "";
 
   host.replaceChildren(
-    field("Steps", stepsIn, "--steps (denoising iterations)"),
+    field("Steps", stepsIn, "--steps: denoising iterations — more can improve " +
+      "detail at linearly more time"),
     field("CFG scale", cfgIn, "--cfg-scale (prompt adherence; 4.5-8 typical)"),
-    field("Width × height", el("span", {}, wIn, hIn),
+    field("Width × height", el("span", { title:
+      "-W / -H output size in pixels; keep multiples of 8 within the model's max." },
+      wIn, hIn),
       "-W / -H in pixels (multiples of 8; model-dependent max)"),
-    field("Sampler", samplerSel, "--sampling-method"),
+    field("Sampler", samplerSel,
+      "--sampling-method: the solver taking each denoising step (euler_a is a " +
+      "safe default; dpm++ families are fast and good)."),
     field("Scheduler", schedSel, "--scheduler (sigma schedule)"),
-    field("Seed", seedIn, "-s (-1 = random per request)"),
-    field("Batch count", batchIn, "-b images per request"),
+    field("Seed", seedIn, "-s (-1 = random per request; fixed seed reproduces images)"),
+    field("Batch count", batchIn, "-b images generated per request"),
     field("Extra arguments", extraTa,
       "appended verbatim to the sd-server command"),
   );
@@ -277,10 +297,21 @@ export function samplingEditor(initial = {}) {
   const preserveSel = triSelect(sp.preserve_thinking);
 
   host.replaceChildren(
-    field("temperature", tempIn),
-    field("top_p / top_k / min_p", el("span", {}, topPIn, topKIn, minPIn)),
-    field("repetition / presence penalty", el("span", {}, repIn, presIn)),
-    field("max_tokens", maxTokIn),
+    field("temperature", tempIn,
+      "randomness of token choice: 0 = deterministic, ~0.7 balanced, >1 creative."),
+    field("top_p / top_k / min_p", el("span", { title:
+      "Nucleus sampling cuts off low-probability tokens: top_p keeps the smallest " +
+      "set covering p of the probability mass; top_k caps to k candidates; " +
+      "min_p drops tokens below a fraction of the best one." },
+      topPIn, topKIn, minPIn),
+      "nucleus sampling cutoffs"),
+    field("repetition / presence penalty", el("span", { title:
+      "Discourage reusing tokens: repetition_penalty multiplies down already-used " +
+      "tokens (>1 = stronger); presence_penalty adds a flat cost for any token " +
+      "seen in the prompt." }, repIn, presIn),
+      "anti-repetition nudges"),
+    field("max_tokens", maxTokIn,
+      "hard cap on completion length per request (blank = server default)."),
     field("Thinking (enable_thinking)", thinkSel,
       "on/off for reasoning-capable models (Qwen3, DeepSeek-R1, gpt-oss…)"),
     field("Reasoning effort", effortSel,

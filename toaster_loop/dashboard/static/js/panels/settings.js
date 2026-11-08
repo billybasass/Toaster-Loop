@@ -63,6 +63,10 @@ export default {
 
     // ------------------------------------------------- structured form
     function field(labelText, input, hint) {
+      // Hover tooltip: reuse the inline hint as the control's title so every
+      // setting explains itself on hover (skips widgets with their own title).
+      if (hint && input && input.setAttribute && !input.getAttribute("title"))
+        input.setAttribute("title", String(hint));
       return el("div", { class: "field" }, el("label", { text: labelText }),
         input, hint ? el("span", { class: "hint", text: hint }) : null);
     }
@@ -104,10 +108,13 @@ export default {
 
       function row(t = {}) {
         const promptIn = el("input", { type: "text", value: t.prompt || "",
-          placeholder: "prompt" });
+          placeholder: "prompt",
+          title: "Exact prompt replayed against the trained model after export." });
         const expectIn = el("input", { type: "text",
           value: (t.expect_contains || []).join(", "),
-          placeholder: "expect contains (comma-separated)" });
+          placeholder: "expect contains (comma-separated)",
+          title: "Substrings the answer must contain (case-insensitive) for this " +
+            "task to count as passed." });
         promptIn.addEventListener("change", () => { t.prompt = promptIn.value; });
         expectIn.addEventListener("change", () => {
           t.expect_contains = expectIn.value.split(",").map((s) => s.trim()).filter(Boolean);
@@ -122,6 +129,7 @@ export default {
       host.appendChild(rowsHost);
       host.appendChild(el("div", { class: "field" },
         el("button", { class: "small", text: "+ add task",
+          title: "Add one golden validation task (prompt + required substrings).",
           onclick: () => { tasks.push({}); render(); } })));
       render();
       return { node: host, get: () => tasks.filter((t) => t.prompt) };
@@ -130,7 +138,9 @@ export default {
     function sectionCard(title, build) {
       const body = el("div");
       const status = el("span", { class: "hint" });
-      const applyBtn = el("button", { class: "small", text: "Apply" });
+      const applyBtn = el("button", { class: "small", text: "Apply",
+        title: "Save only the fields you changed (blank stays untouched). Writes " +
+          "are validated and a .bak backup is kept." });
       const card = el("div", { class: "card" },
         el("h3", {}, title.text, " ", status), body,
         el("div", { class: "field" }, applyBtn));
@@ -201,7 +211,8 @@ export default {
           field("models_dir", modelsDirIn,
             "base model folder scanned for the model pickers " +
             "(HF hub cache layout; empty = HF default cache)"),
-          field("context_length", ctxIn),
+          field("context_length", ctxIn,
+            "prompt window in tokens for spawned servers — bigger uses more VRAM"),
           field("port", portIn, "dashboard+serve port (0 = auto)"),
           field("attach_url", attachIn, "skip spawning; use this OpenAI-compat URL"));
         return () => collect([
@@ -251,10 +262,13 @@ export default {
         { text: "Curation" }, { section: "curation" }), (body) => {
         body.replaceChildren(
           field("min_score", minScoreIn, "traces below this are dropped"),
-          field("min_turns / max_turns", el("span", {}, minTurnsIn, maxTurnsIn)),
-          field("max_est_tokens", maxTokIn),
+          field("min_turns / max_turns", el("span", {}, minTurnsIn, maxTurnsIn),
+            "drop traces with fewer/more conversation turns than this range"),
+          field("max_est_tokens", maxTokIn,
+            "skip traces whose estimated size exceeds this many tokens"),
           field("include_failures", incFailSel, "failures only as DPO negatives"),
-          field("formats", formatsSel));
+          field("formats", formatsSel,
+            "which files to emit: sft pairs, dpo preference pairs, or both"));
         return () => collect([
           ["min_score", minScoreIn, "num"], ["min_turns", minTurnsIn, "num"],
           ["max_turns", maxTurnsIn, "num"], ["max_est_tokens", maxTokIn, "num"],
@@ -272,13 +286,19 @@ export default {
       const trCard = sectionCard(Object.assign(
         { text: "Training" }, { section: "training" }), (body) => {
         body.replaceChildren(
-          field("base_model", baseModelIn),
+          field("base_model", baseModelIn,
+            "default HF repo id or local checkpoint path used when Train has no pick"),
           field("python", pythonIn, "interpreter for GPU workers"),
-          field("min_free_vram_mib", vramIn),
-          field("require_ac_power", acSel),
-          field("auto_enabled", autoSel),
-          field("auto_min_traces", autoTracesIn),
-          field("auto_min_score", autoScoreIn));
+          field("min_free_vram_mib", vramIn,
+            "resource gate: jobs wait while free VRAM is below this (0 = off)"),
+          field("require_ac_power", acSel,
+            "refuse to start trainings on battery power (laptops)"),
+          field("auto_enabled", autoSel,
+            "intent flag for the cron-driven loop shown on the Schedule panel"),
+          field("auto_min_traces", autoTracesIn,
+            "unclaimed traces required before an automatic run triggers"),
+          field("auto_min_score", autoScoreIn,
+            "mean outcome score required before an automatic run triggers"));
         return () => collect([
           ["base_model", baseModelIn, "text"], ["python", pythonIn, "text"],
           ["min_free_vram_mib", vramIn, "num"], ["require_ac_power", acSel, "bool"],
@@ -292,7 +312,8 @@ export default {
       const vaCard = sectionCard(Object.assign(
         { text: "Validation" }, { section: "validation" }), (body) => {
         body.replaceChildren(
-          field("min_pass_rate", passRateIn),
+          field("min_pass_rate", passRateIn,
+            "fraction (0–1) of golden tasks the candidate must replay correctly"),
           el("p", { class: "hint", text:
             "Golden tasks replay after export; promotion only if the pass rate " +
             "clears the threshold. expect_contains is matched case-insensitively." }),
@@ -507,11 +528,14 @@ export default {
             "Each project indexes its own workspace into a per-project database. " +
             "toaster_loop starts and stops its own local embedding server for the " +
             "selected model; without one a BM25 lexical index is used." }),
-          field("enabled", iEnSel),
-          field("embedding model", el("div", {}, iModelSel, catHint)),
+          field("enabled", iEnSel,
+            "on = the agent gains the search_codebase semantic tool"),
+          field("embedding model", el("div", {}, iModelSel, catHint),
+            "GGUF with embedding support; none = BM25 lexical search only"),
           field("output embedding dimension", iDimSel,
             "Matryoshka truncation (MRL); changing this requires rebuilding indexes"),
-          field("search mode", iModeSel),
+          field("search mode", iModeSel,
+            "hybrid = merge semantic + lexical ranks; needs an embedding model"),
           field("embedding GPU layers", iGpuIn,
             "-ngl for the embedding server. 0 = run embeddings on the CPU and " +
             "leave the GPU to your chat model (recommended while a model is " +
@@ -729,9 +753,12 @@ export default {
             "deterministic self-checked verifiers. Mined goldens join the " +
             "promotion gate and RFT prompt selection automatically." }),
           field("enabled", gmEnSel, "master switch — job refuses while off"),
-          field("max_per_run", gmMaxIn),
-          field("max_candidates", gmCandIn),
-          field("min_feedback_score", gmScoreIn),
+          field("max_per_run", gmMaxIn,
+            "most goldens added per mining run"),
+          field("max_candidates", gmCandIn,
+            "recent 👍 traces examined per run (newest first)"),
+          field("min_feedback_score", gmScoreIn,
+            "minimum 👍 score a trace needs to become a mining candidate"),
           field("use_judge", gmJudgeSel,
             "judge may propose extra substrings; proposals face the same self-check"),
           el("div", { class: "field" }, el("label", { text: "actions" }), gmMineBtn),

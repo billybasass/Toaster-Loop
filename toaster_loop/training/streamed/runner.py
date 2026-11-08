@@ -59,6 +59,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 # (torch/transformers/safetensors) seams stay lazily imported inside
 # run_streamed_sft / build_streamed_model below.
 from .masking import mask_conversation, sharegpt_to_messages
+# The streamer's loader protocol is pure Python (no torch) — importing it lets
+# ShellLayerLoader declare the contract instead of only duck-typing it.
+from .streaming import Loader as _LoaderProtocol
 
 #: model_type values this runner can glue (spike GO condition 1: ONE
 #: reference arch family first — llama-shaped dense decoders). qwen3 shares
@@ -248,7 +251,7 @@ def split_checkpoint(model_dir: Path, split_dir: Path, *,
 
 
 # ---------------------------------------------------------- layer streaming
-class ShellLayerLoader:
+class ShellLayerLoader(_LoaderProtocol):
     """LayerStreamer loader: swap real tensors into a meta shell layer.
 
     ``load(i)`` reads layer i's checkpoint tensors and swaps them into the
@@ -257,13 +260,26 @@ class ShellLayerLoader:
     ``unload`` swaps the previous (meta) parameters back so residency drops
     to the window size. LoRA parameters are never swapped out: they live on
     CPU permanently (tiny, trainable).
+
+    Deep-dive finding #14 (quantized frozen weights): AdamW state for the
+    streamed path is ALREADY CPU-resident — only LoRA params train and they
+    never leave CPU (see recompute.py's step contract), so there is no GPU
+    optimizer-state offload to do here. The remaining resident-budget lever
+    is the FROZEN base layers: ``dtype_override`` loads them at a lower
+    precision than the checkpoint (e.g. fp32 ckpt -> bf16 resident), halving
+    per-layer residency for fp32 checkpoints. This mirrors DeepSpeed's
+    ``zero_quantized_nontrainable_weights`` intent ("useful for LoRA")
+    without importing it (D-12); a true int4/int8 resident format is future
+    work since swap_tensors needs material same-shape tensors.
     """
 
     def __init__(self, layer_params: List[Dict[str, Any]], split_dir: Path,
-                 *, base_prefix: str = "model.layers"):
+                 *, base_prefix: str = "model.layers",
+                 dtype_override: Optional[str] = None):
         self.layer_params = layer_params
         self.split_dir = Path(split_dir)
         self.base_prefix = base_prefix
+        self.dtype_override = dtype_override
         self._handles_cache: Dict[str, Any] = {}
         idx = json.loads((self.split_dir / "split_index.json").read_text())
         self.file_of: Dict[str, str] = {}
@@ -291,8 +307,15 @@ class ShellLayerLoader:
             if fname is None:
                 continue  # not a checkpoint tensor (buffer etc.) — skip-safe
             t = self._handle(fname).get_tensor(flat)
+            target_dtype = p.dtype
+            if self.dtype_override:
+                odtype = getattr(torch, str(self.dtype_override), None)
+                if odtype is not None and odtype != torch.float32:
+                    # Never UP-cast an fp16/bf16 checkpoint to fp32.
+                    target_dtype = odtype
             with torch.no_grad():
-                real = torch.nn.Parameter(t.to(p.dtype), requires_grad=False)
+                real = torch.nn.Parameter(t.to(target_dtype),
+                                          requires_grad=False)
             if p.device.type == "meta":
                 torch.utils.swap_tensors(p, real)
             else:
@@ -413,7 +436,7 @@ def _fill_cpu_tensors(model: Any, tensors: Dict[str, Any]) -> None:
 
 
 class LayerStep:
-    """Callable layer view injecting position_embeddings + causal mask.
+    """Callable layer view injecting position_embeddings (+ optional mask).
 
     StreamedRecomputeTrainer calls ``layer(h)``; the pinned reference archs
     take ``(hidden_states, attention_mask=..., position_embeddings=(cos,
@@ -423,6 +446,15 @@ class LayerStep:
     non-interpolated RoPE; exotic rope configs are rejected by the shell
     builder's arch pinning). Not an nn.Module child of anything — holds the
     real layer in a plain list so parameter discovery is unaffected.
+
+    Deep-dive fix #4: ``attention_mask`` defaults to None, which routes SDPA
+    through its fused ``is_causal=True`` path instead of allocating the old
+    [1,1,S,S] fp32 additive mask (~1 GiB at the 16k default). This is exact,
+    not an approximation: batches are RIGHT-padded, padded positions carry
+    label -100 (zero contribution to loss and gradient), and causal masking
+    means real tokens never attend to trailing pads — so a padding mask can
+    only ever change outputs at positions the loss ignores. Verified
+    numerically identical to the additive mask on the pinned archs.
     """
 
     def __init__(self, layer: Any):
@@ -462,7 +494,12 @@ def compute_rope(rope_cfg: Dict[str, Any], seq_len: int, batch: int):
 
 
 def causal_mask(seq_len: int, dtype: Any):
-    """Additive causal mask [1, 1, S, S] (0 / -inf upper triangle)."""
+    """Additive causal mask [1, 1, S, S] (0 / -inf upper triangle).
+
+    DEEP-DIVE FIX #4: no longer used by the training loop — pass
+    ``attention_mask=None`` to LayerStep and let SDPA apply causality via
+    its fused ``is_causal=True`` kernel (O(S) memory vs this O(S²) tensor).
+    Kept only as a reference for tests that want an explicit mask."""
     import torch  # lazy: training extra
 
     m = torch.full((seq_len, seq_len), float("-inf"), dtype=torch.float32)
@@ -504,6 +541,96 @@ def _state_for_gguf(state: Dict[str, Any]) -> Dict[str, Any]:
         m = re.match(r"^(\d+)\.(.+)$", k)
         out[f"model.layers.{m.group(1)}.{m.group(2)}" if m else k] = v
     return out
+
+
+# ------------------------------------------------- training-loop basics (#3)
+def streamed_eval_split(tokenized: List[Dict[str, Any]], fraction: float,
+                        seed: int, *, min_total: int = 20,
+                        min_eval: int = 2) -> Tuple[List[Any], Optional[List[Any]]]:
+    """Deterministic eval carve for the streamed path (deep-dive fix #3).
+
+    Same declared policy as the peft worker (fixed seed + explicit floors;
+    tiny datasets skip eval rather than degrade it). Deliberately a local
+    duplicate of ``worker.maybe_eval_split``: streamed modules must not
+    import worker.py (worker imports this module — circular)."""
+    import random
+
+    n = len(tokenized)
+    if n == 0 or not fraction or float(fraction) <= 0 or n < min_total:
+        return list(tokenized), None
+    n_eval = int(n * float(fraction))
+    if n_eval < min_eval:
+        return list(tokenized), None
+    idx = list(range(n))
+    random.Random(int(seed)).shuffle(idx)
+    ev_set = set(idx[:n_eval])
+    train = [r for i, r in enumerate(tokenized) if i not in ev_set]
+    ev = [tokenized[i] for i in sorted(ev_set)]
+    return train, ev
+
+
+def streamed_lr_factor(step: int, total_steps: int, *, warmup_steps: int = 5,
+                       min_lr_ratio: float = 0.1) -> float:
+    """LR multiplier for linear warmup + linear decay (deep-dive fix #3).
+
+    Pure function (torch-free, unit-testable): ramps 1/warmup .. 1 over the
+    warmup window, then decays linearly to ``min_lr_ratio`` by the final
+    step. Mirrors the peft path's default HF scheduler shape closely enough
+    that configs behave comparably across backends."""
+    if total_steps <= 0:
+        return 1.0
+    s = max(0, int(step))
+    w = max(0, int(warmup_steps))
+    if w > 0 and s < w:
+        return float(s + 1) / float(w)
+    denom = max(1, total_steps - w)
+    prog = min(1.0, max(0.0, (s - w) / denom))
+    return 1.0 - (1.0 - float(min_lr_ratio)) * prog
+
+
+def streamed_ckpt_path(out_dir: Path) -> Path:
+    """Resume checkpoint location for the streamed backend (fix #3)."""
+    return Path(out_dir) / "streamed_checkpoint.pt"
+
+
+def save_streamed_checkpoint(path: Path, *, step: int, epoch: int,
+                             params: List[Any], opt: Any,
+                             n_train: int, batch_in_epoch: int = 0) -> None:
+    """Atomic resume checkpoint: LoRA tensors + optimizer state + counters.
+
+    Written tmp-then-replace so a crash mid-save cannot corrupt the last
+    good checkpoint. ``n_train`` guards against resuming across a changed
+    dataset/batch layout (the caller compares and restarts fresh on a
+    mismatch). ``batch_in_epoch`` is the RESUME POINT: the index of the
+    next batch to run in ``epoch`` (0 at an epoch boundary)."""
+    import os  # stdlib
+
+    payload = {
+        "step": int(step), "epoch": int(epoch), "n_train": int(n_train),
+        "batch_in_epoch": int(batch_in_epoch),
+        "optimizer": opt.state_dict(),
+        "params": [p.detach().cpu().clone() for p in params],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".pt.tmp")
+    torch_save(payload, tmp)
+    os.replace(str(tmp), str(path))
+
+
+def torch_save(payload: Dict[str, Any], path: Path) -> None:
+    import torch  # lazy: training extra
+
+    torch.save(payload, str(path))
+
+
+def load_streamed_checkpoint(path: Path) -> Optional[Dict[str, Any]]:
+    """Load a resume checkpoint; None (with no crash) when unreadable."""
+    import torch  # lazy: training extra
+
+    try:
+        return torch.load(str(path), map_location="cpu", weights_only=False)
+    except Exception:
+        return None
 
 
 def run_streamed_sft(cfg: Dict[str, Any], log_path: Optional[str],
@@ -577,18 +704,79 @@ def run_streamed_sft(cfg: Dict[str, Any], log_path: Optional[str],
         raise ValueError(
             "no usable rows after per-turn masking — every row failed exact "
             "masking (chat template does not compose over prefixes)")
-    log(event="dataset_ready", rows=len(tokenized),
+
+    # Eval split (deep-dive fix #3): same floors/seed policy as the peft
+    # path so both backends report comparable eval behavior.
+    eval_fraction = float(tr.get("eval_fraction", 0.1))
+    eval_seed = int(tr.get("eval_seed", 42))
+    train_rows, eval_rows = streamed_eval_split(tokenized, eval_fraction,
+                                                eval_seed)
+    if eval_rows is not None:
+        log(event="eval_split", train_rows=len(train_rows),
+            eval_rows=len(eval_rows), fraction=eval_fraction, seed=eval_seed)
+    log(event="dataset_ready", rows=len(train_rows),
         skipped=len(rows) - len(tokenized))
 
     # Callable layer views + streamer + recompute trainer.
     steps = [LayerStep(l) for l in layers_raw]
-    loader = ShellLayerLoader(layer_params, split_dir)
-    streamer = LayerStreamer(loader, len(steps), prefetch_depth=1)
+    # Finding #14: optional lower-precision residency for the frozen base
+    # layers (e.g. fp32 checkpoint -> bf16 resident halves the window).
+    loader = ShellLayerLoader(
+        layer_params, split_dir,
+        dtype_override=(str(tr.get("streamed_layer_dtype") or "") or None))
+    prefetch_depth = max(0, int(tr.get("streamed_prefetch_depth", 1)))
+    streamer = LayerStreamer(loader, len(steps), prefetch_depth=prefetch_depth)
     params = lora_parameters(model)
     trainer = StreamedRecomputeTrainer(steps, params, streamer=streamer)
 
     H = int(embed_w.shape[1])
     opt = torch.optim.AdamW(params, lr=lr)
+
+    # LR schedule + grad clipping (fix #3). Warmup+linear-decay is ON by
+    # default to match the peft path's HF-scheduler behavior; set
+    # training.lr_schedule: "constant" for the old flat LR. max_grad_norm
+    # mirrors TrainingArguments' 1.0 default (0 disables).
+    lr_schedule = str(tr.get("lr_schedule", "warmup_decay")).lower().strip()
+    warmup_steps = int(tr.get("warmup_steps", 5))
+    max_grad_norm = float(tr.get("max_grad_norm", 1.0))
+    save_steps = int(tr.get("save_steps", 0) or 0)
+    resume_mode = str(tr.get("resume", "auto")).lower().strip()
+
+    n_train = len(train_rows)
+    steps_per_epoch = (n_train + batch_size - 1) // batch_size
+    total_steps = max(1, epochs * steps_per_epoch)
+
+    ckpt_path = streamed_ckpt_path(out_dir)
+    start_epoch, start_batch, step = 0, 0, 0
+    if resume_mode not in ("", "false", "no", "off", "none") \
+            and ckpt_path.is_file():
+        ck = load_streamed_checkpoint(ckpt_path)
+        if ck is None:
+            log(event="warning", message=(
+                f"resume checkpoint {ckpt_path} unreadable — starting fresh"))
+        elif int(ck.get("n_train", -1)) != n_train:
+            log(event="warning", message=(
+                "resume checkpoint was written for a different dataset size "
+                f"({ck.get('n_train')} vs {n_train}) — starting fresh"))
+        else:
+            with torch.no_grad():
+                for p, t in zip(params, ck["params"]):
+                    p.data.copy_(t.to(p.device, p.dtype))
+            opt.load_state_dict(ck["optimizer"])
+            start_epoch = int(ck.get("epoch", 0))
+            start_batch = int(ck.get("batch_in_epoch", 0))
+            step = int(ck.get("step", 0))
+            if start_epoch >= epochs:
+                # A COMPLETED run's checkpoint must never "resume" into a
+                # no-op re-run (same policy as the peft path's
+                # _checkpoint_is_unfinished guard): restart from zero.
+                log(event="warning", message=(
+                    f"resume checkpoint already at epoch {start_epoch} >= "
+                    f"{epochs} — previous run completed; starting fresh"))
+                start_epoch, start_batch, step = 0, 0, 0
+            else:
+                log(event="streamed_resumed", step=step, epoch=start_epoch,
+                    batch_in_epoch=start_batch, checkpoint=str(ckpt_path))
 
     out_dir.mkdir(parents=True, exist_ok=True)
     metrics_f = out_dir / METRICS_CSV
@@ -610,23 +798,55 @@ def run_streamed_sft(cfg: Dict[str, Any], log_path: Optional[str],
             labels[b, :n] = torch.tensor(e["labels"])
         return ids, labels
 
-    def _configure_steps(cos: Any, sin: Any, mask: Any) -> None:
+    def _configure_steps(cos: Any, sin: Any, mask: Any = None) -> None:
         for st in steps:
             st.position_embeddings = (cos, sin)
             st.attention_mask = mask
 
+    def _forward_only(ids: Any, labels: Any) -> float:
+        """no_grad forward + chunked CE — the eval-loss pass (fix #3)."""
+        B, S = ids.shape
+        cos, sin = compute_rope(rope_cfg, S, B)
+        _configure_steps(cos, sin, None)
+        with torch.no_grad():
+            x = torch.nn.functional.embedding(ids, embed_w)
+            final_h, _inputs = trainer.forward_inputs(x)
+            loss = chunked_linear_cross_entropy(
+                final_h.reshape(-1, H), lm_head_w, labels.reshape(-1))
+        return float(loss)
+
+    def _run_eval() -> Optional[float]:
+        if not eval_rows:
+            return None
+        losses = []
+        with torch.no_grad():
+            for start in range(0, len(eval_rows), batch_size):
+                ids, labels = _batch(eval_rows[start:start + batch_size])
+                losses.append(_forward_only(ids, labels))
+        return sum(losses) / max(1, len(losses))
+
     t0 = time.time()
-    step = 0
-    train_loss: Optional[float] = None
+    train_loss: Optional[float] = None   # overall mean (honest, not last step)
+    eval_loss: Optional[float] = None
+    loss_sum, loss_count = 0.0, 0
     try:
-        for _ in range(epochs):
-            for start in range(0, len(tokenized), batch_size):
-                batch = tokenized[start:start + batch_size]
+        for epoch in range(epochs):
+            if epoch < start_epoch:
+                continue
+            epoch_sum, epoch_count = 0.0, 0
+            batches = list(range(0, n_train, batch_size))
+            for bi, b_idx in enumerate(batches):
+                if epoch == start_epoch and bi < start_batch:
+                    continue
+                batch = train_rows[b_idx:b_idx + batch_size]
                 ids, labels = _batch(batch)
                 B, S = ids.shape
                 cos, sin = compute_rope(rope_cfg, S, B)
-                mask = causal_mask(S, embed_w.dtype)
-                _configure_steps(cos, sin, mask)
+                # Fix #4: attention_mask=None -> SDPA fused is_causal=True.
+                # Right-padded positions are label -100 and causal attention
+                # means real tokens never attend to trailing pads, so the
+                # dense [1,1,S,S] mask was pure memory waste (~1 GiB at 16k).
+                _configure_steps(cos, sin, None)
 
                 with torch.no_grad():
                     x = torch.nn.functional.embedding(ids, embed_w)
@@ -644,17 +864,50 @@ def run_streamed_sft(cfg: Dict[str, Any], log_path: Optional[str],
 
                 opt.zero_grad(set_to_none=True)
                 loss = trainer.step(x, loss_fn)
+                if max_grad_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(params, max_grad_norm)
+                if lr_schedule != "constant":
+                    factor = streamed_lr_factor(step, total_steps,
+                                                warmup_steps=warmup_steps)
+                    for g in opt.param_groups:
+                        g["lr"] = lr * factor
                 opt.step()
 
                 step += 1
-                train_loss = float(loss)
-                mw.writerow([step, f"{train_loss:.6f}",
+                lv = float(loss)
+                loss_sum += lv
+                loss_count += 1
+                epoch_sum += lv
+                epoch_count += 1
+                train_loss = loss_sum / max(1, loss_count)
+                mw.writerow([step, f"{lv:.6f}",
                              f"{_peak_vram_gb():.4f}",
                              f"{time.time() - t0:.3f}"])
                 mf.flush()
                 ev: Dict[str, Any] = {"event": "progress", "step": step,
-                                      "loss": train_loss}
+                                      "loss": lv,
+                                      "mean_loss": train_loss}
+                if lr_schedule != "constant":
+                    ev["lr"] = opt.param_groups[0]["lr"]
                 log(**ev)
+
+                if save_steps > 0 and step % save_steps == 0:
+                    # batch_in_epoch = index AFTER this batch (resume point)
+                    save_streamed_checkpoint(
+                        ckpt_path, step=step, epoch=epoch, params=params,
+                        opt=opt, n_train=n_train, batch_in_epoch=bi + 1)
+
+            # End of epoch: eval pass + checkpoint (fix #3). epoch+1/0 = the
+            # first untouched position, so a resume starts the next epoch.
+            ev_loss = _run_eval()
+            if ev_loss is not None:
+                eval_loss = ev_loss
+            log(event="epoch_done", epoch=epoch + 1, epochs=epochs,
+                step=step, train_loss=epoch_sum / max(1, epoch_count),
+                **({"eval_loss": ev_loss} if ev_loss is not None else {}))
+            save_streamed_checkpoint(ckpt_path, step=step, epoch=epoch + 1,
+                                     params=params, opt=opt, n_train=n_train,
+                                     batch_in_epoch=0)
     finally:
         mf.close()
         streamer.close()
@@ -693,11 +946,14 @@ def run_streamed_sft(cfg: Dict[str, Any], log_path: Optional[str],
     except ValueError as e:
         log(event="warning", message=f"GGUF-LoRA conversion skipped: {e}")
 
+    # Fix #3: train_loss is the honest mean over all logged steps (was the
+    # last step's value), eval_loss the final epoch's held-out mean (None
+    # when the dataset was too small to split — same policy as peft).
     log(event="streamed_sft_done", adapter_dir=str(adapter_dir),
-        train_loss=train_loss, eval_loss=None, backend="streamed",
+        train_loss=train_loss, eval_loss=eval_loss, backend="streamed",
         gguf_lora_path=str(gguf_path) if gguf_done else None)
     return {"adapter_dir": str(adapter_dir), "train_loss": train_loss,
-            "eval_loss": None, "backend": "streamed",
+            "eval_loss": eval_loss, "backend": "streamed",
             "gguf_lora_path": str(gguf_path) if gguf_done else None}
 
 

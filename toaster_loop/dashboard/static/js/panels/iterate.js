@@ -90,14 +90,23 @@ export default {
 
     // -------------------------------------------------------------- form
     function triggerForm() {
-      const nameIn = el("input", { type: "text", placeholder: "run name (optional)" });
-      const kindSel = el("select", {},
+      const nameIn = el("input", { type: "text", placeholder: "run name (optional)",
+        title: "Label for this pipeline run, shown in the run history below." });
+      const kindSel = el("select", { title:
+        "Training style used by the train step: sft imitates chosen answers, " +
+        "dpo uses preference pairs, grpo is RL with rule rewards." },
         el("option", { value: "sft", text: "sft" }),
         el("option", { value: "dpo", text: "dpo" }),
         el("option", { value: "grpo", text: "grpo" }));
-      const dsSel = el("select", {}, el("option", { value: "", text: "auto-curate" }));
-      const dryRun = el("input", { type: "checkbox" });
-      const btn = el("button", { class: "primary", text: "Run pipeline" });
+      const dsSel = el("select", { title:
+        "auto-curate builds a fresh dataset from the buffer first; picking an " +
+        "existing dataset trains on it as-is." },
+        el("option", { value: "", text: "auto-curate" }));
+      const dryRun = el("input", { type: "checkbox",
+        title: "Walk every step but skip real GPU training — good for checking config." });
+      const btn = el("button", { class: "primary", text: "Run pipeline",
+        title: "Run the whole loop in order: curate → register → train → export → " +
+          "validate → promote (each step shows below as it happens)." });
 
       api("/api/datasets").then((d) => {
         for (const ds of [...(d.datasets || [])].reverse())

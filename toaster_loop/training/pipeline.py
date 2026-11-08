@@ -184,6 +184,7 @@ def _resolved_train_yaml(dataset_dir: Path, run_dir: Path,
                          eval_seed: Optional[int] = None,
                          config_overrides: Optional[List[str]] = None,
                          backend: Optional[str] = None,
+                         filename: str = "train.resolved.yaml",
                          ) -> Tuple[Path, Dict[str, Any]]:
     """Copy the dataset train.yaml into the run dir with output_dir + model set.
 
@@ -198,6 +199,11 @@ def _resolved_train_yaml(dataset_dir: Path, run_dir: Path,
     the CLI) are applied LAST — after output_dir/model/eval injection — so an
     explicit flag always wins. Returns (path, applied_map); the applied map is
     logged into the job log for provenance by the caller.
+
+    Deep-dive fix #1: `filename` lets each *job* resolve into its own file.
+    The export stage must never re-write `train.resolved.yaml` — that file is
+    the attested record of what produced the adapter (backend, eval knobs,
+    overrides). Export resolves to `export.resolved.yaml` instead.
     """
     src = dataset_dir / "train.yaml"
     data = yaml.safe_load(src.read_text()) or {} if src.is_file() else {}
@@ -216,7 +222,7 @@ def _resolved_train_yaml(dataset_dir: Path, run_dir: Path,
         data["training"]["backend"] = str(backend)
     applied = apply_config_overrides(data, list(config_overrides or []))
     run_dir.mkdir(parents=True, exist_ok=True)
-    out = run_dir / "train.resolved.yaml"
+    out = run_dir / filename
     out.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return out, applied
 
@@ -590,8 +596,13 @@ def run_iterate(
         model_id=model.model_id,
         log_dir=train_run,
         params={
+            # Deep-dive fix #1: resolve into export.resolved.yaml so this
+            # re-resolve (which intentionally omits eval/override/backend —
+            # export only needs output_dir + model) cannot overwrite the
+            # train job's attested train.resolved.yaml in the same dir.
             "train_yaml": str(_resolved_train_yaml(
-                dataset_dir, train_run / artifact_slug, training_cfg.base_model
+                dataset_dir, train_run / artifact_slug, training_cfg.base_model,
+                filename="export.resolved.yaml",
             )[0]),
             "adapter_dir": str(adapter_dir),
             "gguf_out": str(gguf_out),

@@ -265,19 +265,23 @@ export default {
       });
       const repoIn = el("input", { class: "input mono", type: "text",
         placeholder: inst?.repo || d.configured.repo || "",
-        value: pend.repo != null ? pend.repo : (inst?.repo || "") });
+        value: pend.repo != null ? pend.repo : (inst?.repo || ""),
+        title: "Optional git repository to build from (fork or mirror). Blank = the official llama.cpp repo." });
       repoIn.addEventListener("input", () => {
         runtimePending = Object.assign({}, runtimePending, { repo: repoIn.value });
       });
       const refIn = el("input", { class: "input mono", type: "text",
         placeholder: inst?.ref || d.configured.ref || "master",
         value: pend.ref != null ? pend.ref : (inst?.ref || ""),
-        style: "max-width:14em" });
+        style: "max-width:14em",
+        title: "Branch, tag or commit to build (e.g. master, b4500). Blank = the repo's default branch." });
       refIn.addEventListener("input", () => {
         runtimePending = Object.assign({}, runtimePending, { ref: refIn.value });
       });
 
       const btn = el("button", { class: "btn primary",
+        title: "Clone/pull llama.cpp and compile it for the selected backend on " +
+          "this machine. Builds run in the background and can take many minutes.",
         text: runtimeBusy ? "running…"
           : (inst ? `Update ${wantBackend}` : `Install ${wantBackend}`) });
       if (runtimeBusy) btn.disabled = true;
@@ -386,6 +390,9 @@ export default {
         }
         if (!e.builtin) {
           actions.push(el("button", { class: "small danger", text: "delete",
+            title: llamaBe
+              ? "Remove this engine and delete its managed llama.cpp checkout."
+              : "Remove the registration only — nothing on disk is deleted.",
             onclick: async () => {
               const ok = await confirmDialog({
                 title: `Delete engine “${e.name}”?`,
@@ -425,19 +432,26 @@ export default {
 
       // Registration form
       const nameIn = el("input", { class: "input", type: "text",
-        placeholder: "vLLM", style: "max-width:14em" });
-      const kindSel = el("select", { class: "input" },
+        placeholder: "vLLM", style: "max-width:14em",
+        title: "Display name for this engine, shown in pickers on the Serve/Settings pages." });
+      const kindSel = el("select", { class: "input", title:
+        "openai = spawnable chat server; diffusion = image server; other = tracked but not spawned." },
         el("option", { value: "openai", text: "openai (spawnable)" }),
         el("option", { value: "diffusion", text: "diffusion (image server)" }),
         el("option", { value: "other", text: "other (inventory only)" }));
       const binIn = el("input", { class: "input mono", type: "text",
-        placeholder: "vllm  (path or command on PATH)", style: "max-width:20em" });
+        placeholder: "vllm  (path or command on PATH)", style: "max-width:20em",
+        title: "Executable to launch — absolute path or a command found on PATH." });
       const argsIn = el("input", { class: "input mono", type: "text",
         placeholder: "--model {model} --host 127.0.0.1 --port {port}",
-        style: "max-width:34em" });
+        style: "max-width:34em",
+        title: "Command template with {model}, {port} (and optionally {gguf}) placeholders, " +
+          "filled in when a server instance starts." });
       const notesIn = el("input", { class: "input", type: "text",
-        placeholder: "notes (optional)", style: "max-width:20em" });
+        placeholder: "notes (optional)", style: "max-width:20em",
+        title: "Free-form note shown in the engines table (version, venv location…). " });
       const addBtn = el("button", { class: "btn primary",
+        title: "Add this engine to the registry so Serve/Settings can spawn servers with it.",
         text: "Register engine" });
       addBtn.addEventListener("click", async () => {
         if (!nameIn.value.trim() || !binIn.value.trim()) {
@@ -555,6 +569,10 @@ export default {
         const actions = [el("button", {
           class: "btn small " + (r.installed ? "" : "primary") +
             (compat.ok === false ? " danger" : ""),
+          title: r.installed
+            ? "Re-run the installer (git pull / pip upgrade) to bring this engine up to date."
+            : "Install into a private directory under TOASTER_LOOP_HOME/engines — " +
+              "its own venv or checkout, never the toaster_loop environment.",
           text: busy ? "installing…" : (r.installed ? "Update" : "Install"),
           disabled: busy || undefined,
           onclick: () => startInstall(r.id, !!r.installed, compat),

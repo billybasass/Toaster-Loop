@@ -888,6 +888,11 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     load_in_4bit, _tier_why = resolve_load_in_4bit(
         explicit=_explicit_4bit, dims=_tier_dims, train_full=train_full,
         gpu_available=_tier_gpu)
+    # Deep-dive fix #5: attestation records INTENT. The ROCm/bnb guards below
+    # flip load_in_4bit to False before the provenance event emits — an
+    # attested run would then claim 4-bit was never requested when the user
+    # did request it. Snapshot the resolved intent at decision time.
+    _requested_4bit = bool(load_in_4bit)
     _emit(log_path, "load_tier", load_in_4bit=load_in_4bit, reason=_tier_why)
 
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"], use_fast=True)
@@ -1070,7 +1075,7 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     # pass the event name positionally and splat the payload as fields.
     _prov = worker_provenance_event(
         _load_mode, str(cfg["model"]),
-        extra={"requested_4bit": bool(load_in_4bit)})
+        extra={"requested_4bit": _requested_4bit})
     _emit(log_path, str(_prov.get("type") or "resource_provenance"), **_prov)
 
     lora_kwargs = lora_kwargs_from_config(cfg)  # backlog #13 (incl. rslora/DoRA)
@@ -1142,8 +1147,12 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     # Tokens outside assistant turns get label -100 so the LoRA only learns
     # responses, not instruction tokens. Requires a fast tokenizer; rows or
     # templates that can't be masked exactly fall back to unmasked text.
-    mask = bool(tr.get("train_on_completions", True)) and tokenizer.is_fast
-    if mask and not tokenizer.is_fast:
+    # Deep-dive fix #9: the old guard (`mask and not is_fast`) was dead code —
+    # mask already requires is_fast. Warn when masking was REQUESTED but the
+    # slow tokenizer forced it off, so those users see why.
+    _want_mask = bool(tr.get("train_on_completions", True))
+    mask = _want_mask and tokenizer.is_fast
+    if _want_mask and not tokenizer.is_fast:
         _emit(log_path, "warning",
               message="slow tokenizer — train_on_completions disabled "
                       "(training on all tokens)")
@@ -1532,7 +1541,11 @@ def run_dpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         args=DPOConfig(
             output_dir=str(out_dir),
             num_train_epochs=float(tr.get("num_epochs", 3)),
-            learning_rate=float(tr.get("learning_rate", 2e-4)) / 10,
+            # Deep-dive fix #10: the old hardcoded `/ 10` (DPO trains best an
+            # order of magnitude below SFT) is now the documented default of
+            # training.dpo_lr_scale — set to 1.0 to use the run LR verbatim.
+            learning_rate=float(tr.get("learning_rate", 2e-4))
+            * float(tr.get("dpo_lr_scale", 0.1)),
             per_device_train_batch_size=int(tr.get("batch_size", 2)),
             gradient_accumulation_steps=int(tr.get("gradient_accumulation_steps", 4)),
             report_to=[],
@@ -1656,6 +1669,28 @@ def grpo_rows_from_dataset(dataset_dir: Path) -> List[Dict[str, Any]]:
         "or a dpo.jsonl/sft.jsonl to derive prompts from — none found.")
 
 
+def grpo_num_generations(effective_batch: int, requested: int) -> int:
+    """Divisibility-safe num_generations (deep-dive fix #7).
+
+    TRL requires ``per_device_train_batch_size * gradient_accumulation_steps
+    % num_generations == 0``. The old fallback hardcoded 2, which still
+    crashes trainer construction for odd effective batches (e.g. 3 or 9).
+    Pick the LARGEST divisor of ``effective_batch`` that is >= 2 and <= the
+    requested value (falling back to the smallest divisor >= 2 when the
+    request is below it); raise a clear ValueError only when NO valid value
+    exists (effective_batch < 2), instead of an opaque TRL assertion. Pure
+    function — no torch — so it is unit-testable."""
+    if effective_batch < 2:
+        raise ValueError(
+            f"GRPO needs batch_size*gradient_accumulation_steps >= 2 "
+            f"(got {effective_batch}) so at least 2 generations can share "
+            "a prompt group")
+    divisors = [d for d in range(2, effective_batch + 1)
+                if effective_batch % d == 0]
+    candidates = [d for d in divisors if d <= max(2, int(requested))]
+    return max(candidates) if candidates else divisors[0]
+
+
 def run_grpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict[str, Any]:
     """TRL GRPOTrainer (reinforcement fine-tuning) over prompt(+solution) rows.
 
@@ -1719,11 +1754,16 @@ def run_grpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dic
     batch = int(tr.get("batch_size", 2))
     grad_accum = int(tr.get("gradient_accumulation_steps", 4))
     # GRPO requires the generation batch divisible by num_generations.
+    # Deep-dive fix #7: the old fallback hardcoded 2, which still fails TRL's
+    # divisibility check for odd effective batches — degrade to the largest
+    # valid divisor instead (grpo_num_generations, pure function).
     if (batch * grad_accum) % num_gen != 0:
+        fixed = grpo_num_generations(batch * grad_accum, num_gen)
         _emit(log_path, "warning",
               message=f"grpo_num_generations={num_gen} does not divide "
-                      f"batch_size*grad_accum={batch * grad_accum}; using 2")
-        num_gen = 2
+                      f"batch_size*grad_accum={batch * grad_accum}; using "
+                      f"{fixed}")
+        num_gen = fixed
 
     gen_kw: Dict[str, Any] = {}
     if bool(tr.get("torch_compile", False)):
@@ -1732,7 +1772,10 @@ def run_grpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dic
     args = GRPOConfig(
         output_dir=str(out_dir),
         num_train_epochs=float(tr.get("num_epochs", 3)),
-        learning_rate=float(tr.get("learning_rate", 2e-4)) / 10,
+        # Same knob as DPO (fix #10): training.dpo_lr_scale, default 0.1 —
+        # preference/RL objectives train best an order of magnitude below SFT.
+        learning_rate=float(tr.get("learning_rate", 2e-4))
+        * float(tr.get("dpo_lr_scale", 0.1)),
         per_device_train_batch_size=batch,
         gradient_accumulation_steps=grad_accum,
         num_generations=num_gen,
@@ -1799,15 +1842,34 @@ def find_llama_cpp_root() -> Optional[Path]:
 
 def merge_adapter(cfg: Dict[str, Any], adapter_dir: Path, merged_dir: Path,
                   log_path: Optional[str]) -> None:
-    """Merge a LoRA adapter into its base checkpoint (peft merge_and_unload)."""
+    """Merge a LoRA adapter into its base checkpoint (peft merge_and_unload).
+
+    Deep-dive fix #11: the full-precision CPU load spikes host RAM to ~2 bytes
+    per param for the WHOLE base (a 40B merge needs ~80 GiB). Opt-in knobs on
+    the training section: ``merge_device_map`` (e.g. "auto" to shard across
+    GPU(s)) and ``merge_low_cpu_mem_usage`` (default true — incremental
+    loading, roughly halves peak host RAM; requires accelerate)."""
     from peft import PeftModel  # type: ignore[import-not-found]
     from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore[import-not-found]
 
+    tr = cfg.get("training") or {}
     _emit(log_path, "phase", phase="merge_adapter", adapter=str(adapter_dir),
           base=cfg.get("model"))
-    base = AutoModelForCausalLM.from_pretrained(
-        cfg["model"], torch_dtype="auto", device_map=None
-    )
+    load_kwargs: Dict[str, Any] = {
+        "torch_dtype": "auto",
+        "device_map": tr.get("merge_device_map"),
+        "low_cpu_mem_usage": bool(tr.get("merge_low_cpu_mem_usage", True)),
+    }
+    try:
+        base = AutoModelForCausalLM.from_pretrained(cfg["model"], **load_kwargs)
+    except (ImportError, ValueError) as e:
+        # accelerate missing / device_map unsupported on this build -> retry
+        # with the historical plain load rather than fail the export.
+        _emit(log_path, "warning", message=(
+            f"low-memory merge options unavailable ({e}); falling back to "
+            "plain full-precision CPU load"))
+        base = AutoModelForCausalLM.from_pretrained(
+            cfg["model"], torch_dtype="auto", device_map=None)
     model = PeftModel.from_pretrained(base, str(adapter_dir))
     merged = model.merge_and_unload()
     merged_dir.mkdir(parents=True, exist_ok=True)
@@ -1997,6 +2059,17 @@ def run_export(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> D
         _emit(log_path, "export_done", gguf_path=str(f16), method="llama.cpp-f16")
         return {"gguf_path": str(f16), "method": "llama.cpp"}
     subprocess.run([str(quantize), str(f16), str(gguf_out), quant], check=True)
+    # Deep-dive fix #8: the intermediate f16 GGUF is model-size x 4 vs q4 and
+    # used to linger in models/gguf/ forever. Unlink it once the quantized
+    # artifact exists; training.keep_f16_gguf=true opts back in (e.g. to run a
+    # second quant without re-converting).
+    if not bool(tr.get("keep_f16_gguf", False)):
+        try:
+            f16.unlink()
+            _emit(log_path, "phase", phase="cleanup_f16", removed=str(f16))
+        except OSError as e:
+            _emit(log_path, "warning",
+                  message=f"could not remove intermediate {f16}: {e}")
     _emit(log_path, "export_done", gguf_path=str(gguf_out), method="llama.cpp")
     return {"gguf_path": str(gguf_out), "method": "llama.cpp"}
 

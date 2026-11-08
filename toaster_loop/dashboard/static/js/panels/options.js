@@ -89,7 +89,9 @@ function numInput(value, { placeholder = "", step = "any" } = {}) {
 
 function boolSelect(value, { allowNone = true } = {}) {
   const opts = [];
-  if (allowNone) opts.push(el("option", { value: "", text: "— default —" }));
+  if (allowNone) opts.push(el("option", { value: "", title:
+    "Leave unset: the program's built-in default applies (shown in the status line)." },
+    "— default —"));
   for (const v of [true, false]) opts.push(el("option", { value: String(v), text: String(v) }));
   const s = el("select", {}, ...opts);
   if (value === true || value === false) s.value = String(value);
@@ -97,7 +99,9 @@ function boolSelect(value, { allowNone = true } = {}) {
 }
 
 function choiceSelect(value, choices, { placeholder = "— default —" } = {}) {
-  const opts = [el("option", { value: "", text: placeholder })];
+  const opts = [el("option", { value: "", title:
+    "Leave unset: the program's built-in default applies (shown in the status line)." },
+    placeholder)];
   for (const c of choices) opts.push(el("option", { value: String(c), text: String(c) }));
   const s = el("select", {}, ...opts);
   if (value != null && choices.map(String).includes(String(value))) s.value = String(value);
@@ -137,6 +141,11 @@ function collect(pairs) {
 }
 
 function row(labelText, widget, hint) {
+  // Hover tooltip: every row's inline hint doubles as the control's title so
+  // newcomers discover what each knob does without reading the whole card.
+  // (Skipped when the widget already carries its own, richer title.)
+  if (hint && widget && !widget.getAttribute("title"))
+    widget.setAttribute("title", String(hint));
   const kids = [el("label", { text: labelText }), widget];
   if (hint) kids.push(el("span", { class: "hint", text: hint }));
   return el("div", { class: "field" }, ...kids);
@@ -146,7 +155,9 @@ function card({ title, section, hint, status, build, applyLabel = "Apply" }) {
   const body = el("div");
   const statusEl = el("span", { class: "hint" });
   if (status) statusEl.textContent = status;
-  const applyBtn = el("button", { class: "small primary", text: applyLabel });
+  const applyBtn = el("button", { class: "small primary", text: applyLabel,
+    title: "Save only the fields you changed (blank fields stay untouched). " +
+      "Writes go through the same validated, backed-up config path as Settings." });
   const patcher = build(body);
   applyBtn.addEventListener("click", async () => {
     const patch = patcher();

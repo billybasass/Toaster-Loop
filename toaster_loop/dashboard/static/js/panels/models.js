@@ -276,7 +276,9 @@ export default {
     function actionsBlock(m) {
       const host = el("div", { class: "btnrow" });
       const isActive = m.model_id === data.active_model;
-      const promoteBtn = el("button", { class: "primary", text: "Promote" });
+      const promoteBtn = el("button", { class: "primary", text: "Promote",
+        title: "Make this the active model for serving and future training " +
+          "lineage; the previous active model is superseded (rollback stays one click away)." });
       promoteBtn.disabled = !CAN_PROMOTE.has(m.status) || isActive;
       if (promoteBtn.disabled)
         promoteBtn.title = isActive ? "already active"
@@ -300,7 +302,9 @@ export default {
         } catch (e) { toast(`${e.code}: ${e.message}`, "error"); }
       });
 
-      const rbBtn = el("button", { class: "danger", text: "Roll back" });
+      const rbBtn = el("button", { class: "danger", text: "Roll back",
+        title: "Revert the registry to the previous promoted model (or none). " +
+          "Use this when a promotion made things worse." });
       rbBtn.disabled = !ROLLBACKABLE(m, data.active_model);
       if (rbBtn.disabled) rbBtn.title = "only the active model can be rolled back";
       rbBtn.addEventListener("click", async () => {
@@ -320,7 +324,9 @@ export default {
         } catch (e) { toast(`${e.code}: ${e.message}`, "error"); }
       });
 
-      const serveBtn = el("button", { text: "Serve this model" });
+      const serveBtn = el("button", { text: "Serve this model",
+        title: "Hot-swap the default server onto this model's GGUF right now " +
+          "(same as Deploy on the Serve page)." });
       serveBtn.disabled = !m.gguf_path;
       if (!m.gguf_path) serveBtn.title = "model has no GGUF artifact";
       serveBtn.addEventListener("click", async () => {
@@ -337,7 +343,9 @@ export default {
 
     // ------------------------------------------------------------- wiring
     const toolbar = el("div", { class: "toolbar" },
-      el("button", { class: "small", text: "refresh", onclick: () =>
+      el("button", { class: "small", text: "refresh",
+        title: "Re-read the model registry from the server.",
+        onclick: () =>
         load().catch((e) => toast(e.message, "error")) }));
     mount.replaceChildren(el("h2", { text: "Models" }), toolbar,
       el("div", { class: "with-drawer" }, tableHost, drawer));

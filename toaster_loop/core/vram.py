@@ -80,6 +80,22 @@ ACT_ATTN_QUADRATIC = 5.0
 ACT_FLASH_FACTOR = 0.10       # fused impls (flash AND sdpa) floor the score term
 ACT_MIN_BYTES_PER_ELEM = 2    # bf16 activations
 
+# Deep-dive finding #13 (long-sequence underprediction): two terms the
+# Eymard decomposition above omits, both dominant at long context —
+#   * CE_LOGITS_BYTES: HF's loss step materializes the FULL fp32 logits
+#     [b, s, vocab] before cross_entropy. For a 250k-vocab model at 16k x 2
+#     that is ~30 GiB charged by NOTHING else in the old formula — exactly
+#     the OOM that fused/chunked CE kernels (the third-party ones surveyed in
+#     the training deep-dive, and our own streamed chunked_ce) exist to
+#     eliminate. Gradient checkpointing does NOT help: the head runs once.
+#   * ACT_LORA_RESERVE_TERMS: per targeted module, the adapter's [b, s, r]
+#     A-output is saved for backward (the training-reserve heuristic from the
+#     deep-dive survey: seq x batch x rank). Linear in r: high-rank long-
+#     context runs used to predict the same activations as r=8 ones. Under GC
+#     only one block's worth is live.
+CE_LOGITS_BYTES = 4.0         # fp32 upcast logits during CE
+ACT_LORA_RESERVE_TERMS = 1.0  # adapter A-output elements per (b*s*r, module)
+
 
 @dataclass
 class ModelDims:
@@ -283,7 +299,22 @@ def estimate_train_vram_mib(
     if str(attn_implementation).lower() != "eager":
         quadratic *= ACT_FLASH_FACTOR
     act_elems += b * s * h * quadratic * score_layers
-    activations_mib = int(act_elems * ACT_MIN_BYTES_PER_ELEM / MIB)
+
+    # LoRA adapter activation reserve (finding #13): [b, s, r] per targeted
+    # module. GC bounds it to one block's modules; without GC every layer's
+    # adapter outputs are saved for backward.
+    if not train_full:
+        n_targets = max(1, len(target_modules))
+        reserve_layers = 1 if gradient_checkpointing else dims.num_hidden_layers
+        act_elems += b * s * int(lora_r) * n_targets * reserve_layers \
+            * ACT_LORA_RESERVE_TERMS
+
+    # Cross-entropy logits peak (finding #13): [b, s, vocab] fp32. This is
+    # the term that made long-context runs OOM despite a "safe" estimate —
+    # gradient checkpointing cannot shrink it (the head computes once).
+    ce_elems = b * s * dims.vocab_size
+    activations_mib = int((act_elems * ACT_MIN_BYTES_PER_ELEM
+                           + ce_elems * CE_LOGITS_BYTES) / MIB)
 
     # --- overhead -------------------------------------------------------------
     overhead_mib = int(CONTEXT_OVERHEAD_MIB

@@ -15,7 +15,8 @@ const PAGE = 50;
 
 async function statsStrip() {
   const host = el("div", { class: "card stats-strip" });
-  const toggle = el("button", { class: "small", text: "buffer stats ▾" });
+  const toggle = el("button", { class: "small", text: "buffer stats ▾",
+    title: "Expand the experience-buffer overview: total traces and failure rate over 14 days." });
   const body = el("div", { class: "hidden" });
   host.append(toggle, body);
 
@@ -163,7 +164,7 @@ function listView(mount) {
     el("option", { value: "0", text: "uncurated only" }));
   const sinceIn = el("input", { type: "date", title: "since (inclusive)" });
   const qIn = el("input", { type: "search", placeholder: "search task summaries…",
-    class: "grow" });
+    class: "grow", title: "Free-text filter over each trace's task summary." });
 
   const tableHost = el("div");
   const pager = el("div", { class: "pager" });

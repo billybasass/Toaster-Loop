@@ -2363,6 +2363,41 @@ def test_estimate_sdpa_not_quadratic_across_layers():
     assert eager.activations_mib <= sdpa.activations_mib * 12
 
 
+def test_estimate_lora_reserve_grows_with_rank_and_seq():
+    """Deep-dive finding #13: the LoRA adapter activation reserve scales with
+    rank and sequence length (Unsloth estimate_training_reserve_bytes shape).
+    High-rank long-context runs used to predict identical activations to r=8."""
+    base = dict(batch_size=2, gradient_checkpointing=True,
+                attn_implementation="sdpa")
+    lo = estimate_train_vram_mib(dims(), lora_r=8, max_seq_length=512, **base)
+    hi = estimate_train_vram_mib(dims(), lora_r=64, max_seq_length=8192, **base)
+    assert hi.activations_mib > lo.activations_mib
+    # rank alone (fixed seq) also moves the number — was flat before the fix.
+    r8 = estimate_train_vram_mib(dims(), lora_r=8, max_seq_length=4096, **base)
+    r64 = estimate_train_vram_mib(dims(), lora_r=64, max_seq_length=4096, **base)
+    assert r64.activations_mib > r8.activations_mib
+
+
+def test_estimate_ce_logits_term_long_context():
+    """Deep-dive finding #13: the fp32 CE logits [b,s,vocab] peak is charged.
+    This is the term that made long-context runs OOM despite a 'safe' old
+    estimate — gradient checkpointing cannot shrink it (the head runs once)."""
+    big = ModelDims(hidden_size=4096, num_hidden_layers=32,
+                    num_attention_heads=32, num_key_value_heads=8,
+                    intermediate_size=11008, vocab_size=152064, head_dim=128,
+                    tie_word_embeddings=False)
+    kw = dict(lora_r=16, batch_size=2, gradient_checkpointing=True,
+              attn_implementation="sdpa")
+    short = estimate_train_vram_mib(big, max_seq_length=512, **kw)
+    long = estimate_train_vram_mib(big, max_seq_length=8192, **kw)
+    # 16x context -> the CE term alone grows by ~16x b*s*vocab*4 bytes.
+    assert long.activations_mib > short.activations_mib * 5
+    # Full-FT shares the same head peak (not just LoRA).
+    full = estimate_train_vram_mib(big, train_full=True, max_seq_length=8192,
+                                   batch_size=1, gradient_checkpointing=True)
+    assert full.activations_mib > 0
+
+
 def test_estimate_full_finetune_trainable_side():
     e = estimate_train_vram_mib(dims(), train_full=True, optim="adamw")
     n = base_param_count(dims())

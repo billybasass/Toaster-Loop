@@ -232,9 +232,13 @@ async function detailView(mount, datasetId) {
 
   function exportBlock() {
     const pathIn = el("input", { type: "text", class: "grow",
-      placeholder: "/path/to/export/parent-dir" });
+      placeholder: "/path/to/export/parent-dir",
+      title: "Parent directory; the dataset is copied into <dir>/" + datasetId +
+        ". Destinations outside TOASTER_LOOP_HOME ask for confirmation first." });
     const out = el("div", { class: "result" });
-    const btn = el("button", { text: "Export dataset" });
+    const btn = el("button", { text: "Export dataset",
+      title: "Copy this dataset's files out of the toaster_loop state directory, " +
+        "e.g. to share it or train elsewhere. Fails if the target already exists." });
     btn.addEventListener("click", async () => {
       const to = pathIn.value.trim();
       if (!to) return toast("enter a destination directory", "error");
@@ -280,8 +284,12 @@ async function detailView(mount, datasetId) {
     const host = el("div", { class: "card" });
     const bodyHost = el("div");
     const state = { file: "sft", offset: 0, total: 0 };
-    const tabSft = el("button", { class: "seg" }, "sft.jsonl");
-    const tabDpo = el("button", { class: "seg" }, "dpo.jsonl");
+    const tabSft = el("button", { class: "seg",
+      title: "Supervised fine-tuning rows: prompt → ideal completion pairs." },
+      "sft.jsonl");
+    const tabDpo = el("button", { class: "seg",
+      title: "Preference rows: prompt with a chosen and a rejected answer, used " +
+        "for DPO training." }, "dpo.jsonl");
     const info = el("span", { class: "hint mono" });
 
     async function loadRows() {
@@ -335,7 +343,9 @@ async function detailView(mount, datasetId) {
   // hide the button and point at the source action instead.
   const prov = manifest.provenance || "curated";
   const isSourceBacked = prov !== "curated";
-  const rebuildBtn = el("button", { text: "Rebuild (re-curate)" });
+  const rebuildBtn = el("button", { text: "Rebuild (re-curate)",
+    title: "Release this dataset's trace claims and regenerate it in place from " +
+      "the current buffer with its original filters. Other datasets are untouched." });
   if (isSourceBacked) {
     rebuildBtn.disabled = true;
     rebuildBtn.title = `This dataset was curated from a ${prov} source — ` +
@@ -366,7 +376,9 @@ async function detailView(mount, datasetId) {
   // Delete for good: the dataset directory is removed and its trace claims
   // released (buffer traces become curatable again). Confirm first — there
   // is no undo; export first if the data matters.
-  const deleteBtn = el("button", { text: "Delete dataset", class: "danger" });
+  const deleteBtn = el("button", { text: "Delete dataset", class: "danger",
+    title: "Permanently remove this dataset and release its traces back to the " +
+      "buffer so they can be curated again. No undo — export first if it matters." });
   deleteBtn.addEventListener("click", async () => {
     const ok = await confirmDialog({
       title: `Delete ${datasetId}?`,
@@ -410,20 +422,36 @@ async function curateForm(onDone) {
     defaults = (c.config && c.config.curation) || {};
   } catch { /* defaults stay blank */ }
 
-  const nameIn = el("input", { type: "text", placeholder: "ui", class: "narrow" });
+  const nameIn = el("input", { type: "text", placeholder: "ui", class: "narrow",
+    title: "Optional label appended to the new dataset's id, so you can recognize " +
+      "it later in the table and when picking it for training." });
   const minScore = el("input", { type: "number", min: "-1", max: "1", step: "0.05",
     value: defaults.min_score != null ? String(defaults.min_score) : "0.5",
-    class: "narrow" });
-  const sinceIn = el("input", { type: "date" });
-  const profileIn = el("input", { type: "text", placeholder: "any", class: "narrow" });
-  const modelIn = el("input", { type: "text", placeholder: "any", class: "narrow" });
+    class: "narrow",
+    title: "Only claim traces whose judge/feedback score is at least this. " +
+      "Scale −1…1; 0.5 keeps clearly-good traces. Lower = more data, more noise." });
+  const sinceIn = el("input", { type: "date",
+    title: "Ignore traces recorded before this date. Empty = consider all history." });
+  const profileIn = el("input", { type: "text", placeholder: "any", class: "narrow",
+    title: "Only claim traces produced by this agent profile (see Profiles page). " +
+      "Empty = every profile." });
+  const modelIn = el("input", { type: "text", placeholder: "any", class: "narrow",
+    title: "Only claim traces served by this model alias. Empty = any model." });
   const limitIn = el("input", { type: "number", min: "1", placeholder: "no limit",
-    class: "narrow" });
-  const formatsSel = el("select", {},
+    class: "narrow",
+    title: "Claim at most this many traces (newest first). Empty = no cap." });
+  const formatsSel = el("select", {
+    title: "Which training formats to emit. sft = single-turn pairs; dpo = " +
+      "chosen/rejected preference pairs from feedback; both = each trace goes " +
+      "into whichever file it qualifies for." },
     ...["both", "sft", "dpo"].map((f) => el("option", { value: f, text: f })));
-  const failChk = el("input", { type: "checkbox" });
+  const failChk = el("input", { type: "checkbox",
+    title: "Also turn failing traces (thumbs-down / errors) into SFT rows. " +
+      "Off by default — usually you want DPO pairs for failures instead." });
   const out = el("div", { class: "result" });
-  const btn = el("button", { class: "primary", text: "Curate dataset" });
+  const btn = el("button", { class: "primary", text: "Curate dataset",
+    title: "Queue a curation job with the filters above. Runs in the background; " +
+      "progress streams here and in the Jobs panel." });
 
   btn.addEventListener("click", async () => {
     const body = {};
@@ -556,10 +584,15 @@ function sourcesCard(onDone) {
 
   // -- local folder
   const dirIn = el("input", { type: "text", class: "grow",
-    placeholder: "/path/to/docs (recursive: .md .txt .rst .html .json .jsonl)" });
+    placeholder: "/path/to/docs (recursive: .md .txt .rst .html .json .jsonl)",
+    title: "Absolute path to a local docs folder. Every .md/.txt/.rst/.html/" +
+      ".json/.jsonl file below it is read recursively and turned into ShareGPT pairs." });
   const dirName = el("input", { type: "text", placeholder: "name",
-    class: "narrow" });
-  const dirBtn = el("button", { text: "Ingest folder" });
+    class: "narrow",
+    title: "Optional label for the resulting dataset id. Empty = derived from the folder name." });
+  const dirBtn = el("button", { text: "Ingest folder",
+    title: "Queue a job that reads the folder above and creates a dataset from it. " +
+      "Large folders take a while; progress streams below." });
   dirBtn.addEventListener("click", async () => {
     if (!dirIn.value.trim()) return toast("folder path required", "error");
     dirBtn.disabled = true;
@@ -584,9 +617,13 @@ function sourcesCard(onDone) {
   // (placeholder deliberately avoids a scheme literal — the static-asset
   // hygiene test forbids remote URL strings in shipped JS.)
   const urlIn = el("input", { type: "text", class: "grow",
-    placeholder: "entry page URL, e.g. docs.example.org/start.html" });
+    placeholder: "entry page URL, e.g. docs.example.org/start.html",
+    title: "First page of a documentation site. The crawler follows links from here, " +
+      "but never leaves the same host (and by default stays in this page's folder)." });
   const pagesIn = el("input", { type: "number", min: "1", max: "30",
-    placeholder: "30", class: "narrow" });
+    placeholder: "30", class: "narrow",
+    title: "Maximum number of pages to fetch (bounded crawl, 1–30). Each page costs " +
+      "a synthesis call if a server is used." });
   // Language filter for localized docs trees (/zh/, /ja/…): empty = auto
   // (server detects from the system locale); "*" keeps every language.
   const langIn = el("input", { type: "text", class: "narrow",
@@ -600,7 +637,9 @@ function sourcesCard(onDone) {
     placeholder: "auto", title:
       "Path subtree to crawl, e.g. /documentation/unreal-engine/. " +
       "Empty = the entry page's folder (recommended); * = entire same-origin site." });
-  const urlBtn = el("button", { text: "Crawl site" });
+  const urlBtn = el("button", { text: "Crawl site",
+    title: "Queue a same-origin bounded crawl of the site above and create a dataset " +
+      "from the pages. Progress streams below and in the Jobs panel." });
   urlBtn.addEventListener("click", async () => {
     if (!urlIn.value.trim()) return toast("URL required", "error");
     urlBtn.disabled = true;
@@ -626,8 +665,12 @@ function sourcesCard(onDone) {
 
   // -- hub snapshot import (repo downloaded on the Hub page)
   const hubIn = el("input", { type: "text", class: "grow",
-    placeholder: "hub dataset repo id (downloaded first, e.g. org/name)" });
-  const hubBtn = el("button", { text: "Import hub dataset" });
+    placeholder: "hub dataset repo id (downloaded first, e.g. org/name)",
+    title: "Repo id of a dataset you already downloaded on the Resource Hub page " +
+      "(org/name). It is converted locally into the normal dataset format." });
+  const hubBtn = el("button", { text: "Import hub dataset",
+    title: "Convert a Hub-downloaded dataset into a local dataset record so it shows " +
+      "up in the table and can train as-is. Runs immediately (no server needed)." });
   hubBtn.addEventListener("click", async () => {
     if (!hubIn.value.trim()) return toast("repo id required", "error");
     hubBtn.disabled = true;
@@ -680,7 +723,9 @@ function datasetsEnvCard() {
         "datasets package: ok (" + st.python + ")" }));
       return;
     }
-    const btn = el("button", { text: "Install datasets" });
+    const btn = el("button", { text: "Install datasets",
+      title: "Run pip install against the training interpreter in the background. " +
+        "The datasets package is required to start trainings." });
     btn.addEventListener("click", async () => {
       btn.disabled = true;
       btn.textContent = "installing…";
@@ -708,11 +753,13 @@ function datasetsEnvCard() {
 function diffCard(datasets) {
   const opts = (sel) => datasets.map((d) => el("option", {
     value: d.dataset_id || "", text: d.dataset_id || "?" , selected: sel === d.dataset_id }));
-  const selA = el("select", {}, ...opts());
-  const selB = el("select", {}, ...opts());
+  const selA = el("select", { title: "Baseline dataset (side a)." }, ...opts());
+  const selB = el("select", { title: "Dataset to compare against it (side b)." }, ...opts());
   if (datasets.length > 1) selB.selectedIndex = datasets.length - 1;
   const out = el("div", { class: "result" });
-  const btn = el("button", { text: "Compare" });
+  const btn = el("button", { text: "Compare",
+    title: "Show which trace ids were added/removed between the two datasets, " +
+      "per-file content-hash verdicts, and row-count deltas." });
 
   const deltaCell = (v) => v == null ? "–"
     : (v > 0 ? `+${v}` : String(v));

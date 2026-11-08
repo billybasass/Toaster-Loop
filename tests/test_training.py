@@ -2547,9 +2547,13 @@ def streamed_run(tmp_path_factory):
     train_yaml.write_text(json.dumps({
         "model": str(ckpt),
         "data": {"local_dataset": [str(sft)], "format_type": "sharegpt"},
+        # lr_schedule/max_grad_norm pin the pre-deep-dive numerics (constant
+        # LR, no clipping) so the loss-trend assertions below stay exact;
+        # the new warmup/decay + clipping defaults get their own tests.
         "training": {"output_dir": str(out), "num_epochs": 6, "batch_size": 2,
                      "learning_rate": 1e-2, "backend": "streamed",
-                     "max_seq_length": 64},
+                     "max_seq_length": 64, "lr_schedule": "constant",
+                     "max_grad_norm": 0},
         "lora": {"lora_r": 4, "lora_alpha": 8},
     }))
 
@@ -2747,6 +2751,371 @@ def test_adapter_is_streamed():
     from toaster_loop.training.worker import adapter_is_streamed
 
     assert adapter_is_streamed(Path("/nonexistent")) is False
+
+
+# ============================================================================
+# Deep-dive findings regression suite (#1-#14). One focused test per fix,
+# mirroring the existing style; GPU-dependent paths use fakes/pure helpers.
+# ============================================================================
+
+# --------------------------------------------------------------- #1 export YAML
+
+def test_export_resolves_own_yaml_not_overwriting_train(tmp_path):
+    """Deep-dive fix #1: the export job must NOT rewrite train.resolved.yaml.
+
+    The train stage writes it with backend/eval/override knobs; the old export
+    re-resolve (fewer kwargs) clobbered the same path, so the artifact dir no
+    longer held the YAML that produced the adapter. Now export resolves to
+    export.resolved.yaml and train.resolved.yaml keeps its attested contents."""
+    from toaster_loop.training.pipeline import _resolved_train_yaml
+
+    ds = tmp_path / "ds"
+    ds.mkdir()
+    (ds / "train.yaml").write_text(yaml.safe_dump(
+        {"model": "REPLACE", "training": {}}))
+
+    train_p, _ = _resolved_train_yaml(
+        ds, tmp_path / "run", "Base/M", eval_fraction=0.2, eval_seed=7,
+        config_overrides=["lora.lora_r=32"], backend="streamed")
+    before = yaml.safe_load(Path(train_p).read_text())
+
+    _resolved_train_yaml(ds, tmp_path / "run", "Base/M",
+                         filename="export.resolved.yaml")
+
+    after = yaml.safe_load(Path(train_p).read_text())
+    assert after == before, "train.resolved.yaml must survive the export resolve"
+    assert after["training"]["backend"] == "streamed"
+    assert after["training"]["eval_fraction"] == 0.2
+    assert after["lora"]["lora_r"] == 32
+    # and export wrote its own distinct file
+    exp = tmp_path / "run" / "export.resolved.yaml"
+    assert exp.is_file() and exp != train_p
+
+
+# --------------------------------------------------------------- #7 GRPO divisor
+
+def test_grpo_num_generations_divisibility_safe():
+    """Deep-dive fix #7: largest valid divisor <= requested; never a value
+    that still trips TRL's batch % num_generations == 0 assertion."""
+    from toaster_loop.training.worker import grpo_num_generations
+
+    # requested 2 divides everything -> stays 2
+    assert grpo_num_generations(8, 2) == 2
+    # odd effective batch: old hardcoded 2 would CRASH (3 % 2 != 0); now -> 3
+    assert grpo_num_generations(3, 2) == 3
+    # requested larger than any divisor -> clamp to largest divisor
+    assert grpo_num_generations(8, 16) == 8
+    # prefer the largest divisor that still fits under the request
+    assert grpo_num_generations(12, 5) == 4
+    for eb in range(2, 32):
+        ng = grpo_num_generations(eb, 2)
+        assert eb % ng == 0 and ng >= 2
+    with pytest.raises(ValueError):
+        grpo_num_generations(1, 2)   # impossible: no valid group size
+
+
+# --------------------------------------------------------------- #3 LR schedule
+
+def test_streamed_lr_factor_warmup_then_decay():
+    """Deep-dive fix #3: linear warmup to 1.0 then decay to min_lr_ratio."""
+    from toaster_loop.training.streamed.runner import streamed_lr_factor
+
+    assert streamed_lr_factor(0, 100, warmup_steps=5) == pytest.approx(0.2)
+    assert streamed_lr_factor(4, 100, warmup_steps=5) == pytest.approx(1.0)
+    # peak held at end of warmup; decays toward min ratio by the last step
+    assert streamed_lr_factor(99, 100, warmup_steps=5) < 0.2
+    assert streamed_lr_factor(100, 100, warmup_steps=5) == pytest.approx(0.1)
+    # constant shape when warmup disabled and monotonic non-increasing after
+    seq = [streamed_lr_factor(s, 10, warmup_steps=2) for s in range(10)]
+    assert seq[1] == 1.0
+    assert all(seq[i] >= seq[i + 1] for i in range(1, len(seq) - 1))
+
+
+def test_streamed_eval_split_floors():
+    """Deep-dive fix #3: eval carve honors min_total/min_eval floors (same
+    policy as the peft path's maybe_eval_split)."""
+    from toaster_loop.training.streamed.runner import streamed_eval_split
+
+    rows = [{"input_ids": [i], "labels": [i]} for i in range(10)]
+    tr, ev = streamed_eval_split(rows, 0.2, 42)      # below min_total=20
+    assert ev is None and len(tr) == 10
+
+    rows = [{"input_ids": [i], "labels": [i]} for i in range(50)]
+    tr, ev = streamed_eval_split(rows, 0.2, 42)
+    assert ev is not None and len(ev) == 10 and len(tr) == 40
+    # deterministic on the same seed
+    tr2, ev2 = streamed_eval_split(rows, 0.2, 42)
+    assert [r["input_ids"] for r in ev] == [r["input_ids"] for r in ev2]
+
+
+def test_streamed_checkpoint_roundtrip(tmp_path):
+    """Deep-dive fix #3: resume checkpoint saves/loads params + optimizer +
+    counters atomically; corrupt file degrades to None (no crash)."""
+    torch = pytest.importorskip("torch")
+    from toaster_loop.training.streamed.runner import (
+        load_streamed_checkpoint, save_streamed_checkpoint, streamed_ckpt_path)
+
+    p1 = torch.nn.Parameter(torch.randn(4, 3))
+    p2 = torch.nn.Parameter(torch.zeros(2))
+    opt = torch.optim.AdamW([p1, p2], lr=1e-3)
+    ck = streamed_ckpt_path(tmp_path)
+    save_streamed_checkpoint(ck, step=7, epoch=2, params=[p1, p2], opt=opt,
+                             n_train=40, batch_in_epoch=3)
+    assert ck.is_file() and not ck.with_suffix(".pt.tmp").exists()
+    loaded = load_streamed_checkpoint(ck)
+    assert loaded["step"] == 7 and loaded["epoch"] == 2
+    assert loaded["n_train"] == 40 and loaded["batch_in_epoch"] == 3
+    assert torch.equal(loaded["params"][0], p1.detach())
+
+    bad = tmp_path / "bad.pt"
+    bad.write_bytes(b"not a checkpoint")
+    assert load_streamed_checkpoint(bad) is None
+
+
+def test_streamed_layer_dtype_override(tmp_path):
+    """Deep-dive fix #14: ShellLayerLoader dtype_override loads frozen base
+    layers at lower precision (never up-casts fp32 tensors to a bigger type)."""
+    torch = pytest.importorskip("torch")
+    from safetensors.torch import save_file
+
+    from toaster_loop.training.streamed.runner import ShellLayerLoader
+
+    split = tmp_path / "layers"
+    split.mkdir()
+    w = torch.randn(8, 8)
+    save_file({"model.layers.0.self_attn.q_proj.weight": w},
+              str(split / "layer-0.safetensors"))
+    (split / "split_index.json").write_text(json.dumps(
+        {"files": {"layer-0.safetensors":
+                   ["model.layers.0.self_attn.q_proj.weight"]},
+         "num_layers": 1}))
+    p = torch.nn.Parameter(torch.randn(8, 8), requires_grad=False)
+    loader = ShellLayerLoader([{"self_attn.q_proj.weight": p}], split,
+                              dtype_override="bfloat16")
+    handle = loader.load(0)
+    swapped_obj, _backup = handle["swapped"][0]
+    # Non-meta parameter: the loaded (lower-precision) tensor is written into
+    # p.data via the swap path, so the live parameter carries the override.
+    assert swapped_obj.dtype == torch.bfloat16
+
+    # A bogus dtype name is ignored (never crashes, keeps checkpoint precision).
+    p2 = torch.nn.Parameter(torch.randn(8, 8), requires_grad=False)
+    loader2 = ShellLayerLoader([{"self_attn.q_proj.weight": p2}], split,
+                               dtype_override="not_a_dtype")
+    handle2 = loader2.load(0)
+    assert handle2["swapped"][0][0].dtype == torch.float32
+
+
+# --------------------------------------------------------------- #4 SDPA mask
+
+def test_streamed_layer_step_default_mask_is_none():
+    """Deep-dive fix #4: LayerStep defaults to attention_mask=None so the
+    runner routes through SDPA's fused is_causal path, not an [S,S] tensor."""
+    pytest.importorskip("torch")
+    from toaster_loop.training.streamed.runner import LayerStep
+
+    class _L:
+        def __call__(self, h, **kw):
+            self.kw = kw
+            return h
+
+    l = _L()
+    st = LayerStep(l)
+    assert st.attention_mask is None
+
+
+def test_streamed_causal_mask_none_matches_additive():
+    """Deep-dive fix #4: attention_mask=None is numerically identical to the
+    old additive [1,1,S,S] mask on a pinned llama arch (real torch)."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    cfg = LlamaConfig(hidden_size=32, intermediate_size=64, num_hidden_layers=1,
+                      num_attention_heads=4, num_key_value_heads=2,
+                      vocab_size=64, max_position_embeddings=128)
+    torch.manual_seed(0)
+    layer = LlamaForCausalLM(cfg).eval().model.layers[0]
+    B, S, hd = 2, 7, 8
+    h = torch.randn(B, S, 32)
+    pos = torch.arange(S)
+    inv = 1.0 / (10000.0 ** (torch.arange(hd // 2).float() * 2.0 / hd))
+    emb = torch.cat([pos.view(-1, 1) * inv.view(1, -1)] * 2, dim=-1)
+    cos = emb.cos().view(1, S, hd).expand(B, -1, -1).contiguous()
+    sin = emb.sin().view(1, S, hd).expand(B, -1, -1).contiguous()
+    additive = torch.triu(torch.full((S, S), float("-inf")), diagonal=1) \
+        .view(1, 1, S, S)
+    with torch.no_grad():
+        a = layer(h, attention_mask=additive, position_embeddings=(cos, sin),
+                  use_cache=False)[0]
+        b = layer(h, attention_mask=None, position_embeddings=(cos, sin),
+                  use_cache=False)[0]
+    assert torch.allclose(a, b, atol=1e-6)
+
+
+# --------------------------------------------------------------- #6 chunked CE
+
+def test_chunked_ce_reentrant_and_frozen_head():
+    """Deep-dive fix #6: config travels through apply()->ctx (thread-safe);
+    the lm_head weight stays frozen (backward returns None for it)."""
+    torch = pytest.importorskip("torch")
+    import torch.nn.functional as F
+
+    from toaster_loop.training.streamed.chunked_ce import \
+        chunked_linear_cross_entropy
+
+    # Two interleaved applications with DIFFERENT configs must not corrupt:
+    # the old class-attribute stashing would leak config across applies.
+    torch.manual_seed(3)
+    h1 = torch.randn(4, 16, dtype=torch.float64, requires_grad=True)
+    w1 = torch.randn(20, 16, dtype=torch.float64)
+    lab1 = torch.randint(0, 20, (4,))
+    h2 = torch.randn(6, 16, dtype=torch.float64, requires_grad=True)
+    w2 = torch.randn(30, 16, dtype=torch.float64)
+    lab2 = torch.randint(0, 30, (6,))
+
+    l1 = chunked_linear_cross_entropy(h1, w1, lab1, chunk_size=3)
+    l2 = chunked_linear_cross_entropy(h2, w2, lab2, chunk_size=7)   # interleaved
+    ref1 = F.cross_entropy(h1.detach() @ w1.t(), lab1, ignore_index=-100)
+    ref2 = F.cross_entropy(h2.detach() @ w2.t(), lab2, ignore_index=-100)
+    assert torch.isclose(l1.double(), ref1, rtol=1e-9)
+    assert torch.isclose(l2.double(), ref2, rtol=1e-9)
+
+    # frozen-head contract: weight receives no gradient through this op
+    w_trainable = w1.clone().requires_grad_(True)
+    chunked_linear_cross_entropy(h1, w_trainable, lab1).backward()
+    assert w_trainable.grad is None
+
+
+def test_chunked_ce_thread_concurrent():
+    """Deep-dive fix #6: concurrent applies from threads each keep their own
+    config (regression guard against the old mutable class attributes)."""
+    torch = pytest.importorskip("torch")
+    import threading
+
+    from toaster_loop.training.streamed.chunked_ce import \
+        chunked_linear_cross_entropy
+
+    errors: list = []
+
+    def worker(seed, n_tokens, vocab):
+        try:
+            torch.manual_seed(seed)
+            h = torch.randn(n_tokens, 8, dtype=torch.float64)
+            w = torch.randn(vocab, 8, dtype=torch.float64)
+            lab = torch.randint(0, vocab, (n_tokens,))
+            got = chunked_linear_cross_entropy(h, w, lab, chunk_size=4)
+            # labels length must match hidden rows or apply() raises -> error
+            assert got.shape == ()
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    ts = [threading.Thread(target=worker, args=(s, n, v))
+          for s, (n, v) in enumerate([(4, 16), (8, 32), (16, 64), (2, 7)])]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert not errors, errors
+
+
+# --------------------------------------------------------------- #8 f16 cleanup
+
+def test_export_removes_intermediate_f16(tmp_path, monkeypatch):
+    """Deep-dive fix #8: run_export unlinks the intermediate .f16.gguf after
+    quantizing; training.keep_f16_gguf=true opts back in."""
+    from toaster_loop.training import worker
+
+    calls: list = []
+
+    def fake_run(cmd, check=False, **kw):
+        calls.append(list(cmd))
+        # convert writes f16; quantize reads f16 -> writes final
+        if "convert_hf_to_gguf.py" in cmd[1]:
+            Path(cmd[cmd.index("--outfile") + 1]).write_bytes(b"GGUFF16")
+        else:
+            Path(cmd[2]).write_bytes(b"GGUFQ4")
+
+        class R:
+            returncode = 0
+        return R()
+
+    monkeypatch.setattr(worker.subprocess, "run", fake_run)
+    monkeypatch.setattr(worker, "find_llama_cpp_root", lambda: tmp_path / "lc")
+    monkeypatch.setattr(worker, "_find_binary",
+                        lambda name, root: Path("/fake/llama-quantize"))
+
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text(json.dumps({"r": 8}))
+    merged = tmp_path / "out" / "merged"
+    merged.mkdir(parents=True)
+    gguf_out = tmp_path / "model-q4_k_m.gguf"
+
+    cfg = {"_adapter_dir": str(adapter), "_export_dir": str(tmp_path / "out"),
+           "_gguf_out": str(gguf_out), "_quant": "q4_k_m", "training": {}}
+    out = worker.run_export(cfg, None, False)
+    assert out["gguf_path"] == str(gguf_out)
+    f16 = gguf_out.with_suffix(".f16.gguf")
+    assert gguf_out.is_file()
+    assert not f16.exists(), "intermediate f16 must be removed"
+
+    # opt-out keeps it
+    calls.clear()
+    gguf_out.unlink()
+    cfg["training"] = {"keep_f16_gguf": True}
+    worker.run_export(cfg, None, False)
+    assert f16.exists(), "keep_f16_gguf=true must preserve the intermediate"
+
+
+# ------------------------------------------- #5/#9/#10 source-level guards
+
+def test_requested_4bit_intent_captured_before_degradation():
+    """Deep-dive fix #5: run_sft snapshots _requested_4bit BEFORE any ROCm/
+    bnb guard flips load_in_4bit, so attestation records user intent. Source-
+    level guard (the full path needs a GPU): the snapshot line must appear
+    before the `load_in_4bit = False` fallback and feed the provenance event."""
+    from toaster_loop.training import worker
+    src = Path(worker.__file__).read_text()
+    snap = src.index("_requested_4bit = bool(load_in_4bit)")
+    degrade = src.index("load_in_4bit = False")
+    prov = src.index('"requested_4bit": _requested_4bit')
+    assert snap < degrade < prov
+
+
+def test_slow_tokenizer_mask_warning_reachable():
+    """Deep-dive fix #9: the warning triggers on _want_mask and not is_fast
+    (the old `mask and not is_fast` was dead because mask implied is_fast)."""
+    from toaster_loop.training import worker
+    src = Path(worker.__file__).read_text()
+    assert "_want_mask = bool(tr.get(\"train_on_completions\", True))" in src
+    assert "mask = _want_mask and tokenizer.is_fast" in src
+    assert "if _want_mask and not tokenizer.is_fast:" in src
+
+
+def test_dpo_lr_scale_knob_replaces_magic_divisor():
+    """Deep-dive fix #10: DPO/GRPO learning rate uses training.dpo_lr_scale
+    (default 0.1) instead of a bare `/ 10`."""
+    from toaster_loop.training import worker
+    src = Path(worker.__file__).read_text()
+    assert "dpo_lr_scale" in src
+    assert "float(tr.get(\"learning_rate\", 2e-4)) / 10," not in src
+
+
+def test_merge_adapter_low_memory_options():
+    """Deep-dive fix #11: merge_adapter takes low_cpu_mem_usage +
+    device_map from the training section (with a fallback to the plain load),
+    so a large-base merge doesn't spike host RAM unconditionally. Source-level
+    guard — the real path needs peft/transformers + a big checkpoint."""
+    import inspect
+
+    from toaster_loop.training import worker
+    src = inspect.getsource(worker.merge_adapter)
+    assert "merge_low_cpu_mem_usage" in src
+    assert "merge_device_map" in src
+    # must degrade to the historical plain load when accelerate/device_map fail
+    assert "falling back to" in src and "low_cpu_mem_usage" in src
+
 
 # ------------------------------------------------------------------------
 # from tests/test_streamed_lora_wp10.py

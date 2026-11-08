@@ -113,9 +113,12 @@ export default {
       }
       imgInput.value = "";
     });
-    const stopBtn = el("button", { class: "danger hidden", text: "Stop" });
-    const modeAgent = el("button", { class: "seg", text: "Agent" });
-    const modePlay = el("button", { class: "seg", text: "Playground" });
+    const stopBtn = el("button", { class: "danger hidden", text: "Stop",
+      title: "Interrupt the current run at the next boundary (partial transcript is kept)." });
+    const modeAgent = el("button", { class: "seg", text: "Agent",
+      title: "Full agent mode: the model can call tools, read your workspace, and run a plan." });
+    const modePlay = el("button", { class: "seg", text: "Playground",
+      title: "Plain chat with the served model — no tools, no workspace access." });
     const hint = el("span", { class: "hint" });
     // 5e: agent profile selector (agent mode only; default = config default).
     const profileSel = el("select", { class: "profile-sel",
@@ -526,15 +529,20 @@ export default {
       let c = planCtlCache.get(key);
       if (c) return c;
       const addTitle = el("input", { type: "text",
-        placeholder: "new task title" });
+        placeholder: "new task title",
+        title: "One step of the project plan; agents pick up pending tasks in dependency order." });
       const addDesc = el("input", { type: "text",
-        placeholder: "description (optional)" });
-      const addPrio = el("select", {},
+        placeholder: "description (optional)",
+        title: "Details an agent reads when working on this task." });
+      const addPrio = el("select", { title:
+        "Order hint for the unattended loop — high-priority tasks go first among unblocked ones." },
         ...["medium", "high", "low"].map((v) =>
           el("option", { value: v, text: v })));
       const addDeps = el("input", { type: "text",
-        placeholder: "deps e.g. t1,t2" });
+        placeholder: "deps e.g. t1,t2",
+        title: "Task ids that must finish before this one can start (comma-separated)." });
       const btnAdd = el("button", { class: "small", text: "＋ add task",
+        title: "Add this task to the project's plan graph.",
         onclick: async () => {
           const title = addTitle.value.trim();
           if (!title) { toast("title required", "error"); return; }
@@ -553,9 +561,12 @@ export default {
       const impText = el("textarea", { rows: 4, class: "mono",
         placeholder: "paste a brief — one task per line:\n" +
           "Set up auth [priority=high]\nAdd login form [deps=t1]" });
-      const impAi = el("input", { type: "checkbox" });
+      const impAi = el("input", { type: "checkbox",
+        title: "Let the served model structure the pasted brief into tasks (one bounded call) " +
+          "instead of the simple one-line-per-task parser." });
       const impPrev = el("div", { class: "hint" });
       const btnPreview = el("button", { class: "small", text: "preview",
+        title: "Show which task lines the brief would produce — nothing is written yet.",
         onclick: () => {
           const parsed = parsePlanBrief(impText.value);
           impPrev.replaceChildren(...(parsed.length
@@ -566,6 +577,7 @@ export default {
             : [el("i", { text: "no task lines detected" })]));
         } });
       const btnImport = el("button", { class: "small primary",
+        title: "Add every parsed task from the brief to the plan.",
         text: "import → confirm",
         onclick: async () => {
           const text = impText.value.trim();

@@ -1205,9 +1205,23 @@ class JobDispatcher:
     gate-blocked jobs never re-attempted. Each tick:
 
       1. ``reap_stale()`` — fail `running` rows whose worker pid is dead;
-      2. ``drain_queue()`` — atomically claim + run queued work (gate-blocked
-         claims are released and retried on a later tick, so a job blocked by
-         the VRAM/AC gate starts as soon as its gate passes).
+      2. dispatch — atomically claim queued work and hand each claim to a
+         per-job daemon thread (gate-blocked claims are released back to
+         `queued` by the thread and retried on a later tick, so a job blocked
+         by the VRAM/AC gate starts as soon as its gate passes).
+
+    Deep-dive fix #2: claims run on PER-JOB THREADS, not inline on the tick
+    loop. ``Scheduler.drain_queue`` blocks inside ``proc.wait`` for the whole
+    duration of each worker (hours), which froze the tick between jobs — no
+    reaping of stale rows, no second job under ``max_parallel_jobs > 1``, no
+    gate retries while a long train ran. Here the tick only *claims* (a fast
+    guarded UPDATE that flips queued -> running with our pid) and spawns; the
+    thread owns one scheduler (own SQLite connection from
+    ``scheduler_factory``), runs the job, and closes its registry when done.
+    Device safety is unchanged: the per-slot flock + ``_INFLIGHT_CLAIMS``
+    bookkeeping inside ``_claim_device_slot`` still serialize devices, and the
+    claim itself caps in-flight dispatch at ``max_parallel`` because claimed
+    rows are immediately visible as `running`.
 
     A tick also runs immediately at :meth:`start` (startup reap), so phantom
     rows from a previous crash never outlive boot. Exactly one dispatcher may
@@ -1232,6 +1246,10 @@ class JobDispatcher:
     _stop: Optional[threading.Event] = field(default=None, init=False,
                                              repr=False)
     _lock_fh: Any = field(default=None, init=False, repr=False)
+    _job_threads: List[threading.Thread] = field(default_factory=list,
+                                                 init=False, repr=False)
+    _jobs_lock: threading.Lock = field(default_factory=threading.Lock,
+                                       init=False, repr=False)
 
     def is_running(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -1321,6 +1339,62 @@ class JobDispatcher:
             t.join(timeout=timeout if timeout is not None else self.tick_s + 5.0)
         self._release_lock()
 
+    def _prune_threads(self) -> int:
+        """Drop finished job threads; returns how many are still alive."""
+        with self._jobs_lock:
+            self._job_threads = [t for t in self._job_threads if t.is_alive()]
+            return len(self._job_threads)
+
+    def _spawn_job_thread(self, job: JobRow) -> None:
+        """Run one already-claimed job on its own daemon thread.
+
+        The thread builds a dedicated Scheduler (own SQLite connection — the
+        tick loop's connection is never touched from here), runs the claim,
+        and closes its registry. A gate/slot refusal requeues the row via
+        ``run_claimed``'s release path, so the next tick retries it; anything
+        else is logged — the registry state machine already recorded the
+        terminal error through ``run_job``."""
+        def _runner() -> None:
+            sched = None
+            try:
+                sched = self.scheduler_factory()
+                try:
+                    sched.run_claimed(job)
+                    logger.info("dispatcher finished job %s", job.job_id)
+                except SchedulerError:
+                    pass  # claim released to queued; retried on a later tick
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception("dispatcher job %s failed", job.job_id)
+            finally:
+                if sched is not None:
+                    try:
+                        sched.registry.close()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+
+        t = threading.Thread(target=_runner, daemon=True,
+                             name=f"job-dispatch-{job.job_id[:8]}")
+        with self._jobs_lock:
+            self._job_threads.append(t)
+        t.start()
+
+    def _dispatch(self, sched: Scheduler) -> int:
+        """Claim queued work up to capacity and hand each claim to a thread.
+
+        Mirrors ``drain_queue``'s claiming (same guarded UPDATE + skip_kinds),
+        but returns as soon as capacity is reached instead of running jobs
+        inline. The claim flips the row to `running` under our pid, so the
+        ``running_jobs()`` count naturally stops us at ``max_parallel``."""
+        started = 0
+        while len(sched.registry.running_jobs()) < sched.max_parallel:
+            job = sched.registry.claim_next_queued(
+                os.getpid(), skip_kinds=("curate", "curate_source"))
+            if job is None:
+                break
+            self._spawn_job_thread(job)
+            started += 1
+        return started
+
     # ---- loop ------------------------------------------------------------------
 
     def _loop(self) -> None:
@@ -1333,10 +1407,11 @@ class JobDispatcher:
                     if reaped:
                         logger.warning("dispatcher reaped %d stale job(s): %s",
                                        len(reaped), ", ".join(reaped))
-                    finished = sched.drain_queue()
-                    if finished:
-                        logger.info("dispatcher finished %d queued job(s)",
-                                    len(finished))
+                    self._prune_threads()
+                    started = self._dispatch(sched)
+                    if started:
+                        logger.info("dispatcher started %d queued job(s)",
+                                    started)
                 except Exception:  # a tick must never kill the loop
                     logger.exception("dispatcher tick failed")
                 if self._stop.wait(self.tick_s):

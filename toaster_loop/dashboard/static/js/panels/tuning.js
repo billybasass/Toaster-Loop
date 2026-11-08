@@ -170,7 +170,9 @@ export default {
 
       // Target selector: any RUNNING server instance (multi-agent friendly —
       // bench measures whichever endpoint you pick), or the config default.
-      const targetSel = el("select", { class: "input" });
+      const targetSel = el("select", { class: "input", title:
+        "Which server to measure: pick a running instance, or let the bench " +
+        "spawn the default model (needs the GPU free)." });
       const running = (targets.instances || []).filter((i) => i.running);
       if (running.length) {
         for (const i of running) {
@@ -184,11 +186,16 @@ export default {
           : "default (no gguf_path configured)"));
 
       const runsIn = el("input", { class: "input", type: "number",
-        min: "1", max: "50", value: "5", style: "width:5em" });
+        min: "1", max: "50", value: "5", style: "width:5em",
+        title: "Repetitions of the fixed prompt set; more runs tighten the measured spread." });
       const labelIn = el("input", { class: "input mono", type: "text",
-        placeholder: "label (optional)", style: "max-width:14em" });
-      const nfChk = el("input", { type: "checkbox" });
+        placeholder: "label (optional)", style: "max-width:14em",
+        title: "Name this measurement so you can compare it with later runs in the table." });
+      const nfChk = el("input", { type: "checkbox",
+        title: "Record this run as the noise-floor baseline: later effects smaller " +
+          "than its spread are treated as noise, not wins." });
       const btn = el("button", { class: "btn primary",
+        title: "Measure temperature-0 throughput over a fixed prompt set against the chosen server.",
         text: benchBusy ? "measuring…" : "Run bench" });
       if (benchBusy) btn.disabled = true;
       btn.addEventListener("click", async () => {
@@ -296,8 +303,11 @@ export default {
       const busyInsts = d.running_instances || [];
 
       const quickBtn = el("button", { class: "btn primary",
+        title: "Short sweep of serving knobs (batch sizes, offload splits); adopts " +
+          "only settings that beat the noise floor.",
         text: calBusy ? "sweeping…" : "Sweep (--quick)" });
-      const fullBtn = el("button", { class: "btn", text: "Full sweep" });
+      const fullBtn = el("button", { class: "btn", text: "Full sweep",
+        title: "Exhaustive knob sweep — much slower than quick, same adoption rule." });
       if (calBusy) { quickBtn.disabled = true; fullBtn.disabled = true; }
       const startSweep = async (quick) => {
         try {
@@ -352,8 +362,11 @@ export default {
         el("div", { class: "field" },
           quickBtn, fullBtn,
           el("button", { class: "btn", text: mode === "auto" ? "Turn honoring OFF" : "Honor profile at serve",
+            title: "auto = new servers launch with this machine's adopted sweep " +
+              "profile; off = launches byte-identical to defaults.",
             onclick: () => setMode(mode === "auto" ? "off" : "auto") }),
           el("button", { class: "btn", text: "Clear profiles",
+            title: "Delete all stored per-machine calibration profiles.",
             onclick: () => confirmDialog({
               title: "Clear calibration profiles",
               body: "Deletes all stored profiles under <TOASTER_LOOP_HOME>/calibrate/.",

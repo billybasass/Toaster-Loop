@@ -24,17 +24,22 @@ export default {
       try { tr = (await api("/api/config")).config?.training || {}; }
       catch (e) { rulesCard.replaceChildren(el("p", { class: "err", text: e.message })); return; }
 
-      const enSel = el("select", {},
+      const enSel = el("select", { title:
+        "Marks the intent for an external scheduler (cron). The dashboard " +
+        "itself never fires runs — see the cron card below." },
         el("option", { value: "true", text: "enabled" }),
         el("option", { value: "false", text: "disabled" }));
       enSel.value = String(!!tr.auto_enabled);
       const tracesIn = el("input", { type: "number", min: "1",
-        value: tr.auto_min_traces ?? 50 });
+        value: tr.auto_min_traces ?? 50,
+        title: "How many unclaimed traces must accumulate before an automatic run triggers." });
       const scoreIn = el("input", { type: "number", step: "0.05", min: "-1", max: "1",
-        value: tr.auto_min_score ?? 0.5 });
+        value: tr.auto_min_score ?? 0.5,
+        title: "Mean outcome score (−1…1) those traces must reach before triggering." });
       const status = el("span", { class: "hint" });
 
-      const saveBtn = el("button", { class: "small primary", text: "Apply" });
+      const saveBtn = el("button", { class: "small primary", text: "Apply",
+        title: "Save the threshold rule to the training config section (same keys as Settings)." });
       saveBtn.addEventListener("click", async () => {
         saveBtn.disabled = true;
         try {
@@ -70,7 +75,9 @@ export default {
     }
 
     // -------------------------------------------------------- readiness card
-    const triggerBtn = el("button", { class: "primary", text: "Trigger now" });
+    const triggerBtn = el("button", { class: "primary", text: "Trigger now",
+      title: "Re-check the readiness gate, then start a full iterate run " +
+        "(curate → train → export → validate → promote) right now." });
 
     async function loadReadiness() {
       let c;

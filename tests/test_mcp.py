@@ -1522,6 +1522,71 @@ def test_dispatcher_loop_drains_without_submit_thread(home__test_dispatcher, reg
         d.stop()
 
 
+def test_dispatcher_does_not_block_on_long_job(home__test_dispatcher, registry,
+                                               tmp_path, _reset_slot_bookkeeping):
+    """Deep-dive fix #2: a long-running job must not freeze the dispatcher.
+
+    The old drain_queue ran each claim inline (proc.wait for HOURS), so while
+    one train ran the tick could not start a second job under
+    max_parallel_jobs > 1 nor reap anything. Now claims run on per-job
+    threads: with an 'export' stub sleeping 30s in slot 0, a queued 'sft'
+    must still reach done within seconds while the export keeps running."""
+    sleeper = tmp_path / "sleep_export_worker.py"
+    sleeper.write_text(r'''
+import argparse, json, os, sys, time
+from pathlib import Path
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--job", required=True)
+ap.add_argument("--kind", required=True)
+ap.add_argument("--log-path", default=None)
+a = ap.parse_args()
+
+def emit(ev, **kw):
+    line = json.dumps({"event": ev, "job": a.job, **kw})
+    print(line, flush=True)
+    if a.log_path:
+        Path(a.log_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(a.log_path, "a") as f:
+            f.write(line + "\n")
+
+emit("start")
+if a.kind == "export":
+    time.sleep(30)      # long training stand-in
+emit("done")
+''')
+
+    def factory():
+        return Scheduler(
+            registry=ModelRegistry(home__test_dispatcher / "buffer" / "toaster_loop.db"),
+            cfg=TrainingConfig(max_parallel_jobs=2, gpu_ids=[5, 6]),
+            worker_command=[sys.executable, str(sleeper)])
+
+    slow = registry.enqueue_job("export")   # sleeps 30s in slot 0
+    quick = registry.enqueue_job("sft")     # must NOT wait for the sleeper
+
+    d = JobDispatcher(db_path=registry.db_path, scheduler_factory=factory,
+                      tick_s=0.2)
+    d.start()
+    sched = factory()
+    try:
+        ok = wait_for(lambda: registry.get_job(quick.job_id).state == "done",
+                      timeout=10.0)
+        assert ok, ("quick job blocked behind the long one — dispatcher tick "
+                    f"is inline again ({registry.get_job(quick.job_id).state})")
+        # the sleeper is still running (proves we didn't just finish everything)
+        assert registry.get_job(slow.job_id).state == "running"
+    finally:
+        try:
+            sched.cancel(slow.job_id)
+        except Exception:
+            pass
+        d.stop()
+        wait_for(lambda: registry.get_job(slow.job_id).state in
+                 ("cancelled", "error"), timeout=10.0)
+        sched.registry.close()
+
+
 def test_two_rapid_submits_both_execute(home__test_dispatcher, monkeypatch, stub, _reset_slot_bookkeeping):
     """(a) POST /api/train twice fast with two slots: both jobs execute,
     neither strands in `queued`."""

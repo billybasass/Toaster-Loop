@@ -178,19 +178,27 @@ export default {
         const actions = [
           s.running
             ? el("button", { class: "small danger",
+              title: s.mode === "attach"
+                ? "Forget this attached endpoint — the external server keeps running."
+                : "Stop the llama-server process toaster_loop spawned for this instance.",
               text: s.mode === "attach" ? "detach" : "stop",
               onclick: () => stopServer(s) })
             : el("button", { class: "small primary", text: "start",
+              title: "Spawn (or attach) this instance's server. A VRAM warning " +
+                "may ask for confirmation first.",
               onclick: () => startServer(s) }),
         ];
         // The default instance's run settings live on the Settings page
         // (global section); named instances edit their own here.
         if (s.gguf && !s.default) {
           actions.push(el("button", { class: "small", text: "run settings",
+            title: "Edit this instance's own llama-server flags and sampling " +
+              "defaults (takes effect on its next start).",
             onclick: () => editRunSettings(s) }));
         }
         if (!s.default) {
           actions.push(el("button", { class: "small danger", text: "delete",
+            title: "Stop the instance if running, then remove its definition.",
             onclick: async () => {
               const ok = await confirmDialog({
                 title: `Delete “${s.name}”?`,
@@ -241,13 +249,18 @@ export default {
     }
 
     // ------------------------------------------------- new-instance form
-    const nameIn = el("input", { type: "text", placeholder: "coding", size: 18 });
-    const roleSel = el("select", {},
+    const nameIn = el("input", { type: "text", placeholder: "coding", size: 18,
+      title: "Label for this server instance; profiles and the Easy loop bind to it by name." });
+    const roleSel = el("select", { title:
+      "Free-form tag for what this instance is for (embedding marks a vector " +
+      "server). Does not change behavior beyond labeling." },
       ...["custom", "orchestrator", "coding", "embedding"].map((r) =>
         el("option", { value: r, text: r })));
     // Spawn engine: built-in llama.cpp by default; registered engines
     // (Hardware page) appear here once installed. Attach instances ignore it.
-    const instEngineSel = el("select", {},
+    const instEngineSel = el("select", { title:
+      "Which program actually runs the server. llama.cpp is built in; other " +
+      "engines (vLLM, diffusion, strata…) appear once installed on the Hardware page." },
       el("option", { value: "", text: "llama.cpp (built-in)" }));
     function fillEngineSelect() {
       const cur = instEngineSel.value;
@@ -272,16 +285,25 @@ export default {
         updateEngineForm();
       } catch { /* built-in-only form still works */ }
     }
-    const instGgufSel = el("select", {},
+    const instGgufSel = el("select", { title:
+      "Spawn a new server for this GGUF model (found under models_dir). " +
+      "Multi-part GGUFs load all shards." },
       el("option", { value: "", text: "— pick a model from disk —" }));
     const instAttachIn = el("input", { type: "text",
-      placeholder: "or attach URL (http://127.0.0.1:PORT/v1)", size: 30 });
+      placeholder: "or attach URL (http://127.0.0.1:PORT/v1)", size: 30,
+      title: "Instead of spawning, point at an OpenAI-compatible server you " +
+        "already run (loopback only). Toaster Loop never kills attached servers." });
     const instPortIn = el("input", { type: "number", min: "0", max: "65535",
-      placeholder: "port (0=auto)", class: "narrow" });
+      placeholder: "port (0=auto)", class: "narrow",
+      title: "Fixed port for the spawned server; 0/blank picks a free one automatically." });
     const instCtxIn = el("input", { type: "number", min: "512", step: "512",
-      placeholder: "context (optional)", class: "narrow" });
-    const instEmbedChk = el("input", { type: "checkbox" });
-    const createBtn = el("button", { class: "primary", text: "Create instance" });
+      placeholder: "context (optional)", class: "narrow",
+      title: "Override the prompt window in tokens for this instance (uses more VRAM)." });
+    const instEmbedChk = el("input", { type: "checkbox",
+      title: "Launch with --embedding (a vector server for codebase indexing) " +
+        "instead of a chat model." });
+    const createBtn = el("button", { class: "primary", text: "Create instance",
+      title: "Save the instance definition. It can then be started/stopped from the table above." });
 
     // Per-instance model run settings — captured WITH the instance. New
     // instances never inherit the global Settings-page run_settings; these
@@ -411,7 +433,8 @@ export default {
         instAttachIn,
         el("span", { class: "hint", text: "loopback only (127.0.0.1)" })),
       el("div", { class: "field" }, el("label", { text: "port" }), instPortIn,
-        el("label", { text: "context" }), instCtxIn,
+        el("label", { title: "Override the prompt window in tokens for this instance." },
+          "context"), instCtxIn,
         el("label", { class: "chk" }, instEmbedChk, " --embedding server")),
       rsSection, spSection, imSection,
       el("div", { class: "btnrow" }, createBtn),
@@ -486,8 +509,12 @@ export default {
     }
 
     // deploy -----------------------------------------------------------
-    const deploySel = el("select", {}, el("option", { value: "", text: "— model —" }));
-    const deployBtn = el("button", { text: "Deploy" });
+    const deploySel = el("select", { title:
+      "A model from the registry (trained or imported) that has a GGUF artifact on disk." },
+      el("option", { value: "", text: "— model —" }));
+    const deployBtn = el("button", { text: "Deploy",
+      title: "Hot-swap the default instance onto this model: stops any owned " +
+        "server and starts one serving the selected GGUF." });
     deployBtn.addEventListener("click", async () => {
       clearErr();
       if (!deploySel.value) { showErr({ code: "bad_request", message: "pick a model to deploy" }); return; }
@@ -517,11 +544,16 @@ export default {
     // training + trace activity. The backend polls the peer read-only with the
     // peer's dashboard token (peers.json, 0600); nothing is pushed remotely.
     const peerUrlIn = el("input", { type: "text",
-      placeholder: "192.168.1.42:8765  (remote dashboard URL)", size: 36 });
+      placeholder: "192.168.1.42:8765  (remote dashboard URL)", size: 36,
+      title: "Address of another machine's toaster_loop dashboard on your LAN " +
+        "(printed when that machine starts)." });
     const peerTokenIn = el("input", { type: "password",
-      placeholder: "peer dashboard token", autocomplete: "off" });
+      placeholder: "peer dashboard token", autocomplete: "off",
+      title: "That machine's dashboard auth token, so we can poll it read-only." });
     const peerOut = el("span", { class: "hint" });
-    const connectBtn = el("button", { text: "Connect" });
+    const connectBtn = el("button", { text: "Connect",
+      title: "Probe the remote dashboard and remember it. Polling is read-only; " +
+        "nothing runs on or is pushed to the remote box." });
     const peersHost = el("div", {});
     let peers = [];
 
@@ -602,12 +634,14 @@ export default {
         el("span", { class: "hint" }, p.last_ok_at
           ? `last ok ${fmtTime(p.last_ok_at, true)}` : "never reached"),
         el("button", { class: "small", text: "re-check", style: "margin-left:auto",
+          title: "Re-probe this machine now for live status, agents and jobs.",
           onclick: async () => {
             try { await api(`/api/remote/peers/${encodeURIComponent(p.id)}/live`); }
             catch (e) { /* offline shows as badge flip, no toast spam */ }
             await loadPeers();
           } }),
         el("button", { class: "small danger", text: "forget",
+          title: "Remove this machine from the peer list. Nothing happens on the remote box.",
           onclick: async () => {
             const ok = await confirmDialog({ title: "Forget peer?",
               body: `“${p.name || p.url}” will be removed from this list. ` +

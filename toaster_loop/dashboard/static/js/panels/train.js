@@ -115,7 +115,9 @@ export default {
       // GGUF entries are selectable via a "gguf:<path>" sentinel: choosing one
       // opens the resolve panel below instead of submitting (the submit path
       // rejects sentinels with a friendly message).
-      const baseSel = el("select", {},
+      const baseSel = el("select", { title:
+        "Base weights to fine-tune. Training always runs on HF safetensors, never " +
+        "on a GGUF — picking a GGUF here just helps you find its HF base." },
         el("option", { value: "", text: "— configured default (training.base_model) —" }),
         ...(catalog.base_models || []).map((m) => el("option", {
           value: m.path, text: m.name })),
@@ -181,9 +183,13 @@ export default {
               `${c.source === "card" ? ", declared by the GGUF repo's card" : ""}`)));
         }
         const manualIn = el("input", { type: "text", class: "grow",
-          placeholder: "org/model (HF repo id)" });
+          placeholder: "org/model (HF repo id)",
+          title: "Hugging Face repo id of the base checkpoint, if none of the " +
+            "suggestions above are right. It is downloaded to the local models dir." });
         bits.push(el("div", { class: "field" }, manualIn,
           el("button", { class: "small", text: "download manual pick",
+            title: "Download the typed HF repo id in the background; it appears in " +
+              "the base-model list when finished.",
             onclick: async () => {
               const repo = manualIn.value.trim();
               if (!repo) return toast("enter an HF repo id first", "error");
@@ -230,13 +236,21 @@ export default {
         }
       });
       const modelNameIn = el("input", { type: "text", class: "grow",
-        placeholder: "name for the trained model (optional)", maxlength: "80" });
-      const kindSel = el("select", {},
+        placeholder: "name for the trained model (optional)", maxlength: "80",
+        title: "Friendly label for the adapter produced by this run, shown on the " +
+          "Models page. Empty = auto-generated from the dataset id." });
+      const kindSel = el("select", { title:
+        "sft = imitate the chosen answers; dpo = push toward chosen and away from " +
+        "rejected pairs; grpo = reinforcement learning with rule-based rewards." },
         el("option", { value: "sft", text: "sft (supervised)" }),
         el("option", { value: "dpo", text: "dpo (preference pairs)" }),
         el("option", { value: "grpo", text: "grpo (RL, rule rewards)" }));
-      const dryRun = el("input", { type: "checkbox" });
-      const startBtn = el("button", { class: "primary", text: "Start training" });
+      const dryRun = el("input", { type: "checkbox",
+        title: "Walk the whole pipeline — config validation, dataset loading, VRAM " +
+          "estimate — but skip the actual GPU training. Use it to catch mistakes free." });
+      const startBtn = el("button", { class: "primary", text: "Start training",
+        title: "Queue a training job with the settings above. One job at a time; " +
+          "if the GPU is busy the job waits and tells you why." });
 
       // VRAM estimate (#20): predicted footprint vs free VRAM before submit.
       const estRow = el("div", { class: "field hidden" });
@@ -316,6 +330,7 @@ export default {
         el("h3", { text: "2 · Dataset & mode" }),
         el("div", { class: "field" }, el("label", { text: "datasets (pick one or more)" }), dsBox,
           el("button", { class: "small", text: "curate new…",
+            title: "Open the Datasets page to build a fresh dataset from buffered traces.",
             onclick: () => go("/datasets") })),
         el("p", { class: "hint", text:
           "Multiple picks are merged into one training dataset at submit time " +

@@ -116,22 +116,33 @@ def _build_chunked_ce_function() -> Any:
     import torch
 
     class ChunkedLinearCE(torch.autograd.Function):
-        """Tensor front door; config stashed per-apply via class attrs."""
+        """Tensor front door; config travels through apply() args (fix #6).
 
-        weight = None
-        chunk_size = 4096
-        ignore_index = IGNORE_INDEX_DEFAULT
-        reduction = "mean"
+        Deep-dive fix #6: the old design stashed weight/chunk_size/... on the
+        Function CLASS between apply() calls and cleared them in a finally —
+        non-reentrant and not thread-safe (two concurrent applies, e.g. a
+        future multi-stream or DPO-style paired forward, corrupted each
+        other). Config now rides through ``apply`` as extra inputs into
+        ``ctx``, so every application is self-contained.
+
+        FROZEN-HEAD CONTRACT (explicit, was implicit): ``weight`` is an apply
+        input but ``backward`` returns ``None`` for it — d_weight is never
+        produced, so the lm_head cannot receive gradients through this op
+        even if the caller hands in a requires_grad tensor. That is the
+        streamed-LoRA invariant (lm_head is never trained); a trainable head
+        must go through an ordinary matmul + F.cross_entropy instead."""
 
         @staticmethod
-        def forward(ctx, hidden: Any, labels: Any) -> Any:  # type: ignore[override]
+        def forward(ctx, hidden: Any, labels: Any, weight: Any,  # type: ignore[override]
+                    chunk_size: int = 4096,
+                    ignore_index: int = IGNORE_INDEX_DEFAULT,
+                    reduction: str = "mean") -> Any:
             torch = _torch()
-            weight = ChunkedLinearCE.weight
             if weight is None:
                 raise RuntimeError("chunked CE weight was not set")
-            chunk_size = int(ChunkedLinearCE.chunk_size)
-            ignore_index = int(ChunkedLinearCE.ignore_index)
-            reduction = str(ChunkedLinearCE.reduction)
+            chunk_size = int(chunk_size)
+            ignore_index = int(ignore_index)
+            reduction = str(reduction)
 
             n, _h = hidden.shape
             vocab = weight.shape[0]
@@ -182,11 +193,16 @@ def _build_chunked_ce_function() -> Any:
             ctx.chunk_size = chunk_size
             ctx.n_valid = n_valid
             ctx.reduction = reduction
+            ctx.ignore_index = ignore_index
             ctx.logz = logz
             return loss
 
         @staticmethod
-        def backward(ctx, grad_loss: Any) -> Tuple[Any, None]:  # type: ignore[override]
+        def backward(ctx, grad_loss: Any):  # type: ignore[override]
+            # One entry per forward input: d_hidden for `hidden`; None for
+            # labels/weight/chunk_size/ignore_index/reduction. The weight's
+            # None is the FROZEN-HEAD CONTRACT, not an oversight — see class
+            # docstring (a trainable lm_head must not route through here).
             torch = _torch()
             hidden, labels = ctx.saved_tensors
             weight = ctx.weight
@@ -202,7 +218,7 @@ def _build_chunked_ce_function() -> Any:
 
             d_hidden = torch.zeros(hidden.shape, device=hidden.device,
                                    dtype=acc_dtype)
-            valid = labels != int(ChunkedLinearCE.ignore_index)
+            valid = labels != int(ctx.ignore_index)
             for start in range(0, vocab, chunk_size):
                 end = min(start + chunk_size, vocab)
                 w = weight[start:end].to(device=hidden.device,
@@ -220,7 +236,7 @@ def _build_chunked_ce_function() -> Any:
                 else:
                     d_hidden += (probs @ w_acc) * scale
 
-            return d_hidden.to(dtype=hidden.dtype), None
+            return d_hidden.to(dtype=hidden.dtype), None, None, None, None, None
 
     _FUNC_SINGLETON = ChunkedLinearCE
     return ChunkedLinearCE
@@ -235,17 +251,17 @@ def chunked_linear_cross_entropy(hidden: Any, weight: Any, labels: Any, *,
     ``hidden``: [N, H] or [B, S, H]; ``weight``: [V, H]; ``labels`` matches
     hidden's token layout. Peak extra memory ~ ``[N, chunk_size]`` logits —
     never the full ``[N, V]``. Requires torch (lazy import at call time).
+
+    Thread-safe and reentrant: all config is passed through ``apply`` into
+    ``ctx`` (fix #6) — no class-level stashing, so concurrent or nested
+    applications cannot interfere. ``weight`` stays frozen by construction
+    (backward returns None for it) — see the ChunkedLinearCE docstring's
+    frozen-head contract.
     """
     _torch()  # eager availability check with a clear ImportError if absent
     if hidden.dim() == 3:
         hidden = hidden.reshape(-1, hidden.shape[-1])
     labels = labels.reshape(-1)
     cls = _build_chunked_ce_function()
-    cls.weight = weight
-    cls.chunk_size = int(chunk_size)
-    cls.ignore_index = int(ignore_index)
-    cls.reduction = reduction
-    try:
-        return cls.apply(hidden, labels)
-    finally:
-        cls.weight = None
+    return cls.apply(hidden, labels, weight, int(chunk_size),
+                     int(ignore_index), str(reduction))

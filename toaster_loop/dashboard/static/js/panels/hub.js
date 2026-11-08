@@ -129,13 +129,20 @@ export default {
     // PULSEMCP_API_KEY). Only shown while the MCP Servers kind tab is active.
     const srcSel = selectEl([["hf", "Hugging Face"],
       ["registry", "MCP Registry"], ["pulsemcp", "PulseMCP"]], "hf");
+    srcSel.title = "Which catalogue to browse for MCP servers. Only Hugging " +
+      "Face repos download locally; the others link out.";
     const query = el("input", { type: "search", class: "hub-search",
-      placeholder: "Search models" });
+      placeholder: "Search models",
+      title: "Free-text search of the selected catalogue (models, datasets or MCP servers)." });
     // GGUF-only made sense when llama.cpp was the only backend; default to
     // all formats so vLLM / stable-diffusion.cpp weights surface too.
     const ggufSel = selectEl([["", "All formats"], ["1", "GGUF only"]], "");
+    ggufSel.title = "Filter model weight formats. GGUF runs on llama.cpp; other " +
+      "formats serve via vLLM or diffusion engines.";
     const capSel = selectEl(CAPS, "");
+    capSel.title = "Filter by what the model can do (text generation, embeddings, vision…).";
     const sortSel = selectEl(SORTS, "downloads");
+    sortSel.title = "Order of the result list.";
 
     const listHost = el("div", { class: "hub-list" });
     const detailHost = el("div", { class: "hub-detail" });

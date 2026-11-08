@@ -258,6 +258,7 @@ export default {
             const actions = [];
             if (p.name !== defaultProfile) {
               actions.push(el("button", { class: "small", text: "set default",
+                title: "Use this profile when Chat does not pick one explicitly.",
                 onclick: async () => {
                   try {
                     await api("/api/profiles/default", { method: "PUT",
@@ -268,6 +269,7 @@ export default {
                 } }));
             }
             actions.push(el("button", { class: "small danger", text: "delete",
+              title: "Remove this profile from the config. Existing traces keep their tags.",
               onclick: async () => {
                 const ok = await confirmDialog({
                   title: `Delete profile “${p.name}”?`,
@@ -301,6 +303,7 @@ export default {
               })()),
               el("td", {}, el("div", { class: "btnrow" },
                 el("button", { class: "small", text: "edit",
+                  title: "Change this profile's prompt, tools, model and server binding.",
                   onclick: () => { editing = p.name; renderEditor(); } }),
                 ...actions)));
           }))));
@@ -314,17 +317,25 @@ export default {
            { name: editing, system_prompt: "", tools: [], model_name: "" });
 
       const nameIn = el("input", { type: "text", value: p.name || "",
-        placeholder: "coder", disabled: isNew ? null : "disabled" });
+        placeholder: "coder", disabled: isNew ? null : "disabled",
+        title: "Unique id for this profile — shown in the Chat profile picker " +
+          "and stamped on every trace it produces." });
       const promptTa = el("textarea", { rows: 8, spellcheck: "false",
-        placeholder: "You are a careful coding assistant… (system prompt)" });
+        placeholder: "You are a careful coding assistant… (system prompt)",
+        title: "Instructions prepended to every run of this agent: persona, " +
+          "style, rules. This is the main lever for what the agent does." });
       promptTa.value = p.system_prompt || "";
       const modelIn = el("input", { type: "text", value: p.model_name || "",
-        placeholder: "(served model)" });
+        placeholder: "(served model)",
+        title: "Ask for a specific model alias by name; blank = whatever model " +
+          "is currently served on the bound server." });
 
       // Phase 6: optional server-instance binding — runs for this profile
       // target that managed instance instead of the default serve endpoint.
       const curInstance = p.server_instance || "";
-      const instSel = el("select", {},
+      const instSel = el("select", { title:
+        "Send this profile's requests to a named server instance (Serve panel) " +
+        "instead of the default one — lets agents run on different models at once." },
         el("option", { value: "", text: "default (whatever is served)" }));
       for (const s of servers) {
         if (s.id === "default") continue;
@@ -349,7 +360,8 @@ export default {
         cb.checked = (p.tools || []).includes(t);
         checks.set(t, cb);
       }
-      const extraIn = el("input", { type: "text", placeholder: "extra tool name" });
+      const extraIn = el("input", { type: "text", placeholder: "extra tool name",
+        title: "Add a tool by name (e.g. an MCP-provided tool) when it is not in the list." });
       const toolsGrid = el("div", { class: "btnrow" },
         ...[...checks.entries()].map(([t, cb]) =>
           el("label", { class: "chk", title: knownTools.includes(t) ? "" :
@@ -388,7 +400,8 @@ export default {
       const samplingPassthrough = p.sampling || null;
 
       const status = el("span", { class: "hint" });
-      const saveBtn = el("button", { class: "primary", text: isNew ? "Create" : "Save" });
+      const saveBtn = el("button", { class: "primary", text: isNew ? "Create" : "Save",
+        title: "Write this profile into the config file. New chat runs pick it up immediately." });
       saveBtn.addEventListener("click", async () => {
         const name = nameIn.value.trim();
         if (!name) return toast("name required", "error");
@@ -425,6 +438,7 @@ export default {
         el("div", { class: "field" }, el("label", { text: "tools" }), toolsGrid,
           el("div", { class: "btnrow", style: "margin-top:6px" }, extraIn,
             el("button", { class: "small", text: "+ add tool name",
+              title: "Add a custom/MCP tool name to the checkbox list.",
               onclick: () => {
                 const t = extraIn.value.trim();
                 if (!t || checks.has(t)) return;
@@ -449,7 +463,8 @@ export default {
             "run programs executes with your own privileges and bypasses " +
             "workspace containment, so grant it only to agents you trust" })),
         el("div", { class: "field" }, saveBtn,
-          el("button", { text: "cancel", onclick: renderEditorHide }), status)));
+          el("button", { text: "cancel", title: "Discard changes and close the editor.",
+            onclick: renderEditorHide }), status)));
       editorHost.scrollIntoView({ block: "nearest" });
     }
 
@@ -463,6 +478,8 @@ export default {
         "one per run; the default is used when none is selected." }),
       el("div", { class: "toolbar" },
         el("button", { class: "primary", text: "＋ New profile",
+          title: "Create an agent profile: a named system prompt + tool subset " +
+            "+ optional model/server binding, selectable per chat run.",
           onclick: () => { editing = "new"; renderEditor(); } }),
         copyButton("curl -s -X PUT " + location.origin + "/api/profiles/coder " +
           "-H 'Content-Type: application/json' " +

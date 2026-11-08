@@ -143,7 +143,9 @@ export default {
       // Primary picker (legacy `profile` key) + checkbox list of additional
       // agents. The primary can also be checked "again" — harmless, the
       // backend dedupes and keeps it first.
-      const sel = el("select", {},
+      const sel = el("select", { title:
+        "The primary agent of this self-improving loop: its chat traces are " +
+        "stamped, counted toward readiness, and trained on separately." },
         el("option", { value: "", text: "— pick a profile —" }),
         ...profiles.map((p) => el("option", {
           value: p.name,
@@ -159,7 +161,10 @@ export default {
       }
       const extraChecks = new Map();
       const extraBox = el("div", { class: "field" },
-        el("label", { text: "also train these agents" }),
+        el("label", { title:
+          "Add more agent profiles to the same loop. Each gets its own readiness " +
+          "gauge, scoped curation/training, and auto-deploy target." },
+          "also train these agents"),
         ...profiles
           .filter((p) => p.name !== sel.value)
           .map((p) => {
@@ -176,11 +181,20 @@ export default {
         primaryPending = sel.value;
         renderSetup();
       });
-      const autoDeploy = el("input", { type: "checkbox" });
+      const autoDeploy = el("input", { type: "checkbox",
+        title: "After a model passes the gate and is promoted, hot-swap it onto " +
+          "that profile's own spawned server automatically. Attached (external) " +
+          "servers are never touched." });
       autoDeploy.checked = !!cfg.auto_deploy;
-      const applyPreset = el("input", { type: "checkbox" });
+      const applyPreset = el("input", { type: "checkbox",
+        title: "Write the battle-tested optimal preset (curation filters, eval " +
+          "split, regression gate, shadow baseline, golden mining) into your " +
+          "settings. Uncheck to keep your current values and only bind profiles." });
       applyPreset.checked = true;
       const btn = el("button", { class: "primary",
+        title: cfg.enabled
+          ? "Save the profile/auto-deploy changes (and optionally re-apply the preset)."
+          : "Turn on the turnkey self-improving loop for the picked profiles.",
         text: cfg.enabled ? "Update easy training" : "Enable easy training" });
       if (profiles.length === 0) {
         setupCard.replaceChildren(
@@ -258,6 +272,7 @@ export default {
       if (cfg.enabled) {
         kids[0] = el("div", { class: "btnrow" }, btn,
           el("button", { class: "small", text: "Cancel",
+            title: "Discard unsaved picks and return to the status view.",
             onclick: () => {
               editing = false;
               extrasPending = null;  // discard unsaved picks
@@ -303,11 +318,15 @@ export default {
       }
       for (const g of (gate.reasons || [])) nextSteps.push(g);
 
-      const trainBtn = el("button", { class: "primary", text: "Train now" });
+      const trainBtn = el("button", { class: "primary", text: "Train now",
+        title: "Run the whole loop for this profile right now: curate its traces → " +
+          "train → validate against the shadow baseline → promote if better." });
       // Optional human name for the model this run produces (registry
       // display_name + artifact filenames); model_id stays canonical.
       const nameIn = el("input", { type: "text", class: "narrow",
-        placeholder: "model name (optional)", maxlength: "80" });
+        placeholder: "model name (optional)", maxlength: "80",
+        title: "Friendly label for the model this run produces; shown on the " +
+          "Models page. Empty = auto-generated id." });
       trainBtn.addEventListener("click", async () => {
         trainBtn.disabled = true;
         try {
@@ -323,7 +342,9 @@ export default {
         } catch (e) { toast(e.message, "error"); }
         finally { trainBtn.disabled = false; load(); }
       });
-      const removeBtn = el("button", { class: "small danger", text: "remove" });
+      const removeBtn = el("button", { class: "small danger", text: "remove",
+        title: "Drop this agent from the loop. Its existing traces and trained " +
+          "models stay; it just stops counting toward training/auto-deploy." });
       removeBtn.addEventListener("click", async () => {
         const ok = await confirmDialog({
           title: `Remove “${a.profile}” from the easy loop?`,
@@ -366,6 +387,8 @@ export default {
       const stale = (data.stale_stamps || []).filter(
         (s) => !loopNames.has(s.profile));
       const disableBtn = el("button", { class: "small danger",
+        title: "Turn off the loop for all profiles. Nothing is deleted — the " +
+          "preset stays in your settings and you can re-enable anytime.",
         text: "Disable" });
       disableBtn.addEventListener("click", async () => {
         const ok = await confirmDialog({
@@ -388,8 +411,10 @@ export default {
           "old chats won't count toward this loop." })),
         el("div", { class: "btnrow" },
           el("button", { class: "small", text: "re-check",
+            title: "Re-read readiness gauges, gate status and run state from the server.",
             onclick: () => load() }),
           el("button", { class: "small", text: "edit…",
+            title: "Change which profiles are in the loop and the auto-deploy/preset options.",
             onclick: () => { editing = true; render(); } }),
           disableBtn),
         ...agents().map(agentStatusCard));
@@ -401,12 +426,15 @@ export default {
       const candidates = profiles.filter((p) => !inLoop.has(p.name));
       if (!candidates.length) { addCard.classList.add("hidden"); return; }
       addCard.classList.remove("hidden");
-      const sel = el("select", {},
+      const sel = el("select", { title:
+        "Pick an existing agent profile that is not yet part of the easy loop." },
         ...candidates.map((p) => el("option", {
           value: p.name,
           text: `${p.name} — ${p.server_instance ? serverLabel(p.server_instance)
             : "no server bound (open Profiles)"}` })));
-      const btn = el("button", { class: "small", text: "Add agent" });
+      const btn = el("button", { class: "small", text: "Add agent",
+        title: "Start collecting this agent's chats toward its own readiness gauge " +
+          "and training runs." });
       btn.addEventListener("click", async () => {
         if (!sel.value) return;
         btn.disabled = true;
