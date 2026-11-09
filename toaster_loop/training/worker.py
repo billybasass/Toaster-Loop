@@ -949,16 +949,35 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     except (OSError, ValueError):
         pass
 
-    # bitsandbytes on ROCm: the standard PyPI wheel has no kernels for
-    # recent AMD gfx targets (verified: importing + touching it SIGSEGVs on
-    # Strix Halo / ROCm 7.1 — the job died rc=-11 with no Python traceback).
-    # Skip runtime nf4 unless explicitly forced via TOASTER_LOOP_BNB_ROCM=1
-    # (for users with a ROCm bnb build); transformers then loads bf16.
-    _bnb_rocm_blocked = bool(torch.version.hip) and \
-        os.environ.get("TOASTER_LOOP_BNB_ROCM", "").strip() not in ("1", "true", "yes", "on")
+    # bitsandbytes on ROCm used to be a blanket NO: pre-7.2 ROCm torch wheels
+    # bundle an HSA/rocprofiler stack that SIGSEGVs at the FIRST kernel launch
+    # on gfx1151 (pytorch/pytorch#173125), and bitsandbytes died with it — so
+    # this guard was correct then. It became the bug: with a working wheel nf4
+    # QLoRA trains fine on the same hardware, yet every AMD run was priced as
+    # bf16-only (a 27B model => ~136 GiB, queue-blocked forever on a 120 GiB
+    # unified pool that QLoRA's ~101 GiB fits). Probe the ACTUAL capability
+    # instead — in a throwaway child, because a genuine SIGSEGV must never
+    # take this worker down (core/bnbprobe.py). TOASTER_LOOP_BNB_ROCM still
+    # forces either way.
+    # (Pre-quantized checkpoints never take the runtime-nf4 path below, so the
+    # probe would be pointless GPU work there.)
+    if load_in_4bit and torch.version.hip and not _prequantized:
+        from ..core.bnbprobe import rocm_bnb_supported
 
-    if load_in_4bit and torch.cuda.is_available() and not _prequantized \
-            and not _bnb_rocm_blocked:
+        _bnb_ok, _bnb_why = rocm_bnb_supported()
+        if not _bnb_ok:
+            load_in_4bit = False
+            _emit(log_path, "warning", message=(
+                f"ROCm torch ({torch.version.hip}) + bitsandbytes nf4 probe "
+                f"failed — loading bf16 instead (needs ~2x the RAM of nf4; "
+                f"lower max_seq_length if it OOMs). Probe: {_bnb_why}. "
+                "A newer ROCm-built torch wheel usually fixes this "
+                "(+rocm7.2 or later); set TOASTER_LOOP_BNB_ROCM=1 to force "
+                "nf4 anyway when you know better than the probe."))
+        else:
+            _emit(log_path, "bnb_probe", ok=True, detail=_bnb_why)
+
+    if load_in_4bit and torch.cuda.is_available() and not _prequantized:
         try:
             from transformers import BitsAndBytesConfig  # type: ignore[import-not-found]
 
@@ -971,14 +990,6 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         except ImportError:
             _emit(log_path, "warning",
                   message="bitsandbytes missing — loading in bf16/fp16 instead of 4-bit")
-    elif load_in_4bit and _bnb_rocm_blocked:
-        load_in_4bit = False
-        _emit(log_path, "warning", message=(
-            f"ROCm torch ({torch.version.hip}): the PyPI bitsandbytes has no"
-            " kernels for this GPU and SIGSEGVs — skipping runtime 4-bit,"
-            " loading bf16 instead (needs ~2x the RAM of nf4; lower"
-            " max_seq_length if it OOMs). Set TOASTER_LOOP_BNB_ROCM=1 to"
-            " force bitsandbytes when you have a ROCm build."))
     elif load_in_4bit and _prequantized:
         _emit(log_path, "warning", message=(
             "checkpoint is pre-quantized (config.json quantization_config)"
@@ -1028,8 +1039,9 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
                 "cuda (child exited rc=" + str(_probe.returncode) + "). On "
                 "unified-memory AMD systems this means the GPU memory pool is"
                 " exhausted by OTHER processes — close the model server(s)"
-                " holding it (Unsloth Studio / llama-server / Toaster Loop"
-                " serving) and retry. " + " | ".join(_diag)
+                " holding it (llama-server / llama.cpp / any third-party"
+                " training or inference app / Toaster Loop serving) and"
+                " retry. " + " | ".join(_diag)
                 + ((" | child: " + " ".join(_tail)) if _tail else ""))
 
     if _prequantized and not train_full:

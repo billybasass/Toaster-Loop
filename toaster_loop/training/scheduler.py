@@ -379,8 +379,14 @@ def resource_gate_ok(cfg: TrainingConfig,
 _GPU_JOB_KINDS = frozenset({"sft", "dpo", "grpo"})
 
 
-def job_vram_estimate_mib(job: JobRow) -> Optional[int]:
-    """Predicted footprint for one queued job; None when not predictable."""
+def job_vram_estimate_mib(job: JobRow,
+                          python: Optional[str] = None) -> Optional[int]:
+    """Predicted footprint for one queued job; None when not predictable.
+
+    ``python`` (training.python) is forwarded to the estimator so the ROCm
+    bitsandbytes capability probe runs in the interpreter that will actually
+    train — the daemon itself has no torch, and probing the wrong environment
+    silently downgrades every large-model estimate to bf16 pricing."""
     if job.kind not in _GPU_JOB_KINDS:
         return None
     try:
@@ -388,7 +394,8 @@ def job_vram_estimate_mib(job: JobRow) -> Optional[int]:
 
         params = job.params if isinstance(job.params, dict) else {}
         est = estimate_from_train_yaml(
-            params.get("train_yaml"), params.get("base_model") or None)
+            params.get("train_yaml"), params.get("base_model") or None,
+            python=python)
         return est.total_mib if est is not None else None
     except Exception:  # a broken/absent train.yaml must not block dispatch
         logger.debug("job VRAM estimate failed", exc_info=True)
@@ -437,13 +444,19 @@ def cron_line(cfg_home: Optional[str] = None) -> str:
     The panel used to suggest `cd ~ && toaster-loop train auto-check --trigger`,
     which silently fails (exit 127, "command not found") whenever toaster-loop is
     only installed in a venv — i.e. every source install. Anchor on this
-    interpreter's sibling script instead."""
+    interpreter's sibling script instead.
+
+    Paths are shlex-quoted: an install under a directory with spaces (e.g.
+    `/media/x/Toaster Loop/.venv/bin/toaster-loop`) otherwise splits at the
+    space in cron's shell and exits 127 exactly like the bare-name bug did."""
+    import shlex
+
     exe_dir = Path(sys.executable).parent
     cand = exe_dir / ("toaster-loop.exe" if os.name == "nt" else "toaster-loop")
     toaster_loop = str(cand) if cand.is_file() else (shutil.which("toaster-loop") or "toaster-loop")
     log = str(Path(cfg_home) if cfg_home else (Path.home() / ".toaster-loop"))
-    return (f"15 3 * * * {toaster_loop} train auto-check --trigger "
-            f">> {log}/auto_iterate.log 2>&1")
+    return (f"15 3 * * * {shlex.quote(toaster_loop)} train auto-check --trigger "
+            f">> {shlex.quote(log + '/auto_iterate.log')} 2>&1")
 
 
 def cron_trigger_status(cfg_home: Optional[str] = None) -> Dict[str, Any]:
@@ -813,8 +826,10 @@ class Scheduler:
             self._run_inprocess(job, slot, wait_gate)
             return
         # Predict this job's footprint once per dispatch attempt (config dims
-        # don't change while queued). None => static-floor behavior.
-        need = job_vram_estimate_mib(job)
+        # don't change while queued). None => static-floor behavior. The
+        # training interpreter rides along so the ROCm bitsandbytes probe runs
+        # where torch actually lives (see job_vram_estimate_mib).
+        need = job_vram_estimate_mib(job, python=self.cfg.python)
         if need is not None:
             logger.info("job %s predicted VRAM footprint: %d MiB",
                         job.job_id, need)
@@ -853,7 +868,7 @@ class Scheduler:
         ``pid`` records this process — the reaper skips INPROCESS kinds, so it
         is informational only.
         """
-        need = job_vram_estimate_mib(job)  # None for non-GPU kinds
+        need = job_vram_estimate_mib(job, python=self.cfg.python)  # None for non-GPU kinds
         if wait_gate:
             while True:
                 gate = resource_gate_ok(self.cfg, estimated_need_mib=need)

@@ -40,8 +40,17 @@ FLAVOR_DEFAULT = "default"
 CUDA_FLAVORS = ("cu132", "cu130", "cu126")
 
 #: ROCm wheel flavors published on download.pytorch.org (newest first).
-#: A machine with ROCm userland version X should get the newest flavor <= X.
+#: A machine with ROCm userland version X should get the newest flavor <= X —
+#: EXCEPT where a newer wheel is known to be the only one that works (see
+#: ROCM_MIN_FLAVOR_FOR_GFX): that floor wins over the userland match.
 ROCM_FLAVORS = ("7.2", "7.1", "7.0", "6.4", "6.3", "6.2", "6.1", "6.0", "5.7")
+
+#: gfx targets whose ONLY working wheels are newer than userland suggests.
+#: gfx1151 (Strix Halo): the +rocm7.1 wheels bundle an HSA/rocprofiler stack
+#: that SIGSEGVs at the first kernel launch on this APU (pytorch/pytorch
+#: #173125 — same crash our training jobs died with, rc=-11 no traceback);
+#: measured working here: +rocm7.2 wheels against Ubuntu's 7.1 userland.
+ROCM_MIN_FLAVOR_FOR_GFX = {"gfx1151": "7.2"}
 
 #: Linux CPU wheels come from the dedicated index (small, no CUDA bloat).
 LINUX_CPU_FLAVOR = "cpu"
@@ -138,18 +147,39 @@ def _run(cmd: List[str], timeout: float = 8.0) -> Optional[str]:
         return None
 
 
-def _rocm_flavor(version: str) -> str:
-    """Newest published ROCm wheel flavor <= the installed userland."""
+def _rocm_flavor(version: str, gfx: Optional[List[str]] = None) -> str:
+    """Newest published ROCm wheel flavor <= the installed userland.
+
+    ``gfx`` (detected GPU targets) can RAISE the pick above the userland
+    match: a target listed in ROCM_MIN_FLAVOR_FOR_GFX is known to crash on
+    the wheels its userland would select, so the floor wins when it exists
+    as a published flavor. Never lowers the choice."""
     def key(v: str) -> Tuple[int, ...]:
         return tuple(int(p) for p in re.findall(r"\d+", v)[:3]) or (0,)
     try:
         want = key(version)
     except ValueError:
         want = key("0.0")
+    for g in gfx or []:
+        floor = ROCM_MIN_FLAVOR_FOR_GFX.get(str(g).lower())
+        if floor and floor in ROCM_FLAVORS and key(floor) > want:
+            return f"rocm{floor}"
     for f in ROCM_FLAVORS:  # newest first
         if key(f) <= want:
             return f"rocm{f}"
     return f"rocm{ROCM_FLAVORS[-1]}"
+
+
+def _gfx_targets(gpus: Optional[List[Any]]) -> List[str]:
+    """gfxNNNN ids from detected GPU names (serving.runtime.GpuInfo fits;
+    rocminfo names like 'gfx1151' pass through unchanged)."""
+    out: List[str] = []
+    for g in gpus or []:
+        m = re.search(r"gfx[0-9a-fA-F]+(?:-[a-z0-9]+)*",
+                      str(getattr(g, "name", "") or ""))
+        if m:
+            out.append(m.group(0).lower())
+    return out
 
 
 def _detect_gpus() -> List[Any]:
@@ -237,8 +267,14 @@ def detect_flavor(system: Optional[str] = None,
         rocm_version = (rocm_userland_version() or ""
                         if rocm_version is None else rocm_version)
         if rocm_version:
-            f = _rocm_flavor(rocm_version)
+            gfx = _gfx_targets(gpus)
+            f = _rocm_flavor(rocm_version, gfx=gfx)
             notes.append(f"AMD GPU + ROCm userland {rocm_version}: {f} build")
+            if f != f"rocm{_rocm_flavor(rocm_version)}":
+                notes.append(
+                    f"  raised to {f}: {'/'.join(gfx)} crash on older wheels "
+                    "(known-bad bundled runtime); floor from "
+                    "ROCM_MIN_FLAVOR_FOR_GFX")
             return TorchFlavor(f, f"{PYTORCH_WHL_BASE}/{f}", notes)
         notes.append(
             "AMD GPU but no ROCm userland (/opt/rocm, hipcc): torch has no "

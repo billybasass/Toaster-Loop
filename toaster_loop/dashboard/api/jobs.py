@@ -562,8 +562,11 @@ rft/mine_goldens) and the train check/estimate endpoints.
         train_yaml = self.home / "datasets" / dataset_id / "train.yaml"
         base_override = str(q.get("base_model") or "").strip() or None
         tc = self._training_config()
+        # python= keeps the ROCm bitsandbytes probe pointed at the training
+        # interpreter (the daemon has no torch); see core/vram.py.
         est = estimate_from_train_yaml(
-            str(train_yaml), base_override or tc.base_model or None)
+            str(train_yaml), base_override or tc.base_model or None,
+            python=tc.python)
         free = gpu_free_mib()
         out: Dict[str, Any] = {
             "estimated": None, "free_mib": free,

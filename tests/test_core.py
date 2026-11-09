@@ -2432,7 +2432,9 @@ def test_estimate_from_train_yaml(tmp_path, monkeypatch):
     monkeypatch.setattr(vram_mod, "_cuda_available", lambda: True)
     # And pin the ROCm-no-bnb guard (this test runs on AMD boxes where
     # rocm-smi exists and would legitimately force bf16).
-    monkeypatch.setattr(vram_mod, "_bnb_unavailable_rocm", lambda: False)
+    # (python kwarg = the training interpreter the bnb probe should use; the
+    # fake ignores it but must accept it.)
+    monkeypatch.setattr(vram_mod, "_bnb_unavailable_rocm", lambda python=None: False)
     est = estimate_from_train_yaml(str(ydir / "train.yaml"), str(model_dir))
     assert est is not None and est.load_mode == "nf4"
     # lora r=32 two modules -> smaller trainable side than default 7x64.
@@ -2495,8 +2497,10 @@ def test_job_estimate_skips_non_gpu_kinds(monkeypatch):
     # kind on a predictable sft job flows through estimate_from_train_yaml:
     called = {}
 
-    def fake(path, base):
+    def fake(path, base, *, python=None):
+        # python kwarg = training interpreter forwarded for the ROCm bnb probe.
         called["args"] = (path, base)
+        called["python"] = python
         return type("E", (), {"total_mib": 4242})()
     monkeypatch.setattr("toaster_loop.core.vram.estimate_from_train_yaml", fake)
     assert job_vram_estimate_mib(_as_jobrow(
@@ -2549,6 +2553,147 @@ def test_amd_rocm_matches_userland(monkeypatch):
     f = detect_flavor(system="linux", gpus=[_g("amd")],
                       rocm_version="9.9")
     assert f.flavor == f"rocm{torchenv.ROCM_FLAVORS[0]}"
+
+
+# --------------------------------------------------------- bnb capability probe
+#
+# The blanket "any ROCm => no 4-bit" guard priced 27B QLoRA jobs as bf16 and
+# queue-blocked them forever on machines where nf4 works (the rocm7.2 fix).
+# core/bnbprobe.py replaced it with a child-process capability probe; these
+# pin the probe's decision + caching semantics without needing a GPU.
+
+def _bnb_probe_mod():
+    from toaster_loop.core import bnbprobe
+    return bnbprobe
+
+
+def test_bnbprobe_force_override(monkeypatch):
+    m = _bnb_probe_mod()
+    monkeypatch.setenv("TOASTER_LOOP_BNB_ROCM", "1")
+    assert m.force_override() is True
+    monkeypatch.setenv("TOASTER_LOOP_BNB_ROCM", "off")
+    assert m.force_override() is False
+    monkeypatch.delenv("TOASTER_LOOP_BNB_ROCM")
+    assert m.force_override() is None
+
+
+def test_bnbprobe_rocm_bnb_supported_uses_override(monkeypatch):
+    """Forced values short-circuit everything (no child spawn, no cache)."""
+    m = _bnb_probe_mod()
+    monkeypatch.setenv("TOASTER_LOOP_BNB_ROCM", "0")
+    assert m.rocm_bnb_supported() == (False, "forced by TOASTER_LOOP_BNB_ROCM")
+    monkeypatch.setenv("TOASTER_LOOP_BNB_ROCM", "true")
+    assert m.rocm_bnb_supported()[0] is True
+
+
+def test_bnbprobe_only_positive_verdicts_are_cached(tmp_path, monkeypatch):
+    """A transient failure must NOT poison the cache: negatives stay in-memory
+    only (so a retry re-probes), positives persist for the gate to read."""
+    m = _bnb_probe_mod()
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(tmp_path))
+    m._neg_memo.clear()
+
+    good = {"ok": True, "detail": "nf4 ok", "torch_version": "9.9+rocm7.2",
+            "userland": "7.1", "python": sys.executable}
+    bad = dict(good, ok=False, detail="GPU busy")
+
+    monkeypatch.setattr(m, "_installed_torch_version", lambda: "9.9+rocm7.2")
+    monkeypatch.setattr(m, "_userland_key", lambda: "7.1")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(bad), stderr="")
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    ok, why = m.rocm_bnb_supported()
+    assert ok is False and "busy" in why
+    assert not m.cache_path().exists(), "negative verdict must not be cached"
+
+    # Second call: memoized negative (no new child spawn within the TTL)...
+    ok2, _ = m.rocm_bnb_supported()
+    assert ok2 is False and len(calls) == 1
+    # ...but a fresh probe that SUCCEEDS still runs after memo expiry, and its
+    # verdict lands in the cache for the gate side.
+    m._neg_memo.clear()
+
+    def fake_run_ok(cmd, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(good), stderr="")
+    monkeypatch.setattr(m.subprocess, "run", fake_run_ok)
+    ok3, why3 = m.rocm_bnb_supported()
+    assert ok3 is True and len(calls) == 2
+    assert m.cache_path().is_file()
+
+    # Gate side (no torch visible): cache valid while the probed interpreter
+    # exists => nf4 pricing; after it vanishes => conservative bf16 again.
+    monkeypatch.setattr(m, "_installed_torch_version", lambda: "")
+    assert m.load_cached() is not None
+    assert m.gate_says_bnb_off(python=sys.executable) is False
+
+
+def test_bnbprobe_cache_goes_stale_on_stack_upgrade(tmp_path, monkeypatch):
+    """A ROCm userland bump invalidates a cached positive verdict."""
+    m = _bnb_probe_mod()
+    monkeypatch.setenv("TOASTER_LOOP_HOME", str(tmp_path))
+    rec = {"ok": True, "detail": "x", "torch_version": "", "userland": "7.1",
+           "python": sys.executable}
+    m.cache_path().parent.mkdir(parents=True, exist_ok=True)
+    m.cache_path().write_text(json.dumps(rec))
+    monkeypatch.setattr(m, "_installed_torch_version", lambda: "")
+    monkeypatch.setattr(m, "_userland_key", lambda: "7.1")
+    assert m.load_cached() is not None
+    monkeypatch.setattr(m, "_userland_key", lambda: "7.2")
+    assert m.load_cached() is None
+
+
+def test_vram_gate_prices_nf4_when_probe_ok(tmp_path, monkeypatch):
+    """End-to-end estimate: AMD box + probe OK => nf4 load mode and a total
+    that fits the 120 GiB-class unified pool for a ~27B model (the exact
+    queue-blocked scenario)."""
+    from toaster_loop.core import vram as vram_mod
+
+    m = _bnb_probe_mod()
+    model_dir = tmp_path / "m"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({
+        "hidden_size": 5120, "num_hidden_layers": 64, "num_attention_heads": 24,
+        "num_key_value_heads": 4, "intermediate_size": 17408,
+        "vocab_size": 248320, "head_dim": 256, "tie_word_embeddings": False}))
+    ydir = tmp_path / "ds"
+    ydir.mkdir()
+    (ydir / "train.yaml").write_text(yaml.safe_dump(
+        {"model": str(model_dir), "training": {"max_seq_length": 16384,
+                                               "batch_size": 2}}))
+
+    monkeypatch.setattr(vram_mod, "_cuda_available", lambda: True)
+    monkeypatch.setattr(m, "gate_says_bnb_off", lambda python=None: False)
+    est_nf4 = vram_mod.estimate_from_train_yaml(str(ydir / "train.yaml"))
+    assert est_nf4 is not None and est_nf4.load_mode == "nf4"
+
+    monkeypatch.setattr(m, "gate_says_bnb_off", lambda python=None: True)
+    est_bf16 = vram_mod.estimate_from_train_yaml(str(ydir / "train.yaml"))
+    assert est_bf16.load_mode == "bf16"
+    # The whole point of the fix: QLoRA pricing is dramatically cheaper, and
+    # at 27B scale it is what turns a permanent queue block into a dispatch.
+    assert est_nf4.total_mib < est_bf16.total_mib * 0.85
+
+
+def test_amd_gfx1151_floor_raises_flavor_above_userland(monkeypatch):
+    """gfx1151 (Strix Halo) SIGSEGVs on +rocm7.1 wheels' bundled runtime
+    (pytorch/pytorch#173125 — the rc=-11 training deaths). The floor table
+    must lift a 7.1 userland match to rocm7.2, and never lower anything."""
+    monkeypatch.delenv("TOASTER_LOOP_TORCH_FLAVOR", raising=False)
+    g = SimpleNamespace(vendor="amd", name="gfx1151")
+    f = detect_flavor(system="linux", gpus=[g], rocm_version="7.1")
+    assert f.flavor == "rocm7.2"
+    assert any("crash" in n for n in f.notes)
+    # A newer userland already at/above the floor: unchanged behavior.
+    f = detect_flavor(system="linux", gpus=[g], rocm_version="7.2")
+    assert f.flavor == "rocm7.2"
+    # Other gfx targets are untouched by the table.
+    other = SimpleNamespace(vendor="amd", name="gfx1100")
+    f = detect_flavor(system="linux", gpus=[other], rocm_version="7.1")
+    assert f.flavor == "rocm7.1"
 
 
 def test_amd_without_rocm_userland_is_cpu_with_note(monkeypatch):

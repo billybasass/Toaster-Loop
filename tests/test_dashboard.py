@@ -512,7 +512,9 @@ if a.log_path:
 def test_train_endpoint_queues_and_runs(app, home, tmp_path, monkeypatch):
     stub = tmp_path / "stub.py"
     stub.write_text(STUB)
-    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND", f"{sys.executable} {stub}")
+    import shlex as _shlex
+    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND",
+                         f"{_shlex.quote(sys.executable)} {_shlex.quote(str(stub))}")
 
     # need a dataset dir for the train.yaml path (worker ignores it here)
     ds = home / "datasets" / "ds-x"
@@ -997,7 +999,9 @@ def test_sse_events_endpoint_stream(app):
 def test_job_state_events_published(app, home, tmp_path, monkeypatch):
     stub = tmp_path / "stub.py"
     stub.write_text(STUB)
-    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND", f"{sys.executable} {stub}")
+    import shlex as _shlex
+    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND",
+                         f"{_shlex.quote(sys.executable)} {_shlex.quote(str(stub))}")
     ds = home / "datasets" / "ds-ev"
     ds.mkdir(parents=True)
     (ds / "train.yaml").write_text("model: base\ndata: {}\n")
@@ -1609,7 +1613,9 @@ def test_job_detail_and_log_endpoints(app, home):
 def test_iterate_run_record_lifecycle(app, home, tmp_path, monkeypatch):
     stub = tmp_path / "stub.py"
     stub.write_text(STUB)
-    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND", f"{sys.executable} {stub}")
+    import shlex as _shlex
+    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND",
+                         f"{_shlex.quote(sys.executable)} {_shlex.quote(str(stub))}")
     store = TraceStore(home / "buffer" / "toaster_loop.db")
     seed_trace(store, "t1")
     store.close()
@@ -1771,11 +1777,13 @@ def test_train_check_reports_cron_wiring(app, home):
     assert set(sched) >= {"installed", "line", "note"}
     # the suggested line must NOT rely on `toaster_loop` being on cron's PATH
     assert "train auto-check --trigger" in sched["line"]
-    command = sched["line"].split(" ", 5)[5].split(" ")[0]
+    import shlex as _shlex
+    command = _shlex.split(sched["line"])[5]
     assert command.startswith("/"), f"cron PATH is minimal; got {command!r}"
 
 
 def test_cron_line_uses_absolute_toaster_loop_path(tmp_path, monkeypatch):
+    import shlex as _shlex
     import sys
 
     from toaster_loop.training import scheduler as sch
@@ -1783,7 +1791,9 @@ def test_cron_line_uses_absolute_toaster_loop_path(tmp_path, monkeypatch):
     line = sch.cron_line(str(tmp_path))
     assert "train auto-check --trigger" in line
     assert str(tmp_path) in line  # log path follows TOASTER_LOOP_HOME
-    command = line.split(" ", 5)[5].split(" ")[0]
+    # shlex.split, not naive split(" "): paths are quoted so an install under a
+    # directory with spaces survives cron's shell (the space-path bug).
+    command = _shlex.split(line)[5]
     # cron runs with a minimal PATH: a bare `toaster-loop` would exit 127 silently.
     # The absolute sibling of the running interpreter is always used when it
     # exists, which is the case for any venv/source install.
@@ -1793,7 +1803,7 @@ def test_cron_line_uses_absolute_toaster_loop_path(tmp_path, monkeypatch):
     # no sibling script (e.g. module-only install) => PATH fallback, documented
     monkeypatch.setattr(sch.Path, "is_file", lambda self: False)
     monkeypatch.setattr(sch.shutil, "which", lambda n: None)
-    assert sch.cron_line(str(tmp_path)).split(" ", 5)[5].startswith("toaster-loop ")
+    assert _shlex.split(sch.cron_line(str(tmp_path)))[5] == "toaster-loop"
 
 
 # --- regression: the default index must never swallow TOASTER_LOOP_HOME ----------

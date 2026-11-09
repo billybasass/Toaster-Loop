@@ -1590,7 +1590,9 @@ emit("done")
 def test_two_rapid_submits_both_execute(home__test_dispatcher, monkeypatch, stub, _reset_slot_bookkeeping):
     """(a) POST /api/train twice fast with two slots: both jobs execute,
     neither strands in `queued`."""
-    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND", f"{sys.executable} {stub}")
+    import shlex as _shlex
+    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND",
+                         f"{_shlex.quote(sys.executable)} {_shlex.quote(str(stub))}")
     app = DashboardApp(ToasterLoopConfig(training={"max_parallel_jobs": 2}),
                        home=home__test_dispatcher)
     for ds in ("ds-a", "ds-b"):
@@ -1643,7 +1645,9 @@ def test_phantom_running_row_reaped_at_startup(home__test_dispatcher, registry, 
 def test_phantom_row_no_longer_returns_409(home__test_dispatcher, registry, monkeypatch, stub, _reset_slot_bookkeeping):
     """(b) With the phantom reaped by the submit-path pre-check, POST /api/train
     is accepted instead of 409 already_running forever."""
-    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND", f"{sys.executable} {stub}")
+    import shlex as _shlex
+    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND",
+                         f"{_shlex.quote(sys.executable)} {_shlex.quote(str(stub))}")
     j = registry.enqueue_job("sft")
     registry.mark_running(j.job_id, pid=999_999)
 
@@ -2964,7 +2968,9 @@ def test_auto_check_trigger_only_when_gate_ok(monkeypatch, home__test_profiles_s
         "training:\n  auto_min_traces: 2\n  auto_min_score: 0.5\n")
     stub = tmp_path / "stub_worker.py"
     stub.write_text(STUB_WORKER__test_profiles_schedule)
-    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND", f"{sys.executable} {stub}")
+    import shlex as _shlex
+    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND",
+                         f"{_shlex.quote(sys.executable)} {_shlex.quote(str(stub))}")
 
     # 1) not enough traces -> no trigger, exit 0 with --trigger, no jobs
     rc = _run_auto_check(monkeypatch, home__test_profiles_schedule, trigger=True, dry_run=True)

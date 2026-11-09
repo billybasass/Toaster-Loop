@@ -18,7 +18,13 @@ SRC = Path(__file__).resolve().parents[1] / "toaster_loop"
 # Third-party packages the toaster_loop source may import at all. Everything else
 # (outside stdlib) is an offender. Stdlib is derived from the running
 # interpreter; keep this list in sync with pyproject.toml dependencies.
-ALLOWED_THIRD_PARTY = {"yaml", "httpx", "PIL"}
+#
+# pyarrow is listed deliberately and is NOT a core runtime dep: it backs the
+# curate hub importer's parquet reader (curate/sources.py), imported lazily
+# inside the function with an honest "pip install pyarrow" degradation when
+# absent — text/JSONL curation never touches it. (Apache-2.0, same family as
+# the rest of the allowed ecosystem.)
+ALLOWED_THIRD_PARTY = {"yaml", "httpx", "PIL", "pyarrow"}
 
 # GPU/training stack: function-level imports allowed ONLY in worker.py and
 # the streamed training-backend package (WP10 step 2 wired the spike into

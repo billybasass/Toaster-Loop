@@ -159,6 +159,34 @@ def check_deps(find_spec: Callable[[str], Any] = importlib.util.find_spec
                                    "--index-url hint above"])
         except Exception as e:  # never let the probe break the doctor
             lines.append(f"torch flavor check skipped: {e}")
+    if find_spec("bitsandbytes") is not None:
+        # bitsandbytes is an optional loader (not in `extras`/`have`) — gate on
+        # its own presence so the probe line actually renders when installed.
+        # ROCm nf4 capability verdict (core/bnbprobe.py). Read-only here: the
+        # scheduler probes live while estimating, so normal operation keeps
+        # this fresh; a stale/absent line is informational, never a failure.
+        try:
+            from .core.bnbprobe import force_override, load_cached
+
+            forced = force_override()
+            if forced is not None:
+                lines.append(f"bitsandbytes nf4 on ROCm: FORCED {forced} by "
+                             "TOASTER_LOOP_BNB_ROCM")
+            else:
+                cached = load_cached()
+                if cached is None:
+                    lines.append("bitsandbytes nf4 probe: not run yet "
+                                 "(first training job probes it in a child)")
+                elif cached.get("ok"):
+                    lines.append(f"bitsandbytes nf4 probe: OK on "
+                                 f"{cached.get('device', 'this GPU')} "
+                                 f"(torch {cached.get('torch_version', '?')})")
+                else:  # negatives are not cached; belt-and-braces branch
+                    lines.append("bitsandbytes nf4 probe: last verdict FAILED "
+                                 "(large models price as bf16 until a probe "
+                                 "succeeds)")
+        except Exception as e:  # noqa: BLE001 - reporting only
+            lines.append(f"bitsandbytes probe status skipped: {e}")
     if missing:
         return CheckResult("deps", "problem", lines,
                            next_commands=["run: pip install -e ."])

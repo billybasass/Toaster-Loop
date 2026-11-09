@@ -333,11 +333,19 @@ def estimate_train_vram_mib(
 def estimate_from_train_yaml(
     train_yaml_path: Optional[str],
     base_model_override: Optional[str] = None,
+    *,
+    python: Optional[str] = None,
 ) -> Optional[VramEstimate]:
     """End-to-end helper: resolved train.yaml (+ base model) -> estimate.
 
     Returns None when the base model's dims cannot be determined locally —
     callers treat that as "skip the VRAM prediction", never as zero.
+
+    ``python`` is the interpreter training will actually run under
+    (training.python). On ROCm boxes it selects which environment the
+    bitsandbytes capability probe runs in — get this wrong (a torch-less
+    daemon) and the estimate conservatively prices bf16-only, which is
+    precisely what queue-blocked working QLoRA jobs before.
     """
     import yaml  # stdlib-adjacent: already a hard dependency of toaster_loop
 
@@ -381,12 +389,15 @@ def estimate_from_train_yaml(
     if load_in_4bit and _is_prequantized(model):
         load_in_4bit = False
         tier_reason += "; pre-quantized ckpt loads dequantized bf16"
-    # ROCm: the PyPI bitsandbytes has no kernels for recent AMD GPUs (it
-    # SIGSEGVs — the rc=-11 incident), so the worker falls back to bf16
-    # there. The gate must price the SAME load, not the nf4 that never runs.
-    if load_in_4bit and _bnb_unavailable_rocm():
+    # ROCm: runtime nf4 is only safe where bitsandbytes actually works on
+    # this GPU+wheel combination — decided by the child-process probe in
+    # core/bnbprobe.py, not by a blanket "any AMD is bf16-only" guess. The
+    # gate must price the SAME load the worker will perform (the old
+    # blanket guard priced 27B jobs at bf16 and queue-blocked them forever
+    # on machines where QLoRA fits).
+    if load_in_4bit and _bnb_unavailable_rocm(python):
         load_in_4bit = False
-        tier_reason += "; ROCm without ROCm-built bitsandbytes -> bf16 base"
+        tier_reason += "; ROCm bitsandbytes nf4 probe unavailable/failed -> bf16 base"
     est = estimate_train_vram_mib(
         dims,
         lora_r=int(lora.get("lora_r", 64)),
@@ -420,20 +431,32 @@ def _is_prequantized(model_path: str) -> bool:
         return False
 
 
-def _bnb_unavailable_rocm() -> bool:
-    """Mirror the worker's ROCm bitsandbytes guard on the gate side.
+def _bnb_unavailable_rocm(python: Optional[str] = None) -> bool:
+    """Mirror the worker's ROCm bitsandbytes *probe* on the gate side.
 
-    The worker skips runtime nf4 when torch is a ROCm build unless
-    TOASTER_LOOP_BNB_ROCM forces it. Without importing torch here, an AMD
-    machine is identified by rocm-smi present and nvidia-smi absent (a true
-    hybrid would set the env override on both sides)."""
-    import os as _os
+    Historically this returned True for any AMD box (pre-7.2 ROCm torch
+    wheels SIGSEGV'd under bitsandbytes), which priced every large-model
+    job as bf16 and queue-blocked QLoRA runs that now work. The real fix is
+    to ask the hardware: core/bnbprobe.py exercises nf4 quantize+forward+
+    backward in a throwaway child and caches positive verdicts, so the gate
+    prices what the worker will actually load.
+
+    ``python`` must be the interpreter training runs under (training.python);
+    the probe needs torch, which the daemon itself deliberately lacks. Without
+    it the probe fails environmentally and we stay conservative (bf16 pricing)
+    — the old behavior, never a false admission. An AMD box is identified by
+    rocm-smi present and nvidia-smi absent (a true hybrid sets
+    TOASTER_LOOP_BNB_ROCM to decide explicitly)."""
     import shutil
 
-    if str(_os.environ.get("TOASTER_LOOP_BNB_ROCM", "")).strip().lower() \
-            in ("1", "true", "yes", "on"):
+    if not (shutil.which("rocm-smi") and not shutil.which("nvidia-smi")):
         return False
-    return bool(shutil.which("rocm-smi")) and not shutil.which("nvidia-smi")
+    try:
+        from .bnbprobe import gate_says_bnb_off
+
+        return gate_says_bnb_off(python)
+    except Exception:  # noqa: BLE001 - probe machinery absent => stay safe
+        return True
 
 
 # --------------------------------------------------------- 4-bit tier policy
