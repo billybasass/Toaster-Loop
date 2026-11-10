@@ -2488,9 +2488,10 @@ def test_estimate_lora_reserve_grows_with_rank_and_seq():
 
 
 def test_estimate_ce_logits_term_long_context():
-    """Deep-dive finding #13: the fp32 CE logits [b,s,vocab] peak is charged.
-    This is the term that made long-context runs OOM despite a 'safe' old
-    estimate — gradient checkpointing cannot shrink it (the head runs once)."""
+    """Deep-dive finding #13: the CE logits [b,s,vocab] peak is charged
+    (bf16-priced, matching the measured peak). This is the term that made
+    long-context runs OOM despite a 'safe' old estimate — gradient
+    checkpointing cannot shrink it (the head runs once)."""
     big = ModelDims(hidden_size=4096, num_hidden_layers=32,
                     num_attention_heads=32, num_key_value_heads=8,
                     intermediate_size=11008, vocab_size=152064, head_dim=128,

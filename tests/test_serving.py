@@ -4307,13 +4307,13 @@ def test_training_config_warns_on_unknown_keys(caplog):
 
 # ------------------------------------------------------ worker timeout (gap #4)
 
-def test_worker_timeout_default_is_finite():
-    """The default must NOT be 0: a hung torch worker would hold its device
-    slot flock forever. 4 h is the documented sane cap; 0 stays as an opt-in
-    escape hatch."""
-    assert TrainingConfig().worker_timeout_s == 14400.0
+def test_worker_timeout_default_is_disabled():
+    """The default is 0 = NO timeout: multi-hour LoRA runs legitimately
+    exceed any fixed cap and jobs 38/39 were SIGTERM'd mid-training by the
+    old 4 h default. A positive value in YAML still arms the timeout path."""
+    assert TrainingConfig().worker_timeout_s == 0
     assert TrainingConfig.from_yaml(
-        {"training": {"worker_timeout_s": 0}}).worker_timeout_s == 0
+        {"training": {"worker_timeout_s": 7200}}).worker_timeout_s == 7200
 
 
 def test_worker_timeout_kills_hung_worker_and_releases_slot(registry__test_scheduler, stub,

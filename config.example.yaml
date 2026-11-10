@@ -414,10 +414,11 @@ training:
   # nvidia-smi / rocm-smi / battery info is unavailable):
   min_free_vram_mib: 0       # 0 disables the VRAM gate; e.g. 12288 for 12 GiB
   require_ac_power: false    # refuse to train on battery (laptops)
-  worker_timeout_s: 14400    # hard cap per worker (default 4 h): SIGTERM after
-                             # N s, 10 s grace, then SIGKILL — a hung worker
-                             # would otherwise hold its device slot forever.
-                             # Explicit 0 = no timeout (escape hatch).
+  worker_timeout_s: 0        # hard cap per worker; default 0 = NO timeout
+                             # (long LoRA runs legitimately exceed any fixed
+                             # cap and were killed mid-training). Set a
+                             # positive N to arm it: SIGTERM after N s, 10 s
+                             # grace, then SIGKILL.
   gguf_quant: q4_k_m         # export quantization (GGUF path)
   # Export format: gguf (default; llama.cpp convert+quantize) | awq | gptq.
   # awq/gptq produce a quantized HF dir (needs optional autoawq / auto-gptq

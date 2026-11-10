@@ -114,13 +114,14 @@ class TrainingConfig:
     min_free_vram_mib: int = 0                # 0 => gate disabled
     require_ac_power: bool = False            # best-effort when battery present
     poll_interval_s: float = 1.0
-    # Hard cap on one worker subprocess; a hung torch worker would otherwise
-    # hold its device-slot flock forever (nothing else reaps live pids —
-    # reap_stale only catches dead ones). Default 4 h comfortably exceeds the
-    # longest documented LoRA runs while still bounding a wedge. The timeout
-    # path SIGTERMs, waits a 10 s grace, then SIGKILLs (see _spawn_worker).
-    # Explicit 0 keeps the escape hatch: no timeout.
-    worker_timeout_s: float = 14400.0
+    # Hard cap on one worker subprocess. Default 0 = NO timeout: long LoRA
+    # runs (multi-hour, e.g. a 27B at 16k context) legitimately exceed any
+    # fixed cap and were being SIGTERM'd mid-training (jobs 38/39 died at
+    # step 430/444 with the run healthy). A hung worker is still bounded by
+    # reap_stale once its pid dies, and an operator can re-arm a cap by
+    # setting a positive value: the timeout path SIGTERMs, waits a 10 s
+    # grace, then SIGKILLs (see _spawn_worker).
+    worker_timeout_s: float = 0.0
     # Multi-GPU: >1 runs that many training jobs concurrently, one per device
     # slot (CUDA/HIP_VISIBLE_DEVICES). Keep 1 on unified-memory single-GPU
     # boxes. gpu_ids pins the slot -> physical device mapping (e.g. [0,1]).

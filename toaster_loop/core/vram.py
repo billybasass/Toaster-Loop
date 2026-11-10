@@ -82,19 +82,28 @@ ACT_MIN_BYTES_PER_ELEM = 2    # bf16 activations
 
 # Deep-dive finding #13 (long-sequence underprediction): two terms the
 # Eymard decomposition above omits, both dominant at long context —
-#   * CE_LOGITS_BYTES: HF's loss step materializes the FULL fp32 logits
-#     [b, s, vocab] before cross_entropy. For a 250k-vocab model at 16k x 2
-#     that is ~30 GiB charged by NOTHING else in the old formula — exactly
-#     the OOM that fused/chunked CE kernels (the third-party ones surveyed in
-#     the training deep-dive, and our own streamed chunked_ce) exist to
-#     eliminate. Gradient checkpointing does NOT help: the head runs once.
+#   * CE_LOGITS_BYTES: the loss step materializes the FULL logits
+#     [b, s, vocab] before cross_entropy. HF can upcast to fp32, but the
+#     measured peak on this stack (bf16 logits; chunked CE in the streamed
+#     backend never materializes [N, V] at all) prices at bf16 — 2 B/elem.
+#     The old fp32 4.0 alone overcharged a 250k-vocab model at 16k x 2 by
+#     ~15 GiB (jobs 38/39 estimated ~103 GiB vs ~35 GiB observed). Gradient
+#     checkpointing does NOT shrink this term: the head runs once.
 #   * ACT_LORA_RESERVE_TERMS: per targeted module, the adapter's [b, s, r]
 #     A-output is saved for backward (the training-reserve heuristic from the
 #     deep-dive survey: seq x batch x rank). Linear in r: high-rank long-
 #     context runs used to predict the same activations as r=8 ones. Under GC
 #     only one block's worth is live.
-CE_LOGITS_BYTES = 4.0         # fp32 upcast logits during CE
+CE_LOGITS_BYTES = 2.0         # bf16 logits during CE (measured peak)
 ACT_LORA_RESERVE_TERMS = 1.0  # adapter A-output elements per (b*s*r, module)
+
+# Realistic sequence occupancy: every activation term above is priced at
+# FULL max_seq_length, but with packing disabled real batches are padded only
+# to the longest sample in the batch — typically well under the cap (the
+# 16k-context Qwen runs measured ~35 GiB against an 82 GiB activations
+# component). Scale all per-token activation bytes by this factor so the
+# estimate tracks observed peaks instead of a worst-case full-occupancy pad.
+ACT_SEQ_FILL_FACTOR = 0.5
 
 
 @dataclass
@@ -309,12 +318,15 @@ def estimate_train_vram_mib(
         act_elems += b * s * int(lora_r) * n_targets * reserve_layers \
             * ACT_LORA_RESERVE_TERMS
 
-    # Cross-entropy logits peak (finding #13): [b, s, vocab] fp32. This is
-    # the term that made long-context runs OOM despite a "safe" estimate —
+    # Cross-entropy logits peak (finding #13): [b, s, vocab]. This is the
+    # term that made long-context runs OOM despite a "safe" estimate —
     # gradient checkpointing cannot shrink it (the head computes once).
     ce_elems = b * s * dims.vocab_size
+    # Realistic occupancy: price all per-token activation bytes at typical
+    # batch fill, not full max_seq_length padding (see ACT_SEQ_FILL_FACTOR).
     activations_mib = int((act_elems * ACT_MIN_BYTES_PER_ELEM
-                           + ce_elems * CE_LOGITS_BYTES) / MIB)
+                           + ce_elems * CE_LOGITS_BYTES)
+                          * ACT_SEQ_FILL_FACTOR / MIB)
 
     # --- overhead -------------------------------------------------------------
     overhead_mib = int(CONTEXT_OVERHEAD_MIB
