@@ -303,6 +303,115 @@ def test_cli_bad_override_fails_fast(env_and_cli):
     assert cli_mod.cmd_train_start(args) == 2
 
 
+def test_models_adopt_registers_existing_adapter(env_and_cli):
+    """`models adopt` recovers an adapter trained before auto-registration
+    (the 'sable' gap): registry row + display name, no export requested."""
+    home, _ = env_and_cli
+    from toaster_loop.cli import build_parser
+    import toaster_loop.cli as cli_mod
+    from toaster_loop.registry import ModelRegistry
+
+    adapter = home / "datasets" / "ds-old" / "outputs" / "adapter"
+    adapter.mkdir(parents=True)
+    (adapter / "adapter_model.safetensors").write_bytes(b"x")
+
+    args = build_parser().parse_args([
+        "models", "adopt", str(adapter),
+        "--config", str(home / "config.yaml"),
+        "--dataset", "ds-old", "--name", "sable", "--no-export",
+    ])
+    assert cli_mod.cmd_models_adopt(args) == 0
+
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
+    try:
+        models = reg.list_models()
+        assert len(models) == 1
+        assert models[0].display_name == "sable"
+        assert models[0].adapter_dir and Path(models[0].adapter_dir).is_dir()
+        assert models[0].base_model == "Base/HF-Model"  # from config
+    finally:
+        reg.close()
+
+
+def test_models_adopt_rejects_missing_dir(env_and_cli):
+    home, _ = env_and_cli
+    from toaster_loop.cli import build_parser
+    import toaster_loop.cli as cli_mod
+
+    args = build_parser().parse_args([
+        "models", "adopt", str(home / "nope"),
+        "--config", str(home / "config.yaml"),
+    ])
+    assert cli_mod.cmd_models_adopt(args) == 1
+
+
+def test_cli_train_start_registers_model(env_and_cli):
+    """A completed `train start` (real worker contract via stub) registers the
+    adapter as a model row — parity with the dashboard path."""
+    home, _ = env_and_cli
+    from toaster_loop.cli import build_parser
+    import toaster_loop.cli as cli_mod
+    from toaster_loop.registry import ModelRegistry
+
+    stub = tmp_stub = home / "stub_done.py"
+    tmp_stub.write_text(
+        "import argparse, json, sys\n"
+        "from pathlib import Path\n"
+        "ap = argparse.ArgumentParser()\n"
+        "for f in ('--job','--kind','--config','--dataset-dir',"
+        "'--base-model','--log-path','--adapter-dir','--gguf-out'):\n"
+        "    ap.add_argument(f, default=None)\n"
+        "ap.add_argument('--quant', default='q4_k_m')\n"
+        "ap.add_argument('--dry-run', action='store_true')\n"
+        "a = ap.parse_args()\n"
+        "def emit(**kw):\n"
+        "    line = json.dumps(kw)\n"
+        "    print(line, flush=True)\n"
+        "    if a.log_path:\n"
+        "        Path(a.log_path).parent.mkdir(parents=True, exist_ok=True)\n"
+        "        open(a.log_path, 'a').write(line + '\\n')\n"
+        "import yaml\n"
+        "cfg = {}\n"
+        "try:\n"
+        "    cfg = yaml.safe_load(open(a.config)) if a.config else {}\n"
+        "except Exception:\n"
+        "    cfg = {}\n"
+        "out_dir = Path((cfg.get('training') or {}).get('output_dir')"
+        " or 'outputs').expanduser()\n"
+        "adapter = out_dir / 'adapter'\n"
+        "adapter.mkdir(parents=True, exist_ok=True)\n"
+        "emit(event='sft_done', adapter_dir=str(adapter), train_loss=1.0)\n"
+    )
+    (home / "config.yaml").write_text(yaml.safe_dump({
+        "home": str(home),
+        "training": {"base_model": "Base/HF-Model",
+                     "worker_command": [sys.executable, str(stub)]},
+    }))
+
+    ds_dir = home / "datasets" / "ds-cli-reg"
+    ds_dir.mkdir(parents=True)
+    (ds_dir / "train.yaml").write_text(yaml.safe_dump({
+        "model": "Base/HF-Model",
+        "training": {"num_epochs": 1,
+                     "output_dir": str(ds_dir / "outputs")}}))
+
+    args = build_parser().parse_args([
+        "train", "start",
+        "--config", str(home / "config.yaml"),
+        "--dataset", "ds-cli-reg", "--name", "sable2",
+    ])
+    assert cli_mod.cmd_train_start(args) == 0
+
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
+    try:
+        models = reg.list_models()
+        assert len(models) == 1
+        assert models[0].display_name == "sable2"
+        assert models[0].adapter_dir and Path(models[0].adapter_dir).is_dir()
+    finally:
+        reg.close()
+
+
 @pytest.fixture()
 def env_and_cli(tmp_path, monkeypatch):
     """Home + stub worker command wired via env (dry-run never spawns)."""

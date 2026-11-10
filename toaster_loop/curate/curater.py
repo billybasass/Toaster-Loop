@@ -67,7 +67,41 @@ from .sharegpt import final_assistant_text, messages_to_sharegpt
 logger = logging.getLogger("toaster_loop.curate")
 
 DATASET_SCHEMA_VERSION = 1
-TRAIN_YAML_TEMPLATE_VERSION = 1
+# v2: default training output_dir moved from <dataset>/outputs to a local
+# repo-style folder inside the HF hub cache (see adapter_output_dir).
+TRAIN_YAML_TEMPLATE_VERSION = 2
+
+
+def adapter_output_dir(dataset_id: str) -> Optional[str]:
+    """Default adapter output for a dataset: a *local* folder inside the
+    Hugging Face hub cache, in hub layout so standard tooling sees it as a
+    repo directory:
+
+        <hub>/models--toaster-loop--<dataset-id>/snapshots/<UTC-stamp>/
+
+    The hub root is resolved like everything else (core/model_discovery:
+    TOASTER_LOOP_MODELS_DIR > $HF_HOME/hub > ~/.cache/huggingface/hub). When
+    no hub cache exists (or the path can't be built) returns None and callers
+    keep the legacy <dataset>/outputs default — training never breaks because
+    of a cache location. Datasets stay self-contained (train.yaml + jsonl);
+    only the bulky adapter/checkpoints move out to the model cache where the
+    big files belong.
+    """
+    import re
+
+    from ..core.model_discovery import resolve_models_dir
+
+    base = resolve_models_dir()
+    if base is None:
+        return None
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", str(dataset_id or "").strip())
+    slug = slug.strip("-._") or "dataset"
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    try:
+        return str(base / f"models--toaster-loop--{slug}"
+                   / "snapshots" / stamp)
+    except (OSError, ValueError):
+        return None
 
 
 # Idea adapted from PIASystem (MIT) app/core/failure_taxonomy.py — the
@@ -454,7 +488,12 @@ def render_train_yaml(dataset_dir: Path, cfg: CurationConfig,
             # load_in_4bit is AUTO-TIRED by model size (worker/core.vram:
             # >=3B params -> nf4 QLoRA base, smaller -> bf16). Pin it here
             # only to force a specific choice.
-            "output_dir": cfg.output_dir or str(dataset_dir / "outputs"),
+            # Template v2: adapters default into the HF hub cache (local
+            # models--toaster-loop--<id> repo folder) instead of living under
+            # the dataset dir; explicit curation.output_dir still wins, and an
+            # unavailable hub falls back to <dataset>/outputs unchanged.
+            "output_dir": (cfg.output_dir or adapter_output_dir(dataset_id)
+                           or str(dataset_dir / "outputs")),
             "num_epochs": 3,
             "learning_rate": 2e-4,
             "batch_size": 2,

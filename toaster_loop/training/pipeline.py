@@ -299,6 +299,219 @@ def parse_worker_rank_history(log_path: Optional[str]) -> List[Dict[str, Any]]:
     return []
 
 
+def parse_worker_adapter_dir(log_path: Optional[str]) -> Optional[str]:
+    """Extract the adapter_dir a finished train job reported (#train-visibility).
+
+    The worker's terminal event carries it ({"event":"sft_done"|"dpo_done"|
+    "grpo_done", "adapter_dir":...}). Last occurrence wins; absent/garbage
+    returns None (stub workers, crashed runs)."""
+    if not log_path:
+        return None
+    try:
+        lines = Path(log_path).read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    out: Optional[str] = None
+    for line in lines:
+        if ('"sft_done"' not in line and '"dpo_done"' not in line
+                and '"grpo_done"' not in line):
+            continue
+        try:
+            rec = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        ad = rec.get("adapter_dir")
+        if isinstance(ad, str) and ad.strip():
+            out = ad.strip()
+    return out
+
+
+def artifact_slug(display_name: Optional[str], model_id: str) -> str:
+    """Artifact-directory / GGUF-filename slug for a model row.
+
+    A user-chosen name makes train_runs/<...> and the GGUF readable
+    ("<name>-v3-q4_k_m.gguf"); the model_id suffix keeps them unique across
+    runs even when names repeat. Unnamed runs are byte-identical to before."""
+    import re as _re
+
+    name_slug = _re.sub(r"[^A-Za-z0-9._-]+", "-",
+                        str(display_name or "").strip()).strip("-._")[:48]
+    return f"{name_slug}-{model_id}" if name_slug else model_id
+
+
+def finalize_standalone_train(
+    *,
+    home: Path,
+    registry: Any,
+    scheduler: Any,
+    dataset_id: str,
+    log_path: Optional[str],
+    base_model: str = "",
+    display_name: Optional[str] = None,
+    quant: Optional[str] = None,
+    actor: str = "dashboard",
+    submit_export: bool = True,
+    adapter_dir: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Turn a finished standalone train job into a registry model (+ GGUF).
+
+    The Train page and `train start` run bare sft/dpo/grpo jobs without the
+    iterate pipeline, so historically nothing created the registry row: the
+    adapter existed on disk but was invisible in Models, un-servable and with
+    no lineage. This is the missing bookkeeping half of those paths, mirroring
+    what run_iterate does after its train stage:
+
+      1. locate the worker's adapter dir (its terminal *_done event),
+      2. register a candidate model row (display_name honored),
+      3. mirror artifacts + losses + provenance onto the row,
+      4. optionally queue AND run the GGUF export job so the model becomes
+         servable; an export failure never loses the adapter or the row.
+
+    Never raises for expected problems — they come back in the result dict
+    ({ok, model_id, gguf_path, note}) so callers print an honest summary.
+    """
+    from ..core.provenance import parse_worker_provenance
+    from .integrity import find_nan_losses
+
+    home = Path(home)
+    out: Dict[str, Any] = {"ok": False, "model_id": None, "gguf_path": None,
+                           "note": None}
+
+    if not adapter_dir:
+        adapter_dir = parse_worker_adapter_dir(log_path)
+    if not adapter_dir or not Path(adapter_dir).is_dir():
+        # Worker contract violated (stub workers do this on purpose): nothing
+        # to register. Not an error for the caller — just nothing to show.
+        out["note"] = "worker reported no adapter dir; model not registered"
+        return out
+
+    # Idempotency guard: a row already tracking this exact adapter means the
+    # bookkeeping ran before (e.g. CLI finalize + dashboard dispatcher both
+    # observed one job) — report it instead of registering a duplicate.
+    try:
+        for existing in registry.list_models():
+            if (existing.adapter_dir
+                    and str(existing.adapter_dir) == str(adapter_dir)):
+                out["ok"] = True
+                out["model_id"] = existing.model_id
+                out["gguf_path"] = existing.gguf_path
+                out["note"] = (f"{existing.model_id} already tracks this "
+                               "adapter; nothing to do")
+                return out
+    except Exception:  # tolerant: a broken scan must not block registration
+        pass
+
+    losses = parse_worker_losses(log_path)
+    nan = find_nan_losses(losses)
+    if nan:
+        out["note"] = ("corrupt training result (NaN in loss history: "
+                       + ", ".join(nan) + "); model not registered")
+        return out
+
+    dataset_dir = home / "datasets" / str(dataset_id or "")
+    manifest_hash = None
+    mf = dataset_dir / "manifest.json"
+    if mf.is_file():
+        import hashlib
+
+        manifest_hash = hashlib.sha256(mf.read_bytes()).hexdigest()[:16]
+
+    # Resolve the base model the same precedence run_iterate uses, so adopted
+    # rows stay comparable across paths.
+    base = str(base_model or "").strip()
+    if not base and mf.is_file():
+        try:
+            base = str(json.loads(mf.read_text()).get("base_model") or "")
+        except (OSError, json.JSONDecodeError):
+            base = ""
+    if not base:
+        base = "unspecified-base"
+
+    model = registry.register_model(
+        actor=actor,
+        base_model=base,
+        dataset_id=str(dataset_id) or None,
+        manifest_hash=manifest_hash,
+        quant=quant,
+        display_name=display_name,
+    )
+    out["model_id"] = model.model_id
+    registry.set_artifacts(model.model_id, adapter_dir=str(adapter_dir))
+    if losses["train_loss"] is not None or losses["eval_loss"] is not None:
+        registry.set_losses(model.model_id, train_loss=losses["train_loss"],
+                            eval_loss=losses["eval_loss"], actor=actor)
+    prov_ev = parse_worker_provenance(log_path)
+    rank_history = parse_worker_rank_history(log_path)
+    backend_ev = parse_worker_backend(log_path)
+    if prov_ev or rank_history or backend_ev:
+        registry.set_provenance(model.model_id, {
+            "version": 1,
+            "resource": (prov_ev or {}).get("resource") or "base_model",
+            "source": (prov_ev or {}).get("source"),
+            "load_mode": (prov_ev or {}).get("load_mode"),
+            "requested_4bit": (prov_ev or {}).get("requested_4bit"),
+            "dataset_files": _dataset_file_inventory(dataset_dir),
+            **({"rank_history": rank_history} if rank_history else {}),
+            **backend_ev,
+        })
+
+    if not submit_export:
+        out["ok"] = True
+        out["note"] = f"registered {model.model_id} (adapter only, no export)"
+        return out
+
+    # ---- GGUF export so the row is servable ---------------------------------
+    slug = artifact_slug(display_name, model.model_id)
+    quant_eff = quant or "q4_k_m"
+    gguf_dir = home / "models" / "gguf"
+    gguf_dir.mkdir(parents=True, exist_ok=True)
+    gguf_out = gguf_dir / f"{slug}-{quant_eff}.gguf"
+    train_run = home / "train_runs"
+    export_yaml, _ = _resolved_train_yaml(
+        dataset_dir, train_run / slug, str(base_model or ""),
+        filename="export.resolved.yaml")
+    try:
+        export_job = scheduler.submit(
+            "export",
+            dataset_id=str(dataset_id) or None,
+            model_id=model.model_id,
+            log_dir=train_run,
+            params={
+                "train_yaml": str(export_yaml),
+                "adapter_dir": str(adapter_dir),
+                "gguf_out": str(gguf_out),
+                "quant": quant_eff,
+                "base_model": str(base_model or ""),
+            },
+        )
+    except Exception as e:  # registry row + adapter already exist — be honest
+        out["ok"] = True
+        out["note"] = (f"registered {model.model_id}; export could not be "
+                       f"queued: {e}")
+        return out
+    try:
+        finished = scheduler.run_job(export_job)
+        state = finished.state
+    except Exception as e:
+        # Gate busy / slot refusal: the job stays queued and the dispatcher
+        # (or a later drain) runs it — GGUF appears when capacity frees.
+        out["ok"] = True
+        out["note"] = (f"registered {model.model_id}; export job "
+                       f"{export_job.job_id} stays queued ({e})")
+        return out
+    if state == "done" and gguf_out.is_file():
+        registry.set_artifacts(model.model_id, gguf_path=str(gguf_out),
+                               quant=quant_eff)
+        out["gguf_path"] = str(gguf_out)
+        out["ok"] = True
+        out["note"] = f"registered {model.model_id}, GGUF at {gguf_out}"
+    else:
+        out["ok"] = True
+        out["note"] = (f"registered {model.model_id}; export job "
+                       f"{export_job.job_id} {state} — adapter kept, no GGUF")
+    return out
+
+
 def parse_worker_backend(log_path: Optional[str]) -> Dict[str, Any]:
     """Extract {backend, gguf_lora_path} from a finished train job log (WP10).
 

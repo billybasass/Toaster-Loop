@@ -439,6 +439,83 @@ dependency wiring only. Route handlers resolve by name via getattr.
             except OSError:
                 lines = []
             self.bus.publish("job.log", {"job_id": job_id, "lines": lines[-5:]})
+        # Bare-train visibility: a finished sft/dpo/grpo job must become a
+        # registry model (+ GGUF export). Without this the Train page /
+        # `train start` path left adapters on disk with no model row —
+        # invisible in Models, un-servable, no lineage. Runs on every
+        # completion path (submit thread, dispatcher tick), so it lives here.
+        # Jobs that already carry a model_id are owned by the iterate pipeline
+        # (it registers its own candidate) — finalizing those would double-
+        # register, so they are skipped.
+        if (job and state == "done" and job.kind in ("sft", "dpo", "grpo")
+                and not job.model_id):
+            self._finalize_train_job(job)
+
+    def _finalize_train_job(self, job) -> None:
+        """Register a finished train job's adapter as a model + queue export.
+
+        Runs on a short-lived daemon thread rather than inline: the observer
+        fires while the finishing job still holds its device slot (inside
+        ``run_job``), and the follow-up export job needs that slot. The thread
+        waits for the GPU to free, then does the registration + export; if it
+        can't get capacity in time the export simply stays queued for the
+        dispatcher — the registry row exists either way.
+        """
+        import threading as _threading
+
+        def _work() -> None:
+            from ..training.pipeline import finalize_standalone_train
+            from ..training.scheduler import SchedulerError
+
+            params = job.params if isinstance(job.params, dict) else {}
+            # Wait for the train job's slot to actually release (its run_job
+            # unwinds moments after the observer fires — finish_job flips the
+            # row to done BEFORE the flock is released), bounded so a wedged
+            # worker can't hold the finalize hostage.
+            _threading.Event().wait(2.0)
+            export_attempted = False
+            for _ in range(60):
+                reg = self._registry()
+                try:
+                    cur = reg.get_job(job.job_id)
+                    busy = bool(cur and cur.state == "running")
+                finally:
+                    reg.close()
+                if not busy:
+                    export_attempted = True
+                    break
+                _threading.Event().wait(1.0)
+
+            reg = self._registry()
+            try:
+                res = finalize_standalone_train(
+                    home=self.home, registry=reg,
+                    scheduler=self._scheduler(reg),
+                    dataset_id=str(job.dataset_id or ""),
+                    log_path=job.log_path,
+                    base_model=str(params.get("base_model") or ""),
+                    display_name=params.get("model_name"),
+                    quant=(self.cfg.training or {}).get("gguf_quant"),
+                    actor="dashboard",
+                    # If the GPU never freed up in time, register the model but
+                    # leave the export queued rather than fighting for a slot.
+                    submit_export=export_attempted,
+                )
+            except Exception:  # bookkeeping must never break the job path
+                logger.exception("train finalize failed for %s", job.job_id)
+                reg.close()
+                return
+            reg.close()
+            if res.get("model_id"):
+                logger.info("train %s -> model %s: %s", job.job_id,
+                            res["model_id"], res.get("note"))
+                self.bus.publish("model.registered", {
+                    "model_id": res["model_id"], "job_id": job.job_id,
+                    "gguf_path": res.get("gguf_path"),
+                    "note": res.get("note")})
+
+        _threading.Thread(target=_work, daemon=True,
+                          name=f"finalize-{job.job_id}").start()
 
     def _scheduler(self, reg: ModelRegistry):
         from ..training.scheduler import Scheduler

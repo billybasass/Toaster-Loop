@@ -288,7 +288,7 @@ rft/mine_goldens) and the train check/estimate endpoints.
                 "dry_run": dry_run,
             }
             # Optional human name for the trained artifacts (recorded on the
-            # job; the iterate/easy loops propagate it to the model row).
+            # job; propagated to the registry model row's display_name).
             if str(b.get("model_name") or "").strip():
                 params["model_name"] = str(b["model_name"]).strip()[:80]
             job = sched.submit(
@@ -298,6 +298,10 @@ rft/mine_goldens) and the train check/estimate endpoints.
         finally:
             reg.close()
 
+        # Model bookkeeping (registry row + GGUF export) happens in the
+        # scheduler observer (app._job_observer -> _finalize_train_job), which
+        # fires for every train completion regardless of which thread or tick
+        # executed the job. Dry runs emit no sft_done, so they never register.
         def _run(job_id: str) -> None:
             # Ownership-safe start: claim THIS job with an atomic queued ->
             # running flip under our pid (guarded UPDATE — a losing claim can

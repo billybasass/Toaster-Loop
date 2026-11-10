@@ -588,6 +588,32 @@ def build_parser() -> argparse.ArgumentParser:
     munpin.add_argument("model_id", help="Model id to unpin")
     munpin.set_defaults(func=cmd_models_unpin)
 
+    madopt = mosub.add_parser(
+        "adopt",
+        help="Register an existing trained adapter (e.g. from a run predating "
+             "auto-registration) as a model, and export its GGUF",
+        description=(
+            "Adopt an adapter directory produced by `toaster_loop train start` "
+            "(or any LoRA/full checkpoint) into the model registry so it shows "
+            "up in `models list`, the dashboard Models panel, and can be "
+            "exported to GGUF for serving. Pass the job log (--log-path) when "
+            "you have it to carry losses/provenance onto the new row."
+        ),
+    )
+    _add_common(madopt)
+    madopt.add_argument("adapter_dir", help="Path to the adapter directory")
+    madopt.add_argument("--dataset", help="Dataset id the adapter was trained on")
+    madopt.add_argument("--base-model", metavar="HF_ID",
+                        help="Base model the adapter was trained from "
+                             "(falls back to config training.base_model)")
+    madopt.add_argument("--name", metavar="NAME",
+                        help="Human name for the model (display_name)")
+    madopt.add_argument("--log-path", metavar="LOG",
+                        help="Training job log (losses + provenance carry-over)")
+    madopt.add_argument("--no-export", action="store_true",
+                        help="Register only; skip the GGUF export job")
+    madopt.set_defaults(func=cmd_models_adopt)
+
     mjan = mosub.add_parser(
         "janitor",
         help="Archive aged superseded/failed/rolled_back models (never pinned)",
@@ -697,6 +723,9 @@ def build_parser() -> argparse.ArgumentParser:
              "--config-key lora.use_dora=true. Values typed true/false, int, "
              "float, JSON list/object, else string. Applied to the dataset's "
              "train.yaml copy before the worker runs; logged for provenance.")
+    tsubmit.add_argument("--name", metavar="NAME",
+                         help="Human name for the trained model (registry "
+                              "display_name + artifact filenames)")
     tsubmit.set_defaults(func=cmd_train_start)
 
     tstat = trsub.add_parser("status", help="Job status (all, or one job id)")
@@ -3641,6 +3670,51 @@ def cmd_models_unpin(args: argparse.Namespace) -> int:
     return _set_pin(args, pinned=False)
 
 
+def cmd_models_adopt(args: argparse.Namespace) -> int:
+    """`models adopt` — register an existing adapter dir as a model row.
+
+    Recovers adapters from standalone `train start` runs (pre-auto-registration
+    or interrupted bookkeeping): creates the registry candidate, carries losses/
+    provenance from the job log when given, and queues+runs the GGUF export so
+    the model becomes servable."""
+    _setup_logging(args.verbose, args.config)
+    cfg = load_config(args.config)
+    home = resolve_toaster_loop_home(cfg)
+    adapter_dir = Path(args.adapter_dir).expanduser()
+    if not adapter_dir.is_dir():
+        print(f"error: adapter dir not found: {adapter_dir}", file=sys.stderr)
+        return 1
+    tc = _training_config(cfg, args.config)
+    sched = Scheduler_for(reg=_open_registry(cfg), tc=tc)
+    reg = sched.registry
+    try:
+        from .training.pipeline import finalize_standalone_train
+
+        res = finalize_standalone_train(
+            home=home, registry=reg, scheduler=sched,
+            dataset_id=args.dataset or "",
+            log_path=args.log_path,
+            base_model=args.base_model or tc.base_model or "",
+            display_name=getattr(args, "name", None),
+            quant=getattr(tc, "gguf_quant", None),
+            actor="cli",
+            submit_export=not args.no_export,
+            adapter_dir=str(adapter_dir),
+        )
+    finally:
+        reg.close()
+    if not res.get("model_id"):
+        print(f"error: {res.get('note') or 'adopt failed'}", file=sys.stderr)
+        return 1
+    print(res.get("note") or "")
+    if res.get("gguf_path"):
+        print(f"GGUF ready: {res['gguf_path']}")
+    print(f"validate + serve with `toaster_loop models promote "
+          f"{res['model_id']}` (promotion requires a validation pass) or "
+          "deploy the GGUF from the dashboard Serve panel")
+    return 0
+
+
 def cmd_models_janitor(args: argparse.Namespace) -> int:
     _setup_logging(args.verbose, args.config)
     cfg = load_config(args.config)
@@ -3718,16 +3792,19 @@ def cmd_train_start(args: argparse.Namespace) -> int:
             except ValueError as e:
                 print(f"error: {e}", file=sys.stderr)
                 return 2
+        params: dict = {
+            "train_yaml": str(train_yaml_path),
+            "dataset_dir": str(dataset_dir),
+            "base_model": tc.base_model or "",
+            "dry_run": args.dry_run,
+        }
+        if str(getattr(args, "name", "") or "").strip():
+            params["model_name"] = str(args.name).strip()[:80]
         job = sched.submit(
             args.kind,
             dataset_id=args.dataset,
             log_dir=home / "train_runs",
-            params={
-                "train_yaml": str(train_yaml_path),
-                "dataset_dir": str(dataset_dir),
-                "base_model": tc.base_model or "",
-                "dry_run": args.dry_run,
-            },
+            params=params,
             depends_on=list(getattr(args, "depends_on", None) or []) or None,
         )
         if applied:
@@ -3765,6 +3842,26 @@ def cmd_train_start(args: argparse.Namespace) -> int:
             print(f"error: corrupt training result — NaN recorded in loss "
                   f"history ({', '.join(nan)})", file=sys.stderr)
             return EXIT_CORRUPT_ARTIFACT
+        # Model bookkeeping (same as the dashboard path): register the adapter
+        # as a registry model + export GGUF, so trained models show up under
+        # `models list` / the dashboard instead of lingering only on disk.
+        if not args.dry_run:
+            from .training.pipeline import finalize_standalone_train
+
+            res = finalize_standalone_train(
+                home=home, registry=reg, scheduler=sched,
+                dataset_id=args.dataset,
+                log_path=finished.log_path,
+                base_model=tc.base_model or "",
+                display_name=params.get("model_name"),
+                quant=getattr(tc, "gguf_quant", None),
+                actor="cli",
+            )
+            print(res.get("note") or "")
+            if res.get("gguf_path"):
+                print(f"GGUF ready: {res['gguf_path']} — deploy with "
+                      f"`toaster_loop models promote {res['model_id']}` "
+                      "after validation, or serve directly")
         return 0
     finally:
         reg.close()

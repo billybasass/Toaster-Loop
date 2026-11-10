@@ -503,6 +503,65 @@ def test_manifest_completeness_and_train_yaml(store, toaster_loop_home):
     assert Path(doc["data"]["local_dataset"][0]).is_file()
 
 
+def test_adapter_output_dir_uses_hf_hub_cache(tmp_path, monkeypatch):
+    """Template v2: with an HF hub cache present, the default training
+    output_dir is a local models--toaster-loop--<id> repo folder inside it."""
+    from toaster_loop.curate.curater import adapter_output_dir
+
+    hub = tmp_path / "hub-cache"
+    (hub / "models--foo--bar").mkdir(parents=True)  # needs to be a dir
+    monkeypatch.setenv("TOASTER_LOOP_MODELS_DIR", str(hub))
+    out = adapter_output_dir("Toaster-20261105T165116Z")
+    assert out is not None
+    p = Path(out)
+    assert str(p).startswith(str(hub))
+    # hub repo layout: models--toaster-loop--<dataset>/snapshots/<stamp>
+    assert p.parent.parent.name == "models--toaster-loop--Toaster-20261105T165116Z"
+    assert p.parent.name == "snapshots"
+    # dataset ids with odd chars get slugged, never path-traverse
+    sneaky = adapter_output_dir("../../evil")
+    assert sneaky is not None and ".." not in Path(sneaky).name
+
+
+def test_adapter_output_dir_none_without_hub(tmp_path, monkeypatch):
+    """No hub cache anywhere -> None (callers keep the dataset/outputs
+    fallback; training must never break because of a missing cache)."""
+    from toaster_loop.curate import curater
+
+    monkeypatch.delenv("TOASTER_LOOP_MODELS_DIR", raising=False)
+    monkeypatch.delenv("HF_HOME", raising=False)
+    # Resolve against an empty home so ~/.cache/huggingface/hub can't exist.
+    monkeypatch.setenv("HOME", str(tmp_path / "no-home"))
+    assert curater.adapter_output_dir("ds-x") is None
+
+
+def test_render_train_yaml_output_dir_precedence(tmp_path, monkeypatch):
+    """explicit curation.output_dir > hub-cache default > dataset/outputs."""
+    from toaster_loop.curate.curater import (CurationConfig,
+                                             render_train_yaml)
+
+    ds = tmp_path / "datasets" / "ds-p"
+    ds.mkdir(parents=True)
+
+    # explicit config wins even with a hub available
+    hub = tmp_path / "hub2"
+    (hub / "models--x--y").mkdir(parents=True)
+    monkeypatch.setenv("TOASTER_LOOP_MODELS_DIR", str(hub))
+    doc = yaml.safe_load(render_train_yaml(
+        ds, CurationConfig(output_dir=str(tmp_path / "explicit")), "ds-p"))
+    assert doc["training"]["output_dir"] == str(tmp_path / "explicit")
+
+    # no explicit -> hub cache folder
+    doc = yaml.safe_load(render_train_yaml(ds, CurationConfig(), "ds-p"))
+    assert doc["training"]["output_dir"].startswith(str(hub))
+
+    # no hub either -> legacy dataset/outputs fallback
+    monkeypatch.delenv("TOASTER_LOOP_MODELS_DIR")
+    monkeypatch.setenv("HOME", str(tmp_path / "no-home2"))
+    doc = yaml.safe_load(render_train_yaml(ds, CurationConfig(), "ds-p"))
+    assert doc["training"]["output_dir"] == str(ds / "outputs")
+
+
 def test_datasets_cli_list_show_export(store, toaster_loop_home, capsys):
     seed_trace(store, toaster_loop_home, trace_id="t1", messages=SIMPLE_OK)
     assert cli.main(["datasets", "list"]) == 0

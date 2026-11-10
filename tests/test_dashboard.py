@@ -542,6 +542,132 @@ def test_train_endpoint_queues_and_runs(app, home, tmp_path, monkeypatch):
                       body={"dataset": "d", "kind": "bogus"}).status == 400
 
 
+# A worker stub that behaves like the real one: creates the adapter dir under
+# output_dir and emits sft_done with adapter_dir + losses (the terminal-event
+# contract finalize_standalone_train parses).
+STUB_WITH_ADAPTER = r'''
+import argparse, json, sys
+from pathlib import Path
+ap = argparse.ArgumentParser()
+for f in ("--job","--kind","--config","--dataset-dir","--base-model",
+          "--log-path","--adapter-dir","--gguf-out"):
+    ap.add_argument(f, default=None)
+ap.add_argument("--quant", default="q4_k_m")
+ap.add_argument("--dry-run", action="store_true")
+a = ap.parse_args()
+
+def emit(**kw):
+    line = json.dumps(kw)
+    print(line, flush=True)
+    if a.log_path:
+        Path(a.log_path).parent.mkdir(parents=True, exist_ok=True)
+        open(a.log_path, "a").write(line + "\n")
+
+if a.kind == "export":
+    emit(event="export_done", gguf_path=a.gguf_out or "", method="stub")
+else:
+    import yaml
+    cfg = {}
+    try:
+        cfg = yaml.safe_load(open(a.config)) if a.config else {}
+    except Exception:
+        cfg = {}
+    out_dir = Path((cfg.get("training") or {}).get("output_dir")
+                   or "outputs").expanduser()
+    adapter = out_dir / "adapter"
+    adapter.mkdir(parents=True, exist_ok=True)
+    (adapter / "adapter_model.safetensors").write_bytes(b"stub")
+    emit(event="sft_done", adapter_dir=str(adapter), train_loss=1.75,
+         eval_loss=2.13)
+emit(event="done", job=a.job)
+'''
+
+
+def _wait_models(app, timeout_s: float = 30.0):
+    """Poll /api/models until the finalize thread has registered something."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        models = app.handle("GET", "/api/models").body.get("models") or []
+        if models:
+            return models
+        time.sleep(0.25)
+    return []
+
+
+def test_train_endpoint_registers_model_from_adapter(app, home, tmp_path,
+                                                     monkeypatch):
+    """Bare Train-page runs must produce a registry model (the gap that left
+    trained adapters like 'sable' invisible in the Models panel)."""
+    stub = tmp_path / "stub.py"
+    stub.write_text(STUB_WITH_ADAPTER)
+    import shlex as _shlex
+    monkeypatch.setenv("TOASTER_LOOP_WORKER_COMMAND",
+                       f"{_shlex.quote(sys.executable)} {_shlex.quote(str(stub))}")
+
+    ds = home / "datasets" / "ds-reg"
+    ds.mkdir(parents=True)
+    (ds / "train.yaml").write_text(
+        "model: Base/HF\ndata: {}\ntraining:\n  output_dir: "
+        f"{ds / 'outputs'}\n")
+
+    r = app.handle("POST", "/api/train",
+                   body={"dataset": "ds-reg", "kind": "sft",
+                         "model_name": "sable"})
+    assert r.status == 202
+    job_id = r.body["job_id"]
+
+    # wait for the train job itself to finish
+    state = None
+    for _ in range(100):
+        jobs = app.handle("GET", "/api/jobs").body["jobs"]
+        me = [j for j in jobs if j["job_id"] == job_id]
+        state = me[0]["state"] if me else None
+        if state in ("done", "error", "cancelled"):
+            break
+        time.sleep(0.1)
+    assert state == "done", f"job ended in {state}"
+
+    models = _wait_models(app)
+    assert models, "finalize thread never registered the trained model"
+    m = models[0]
+    assert m["display_name"] == "sable"
+    assert m["dataset_id"] == "ds-reg"
+    assert m["adapter_dir"] and Path(m["adapter_dir"]).is_dir()
+    assert abs((m["train_loss"] or 0) - 1.75) < 1e-6
+
+    # the model detail endpoint serves it too (drawer path)
+    d = app.handle("GET", f"/api/models/{m['model_id']}")
+    assert d.status == 200 and d.body["adapter_path"]
+
+
+def test_train_finalize_is_idempotent(app, home, tmp_path, monkeypatch):
+    """A second finalize for the same adapter (e.g. CLI + dispatcher both saw
+    the job) must not create a duplicate registry row."""
+    from toaster_loop.training.pipeline import finalize_standalone_train
+    from toaster_loop.training.scheduler import Scheduler
+    from toaster_loop.training.scheduler import TrainingConfig
+
+    ds = home / "datasets" / "ds-idem"
+    (ds / "outputs" / "adapter").mkdir(parents=True)
+    log = tmp_path / "job.log"
+    log.write_text(json.dumps({"event": "sft_done",
+                               "adapter_dir": str(ds / "outputs" / "adapter"),
+                               "train_loss": 1.0}) + "\n")
+
+    reg = ModelRegistry(home / "buffer" / "toaster_loop.db")
+    sched = Scheduler(registry=reg, cfg=TrainingConfig(base_model="B/M"))
+    r1 = finalize_standalone_train(home=home, registry=reg, scheduler=sched,
+                                   dataset_id="ds-idem", log_path=str(log),
+                                   base_model="B/M", submit_export=False)
+    assert r1["ok"] and r1["model_id"]
+    r2 = finalize_standalone_train(home=home, registry=reg, scheduler=sched,
+                                   dataset_id="ds-idem", log_path=str(log),
+                                   base_model="B/M", submit_export=False)
+    reg.close()
+    assert r2["ok"] and r2["model_id"] == r1["model_id"]
+    assert "already tracks" in (r2.get("note") or "")
+
+
 def test_unknown_endpoint_and_bad_body(app):
     assert app.handle("GET", "/api/bogus").status == 404
     assert app.handle("PUT", "/api/status").status == 404
