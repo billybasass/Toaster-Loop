@@ -275,9 +275,10 @@ def _check_python_syntax(path: str, content: str) -> Tuple[str, str]:
             return "error", _syntax_error_text(path, e)
         return "ok", ""
     finally:
-        for f in (tmp, cfile):
+        # distinct loop name: `f` above is the fdopen'd TextIOWrapper
+        for _p in (tmp, cfile):
             try:
-                os.unlink(f)
+                os.unlink(_p)
             except OSError:
                 pass
 
@@ -541,7 +542,7 @@ def _lsp_diagnostics(path: str, pre_content: Optional[str],
                 return (f"{d.get('source', '')}:{d.get('code', '')}:"
                         f":{str(d.get('message', '')).splitlines()[0]}")
 
-            base_keys = {}
+            base_keys: Dict[str, int] = {}
             for d in baseline:
                 base_keys[_key(d)] = base_keys.get(_key(d), 0) + 1
             new_diags = []

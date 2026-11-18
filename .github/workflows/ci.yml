@@ -46,7 +46,9 @@ jobs:
       - name: Lint (ruff)
         run: uv run --frozen ruff check toaster_loop tests
 
-      - name: Type check (mypy — gated core; see [tool.mypy] in pyproject.toml)
+      # Full-package gate: every module type-checks (default mode). The old
+      # per-module error budget is retired — do not re-add ignore_errors.
+      - name: Type check (mypy — all modules)
         run: uv run --frozen mypy
 
       # BLE001 convention audit (non-blocking): broad except is deliberate

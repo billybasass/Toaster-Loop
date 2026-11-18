@@ -41,7 +41,7 @@ class CircuitBreaker:
         self._state = CLOSED
         self._failures = 0
         self._opened_at = 0.0          # monotonic, cooldown math
-        self._opened_wall = None       # wall epoch, display only
+        self._opened_wall: Optional[float] = None  # wall epoch, display only
         self._probe_inflight = False
         self._probe_started = 0.0
 

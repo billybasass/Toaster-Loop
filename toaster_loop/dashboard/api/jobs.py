@@ -225,8 +225,9 @@ rft/mine_goldens) and the train check/estimate endpoints.
         # Multi-dataset training: `datasets` may carry several ids (UI
         # multi-picker); a single `dataset` string may also be comma-list.
         ids = ([dataset_id] if dataset_id else []) + extra_ids
-        seen: set = set()
-        ids = [x for x in ids if not (x in seen or seen.add(x))]
+        # Order-preserving dedup (dict.fromkeys; the seen.add-in-comprehension
+        # idiom trips func-returns-value).
+        ids = list(dict.fromkeys(ids))
         if not ids:
             raise HttpError(400, "dataset required")
         if len(ids) > 1:

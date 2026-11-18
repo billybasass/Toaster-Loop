@@ -127,8 +127,9 @@ def rocm_userland_version() -> Optional[str]:
             pass
         # hipcc exists but its output parsed oddly: fall through to dpkg,
         # then give up honestly (None) rather than guess the oldest flavor.
-        out = _run(["dpkg-query", "-W", "-f", "${Version}", "rocm-core"])
-        m = re.search(r"(\d+\.\d+)", out or "")
+        # (distinct local: `out` above is the str hipcc stdout)
+        dpkg = _run(["dpkg-query", "-W", "-f", "${Version}", "rocm-core"])
+        m = re.search(r"(\d+\.\d+)", dpkg or "")
         if m:
             return m.group(1)
     return None

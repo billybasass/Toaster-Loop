@@ -1,9 +1,85 @@
-# Toaster Loop (Phase 6 — multi-model serving on top of the closed loop)
+# Toaster Loop
 
 Local, self-improving agent system: built-in agent orchestration against
-locally served models, with LoRA fine-tuning (SFT/DPO) and GGUF export built
-in. Everything runs on one machine over loopback; **zero API keys, zero cloud
-calls**.
+locally served models, with LoRA fine-tuning (SFT/DPO/GRPO) and GGUF export
+built in. Everything runs on one machine over loopback; **zero API keys, zero
+cloud calls**.
+
+## Quick start
+
+```bash
+git clone https://github.com/billybasass/Toaster-Loop.git
+cd Toaster-Loop
+./setup.sh          # venv + deps + builds llama.cpp for YOUR GPU
+./launch.sh         # dashboard + browser (desktop icon added too)
+```
+
+That is the whole happy path: `setup.sh` detects your accelerator (NVIDIA /
+AMD ROCm / Apple Metal / Vulkan / CPU), installs the matching torch build, and
+compiles llama.cpp into `<home>/llama.cpp`. `launch.sh` starts the dashboard
+and opens it. To check anything at any time:
+
+```bash
+toaster-loop doctor --env     # measured environment report + exact next commands
+```
+
+Windows: double-click `setup.cmd` / `launch.cmd`, or run the `.ps1` ports from
+PowerShell. Every script command also has a pure-CLI form (`python -m
+toaster_loop <cmd>`) that works on any OS. See [Install](#install) for options
+(`--no-training`, manual venv, custom llama.cpp fork).
+
+### Upgrade
+
+```bash
+git pull
+./setup.sh                    # re-syncs the venv from uv.lock + rebuilds if needed
+toaster-loop update --check   # optional: check for a newer managed llama.cpp
+```
+
+State (buffer, datasets, models) lives under `~/.toaster-loop/` and survives
+upgrades. The store refuses to open a database written by a *newer* release —
+if you roll back binaries, restore an older backup too (see below).
+
+### Backup
+
+Everything persistent is one directory: `~/.toaster-loop/` (override with
+`TOASTER_LOOP_HOME`). Back it up while the app is stopped for a consistent
+snapshot; SQLite runs in WAL mode so readers are safe but writers should quiesce.
+
+```bash
+tar czf toaster-loop-backup-$(date +%F).tgz -C ~ .toaster-loop
+```
+
+### Uninstall
+
+```bash
+toaster-loop launch --stop    # stop anything the launcher started
+rm -rf ~/.toaster-loop        # ALL state: buffer, datasets, models, logs, llama.cpp build
+```
+
+Toaster Loop never writes outside `~/.toaster-loop/` (plus its own venv/repo) —
+removing those leaves nothing behind. `toaster-loop reset --yes [--keep-models]`
+does the same wipe from inside the app.
+
+### Support matrix
+
+| Platform | Status |
+|---|---|
+| Linux (x86_64, aarch64) | CI-tested on Python 3.11/3.12/3.13 |
+| macOS (Apple Silicon) | CI-tested; Metal backend |
+| Windows 10/11 | CI-tested (git-bash); `.cmd`/`.ps1` launchers |
+
+GPU backends exercised by setup: CUDA, ROCm, Metal, Vulkan, CPU-only. Requires
+Python ≥3.11,<3.14 and ~10 GiB free disk for the largest model exports.
+
+---
+
+## What it does (capability tour)
+
+The sections below are organized by the capability each command serves; the
+full operator reference continues under [Usage](#usage).
+
+### Serve & run agents
 
 Phase 1 delivered:
 

@@ -113,9 +113,9 @@ def _read_value(c: _Cursor, vtype: int) -> Any:
         keep = min(alen, 64)
         vals = [_read_value(c, etype) for _ in range(keep)]
         if alen > keep:
-            fmt = _FIXED.get(etype)
-            if fmt is not None:  # fixed-size elements: skip cheaply
-                c.take((alen - keep) * fmt[1])
+            efmt = _FIXED.get(etype)  # distinct name: `fmt` above is the str
+            if efmt is not None:  # fixed-size elements: skip cheaply
+                c.take((alen - keep) * efmt[1])
             else:  # variable-length elements: walk them without keeping
                 for _ in range(alen - keep):
                     _read_value(c, etype)

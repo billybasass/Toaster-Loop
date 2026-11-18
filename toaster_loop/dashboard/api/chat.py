@@ -479,9 +479,12 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
             try:
                 from ...core import delegation as _delegation
 
+                # Plain parameter (not the `_t=thread_id` default trick): the
+                # dispatcher calls hook(thread_id) with exactly this id, and a
+                # defaulted lambda is un-inferable for mypy.
                 _delegation.register_wake_hook(
                     thread_id,
-                    lambda _t=thread_id: self.start_inbox_wake_run(_t))
+                    lambda _tid: self.start_inbox_wake_run(_tid))
             except Exception:  # noqa: BLE001 — wake wiring never breaks a run
                 pass
         # Registry entry is created INSIDE gen() (below), not here: an SSE
@@ -1279,6 +1282,10 @@ lifecycle (adopt-orphans / re-attach), and thread persistence
         # may later upgrade it off this request via an LLM call.
         from ...core.titles import DERIVED, USER, derive_title
         existing_source = existing.get("title_source")
+        # Both may stay None (thread with no prior title and no client title):
+        # annotate so the later derive_title() assignment is legal.
+        title_val: Optional[str]
+        title_src: Optional[str]
         if "title" in b and str(b.get("title") or "").strip():
             title_val = str(b["title"]).strip()
             title_src = USER

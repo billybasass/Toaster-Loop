@@ -255,6 +255,9 @@ def claim_next_queued(cfg: Any = None) -> Optional[Dict[str, Any]]:
                     except Exception:
                         pass
                     raise
+        # Retry budget exhausted: every claim lost to a concurrent claimer.
+        # Honest None (queue may still hold rows; next tick will find them).
+        return None
     finally:
         conn.close()
 

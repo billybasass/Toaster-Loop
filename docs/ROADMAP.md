@@ -911,3 +911,45 @@ Doc->ShareGPT synthesis uses the live serve endpoint when up, deterministic
 heading fallback otherwise. Registry: `curate_source` added to JOB_KINDS (+
 CHECK rebuild migration). Tests: `tests/test_datasets_sources.py`, retry tests
 in `tests/test_cli.py`.
+
+## Production-readiness pass (shipped — release engineering)
+
+The v0.1.0 hardening pass closed the process gaps that made existing quality
+unprovable rather than adding features: CI now actually runs (remote + push),
+with a 9-OS matrix, ruff, a **full-package mypy gate** (all modules clean, up
+from a 13-file subset with a 50-error budget), a coverage floor
+(`--cov-fail-under=78`), per-test timeouts and `concurrency` cancellation. Two
+new jobs cover the paths no hermetic test touches: a CPU tiny-model **train
+smoke** that runs the real worker entry point against the locked training
+stack, and an **artifacts** job that builds the wheel and installs it into a
+clean venv asserting the dashboard static ships. `pip-audit` and a BLE001
+convention report run non-blocking. `[training]` deps are upper-bounded so a
+fresh `uv sync` can't silently pull an incompatible transformers/trl major;
+pre-commit hooks mirror CI. The store now refuses to open a DB written by a
+newer release (`SchemaTooNewError`). LICENSE, CHANGELOG and `v<semver>` tags
+complete the release story.
+
+## What's next
+
+Shipped work above is closed. Forward candidates, roughly ordered by value:
+
+- **Coverage ratchet.** Floor is 78% (actual ~81%). The low spots map onto the
+  riskiest process-lifecycle code — `training/worker.py` (~51%),
+  `serving/runtime.py` (~67%), `watchdog.py` (~71%), `coexist.py` (~75%). Raise
+  the floor incrementally as pid-reaping / termination / liveness paths gain
+  tests; that is where a local-first tool actually fails in the field.
+- **Strict-typing ratchet.** The whole package passes mypy's default mode; the
+  next bar is `check_untyped_defs = true` (then per-module `--strict`) as
+  annotations land on the remaining untyped defs.
+- **Promote the advisory gates.** Once pip-audit and the BLE001 count have been
+  quiet for a release, drop their `continue-on-error` so they block.
+- **WP10 streamed-LoRA GPU acceptance** — steps 2–3 are integrated but gated on
+  a real-GPU acceptance run; decide adopt vs retire with data.
+- **WP11 specialization** — findings-only spike; revisit if per-user adapters
+  earn their registry/tier cost.
+- **DNS-rebinding egress (capability tools)** — the resolve-then-connect TOCTOU
+  is documented, not closed; closing it needs an optional forward-proxy mode.
+  Only worth it if remote/multi-host deployments become a goal.
+- **Packaged distribution** — wheel builds and installs cleanly (CI-verified);
+  publishing to PyPI would replace the clone+setup.sh install for users who
+  want `pipx install toaster-loop`.

@@ -203,10 +203,16 @@ def check_config(config_path: Optional[str], *, out: Callable[[str], None],
                  ) -> CheckResult:
     """load_config() passthrough: a ConfigError is printed VERBATIM (the
     consolidated report lists EVERY field — fix them all at once)."""
-    if load_config_fn is None:
-        from .core.config import load_config as load_config_fn  # type: ignore
+    # Resolve the injectable probe into a fresh local rather than rebinding the
+    # Optional parameter: mypy keeps the declared Optional on the parameter
+    # name, so calling it back would read as "None not callable".
+    if load_config_fn is not None:
+        lcf = load_config_fn
+    else:
+        from .core.config import load_config
+        lcf = load_config
     try:
-        cfg = load_config_fn(config_path)
+        cfg = lcf(config_path)
     except Exception as e:  # noqa: BLE001 - surface whatever the loader reports
         out(str(e))
         return CheckResult("config", "problem",
@@ -757,9 +763,12 @@ def check_datasets_env(cfg: Any) -> CheckResult:
 def check_noise_floor(home: Path, *,
                       load_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
                       ) -> CheckResult:
-    if load_fn is None:
-        from .serving.bench import load_noise_floor as load_fn  # type: ignore
-    rec = load_fn(home=home)
+    if load_fn is not None:
+        ldr = load_fn
+    else:
+        from .serving.bench import load_noise_floor
+        ldr = load_noise_floor
+    rec = ldr(home=home)
     if rec is not None:
         return CheckResult("noise-floor", "ok",
                            [f"persisted baseline present ({rec.get('label') or 'unlabeled'})"])
@@ -774,14 +783,15 @@ def check_calibration_profile(cfg: Any, home: Path, *,
                               list_fn: Optional[Callable[..., List[Dict[str, Any]]]] = None,
                               mode_fn: Optional[Callable[[Any], str]] = None,
                               ) -> CheckResult:
-    if mode_fn is None or list_fn is None:
-        from .serving.calibrate import calibration_mode as mode_fn  # type: ignore
-        from .serving.calibrate import list_profiles as list_fn  # type: ignore
-    mode = mode_fn(cfg)
+    from .serving.calibrate import calibration_mode, list_profiles
+
+    mfn = mode_fn if mode_fn is not None else calibration_mode
+    lfn = list_fn if list_fn is not None else list_profiles
+    mode = mfn(cfg)
     if mode != "auto":
         return CheckResult("calibration", "ok",
                            [f"serve.calibration: {mode} (profile not needed)"])
-    profiles = list_fn(home=home)
+    profiles = lfn(home=home)
     if profiles:
         return CheckResult("calibration", "ok",
                            [f"{len(profiles)} stored profile(s) present"])
@@ -815,8 +825,11 @@ def collect_checks(*, config_path: Optional[str] = None, fix: bool = False,
         # Vendor-chained (nvidia-smi -> rocm-smi): AMD boxes report numbers
         # instead of going dark off-NVIDIA.
         vram_mib = free_vram_mib()
-    if alive_fn is None:
-        from .serving.runtime import pid_alive as alive_fn  # type: ignore
+    if alive_fn is not None:
+        alive = alive_fn
+    else:
+        from .serving.runtime import pid_alive
+        alive = pid_alive
 
     results: List[CheckResult] = []
     results.append(check_python())
@@ -873,7 +886,7 @@ def collect_checks(*, config_path: Optional[str] = None, fix: bool = False,
             live_owned.append(int(st["port"]))
     results.append(check_ports(ports, live_owned))
 
-    results.append(check_stale_state(home, alive_fn=alive_fn, fix=fix))
+    results.append(check_stale_state(home, alive_fn=alive, fix=fix))
     # WP1c chat-durability diagnostics: stale chat tmp files (failed atomic
     # replaces) and TOASTER_LOOP_HOME resolution consistency across env/config.
     results.append(check_chat_tmp(home))

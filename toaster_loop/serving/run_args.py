@@ -327,25 +327,24 @@ def sanitize_run_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
     if unknown:
         raise ValueError("unknown run_settings keys: " + ", ".join(map(str, sorted(unknown))))
     if "kv_cache_type" in patch:
-        v = str(patch["kv_cache_type"] or "").strip().lower()
-        if v and v not in KV_CACHE_TYPES:
+        kv = str(patch["kv_cache_type"] or "").strip().lower()
+        if kv and kv not in KV_CACHE_TYPES:
             raise ValueError(f"kv_cache_type must be one of {KV_CACHE_TYPES}")
-        out["kv_cache_type"] = v or None
+        out["kv_cache_type"] = kv or None
     for flag in ("flash_attn", "tensor_parallel", "no_mmap", "mlock"):
         if flag in patch:
             out[flag] = bool(patch[flag])
+    # Distinct local names per coercion (int vs str): a single `v` rebound
+    # across branches reads as one type to mypy and flags every later use.
     for key in ("parallel", "batch_size", "ubatch_size"):
         if key in patch:
-            v = _int(patch[key])
-            if v is not None and v > 0:
-                out[key] = v
-            else:
-                out[key] = None
+            iv = _int(patch[key])
+            out[key] = iv if (iv is not None and iv > 0) else None
     if "gpu_memory_pct" in patch:
-        v = _int(patch["gpu_memory_pct"])
-        if v is not None and not (1 <= v <= 100):
+        gp = _int(patch["gpu_memory_pct"])
+        if gp is not None and not (1 <= gp <= 100):
             raise ValueError("gpu_memory_pct must be 1..100")
-        out["gpu_memory_pct"] = v
+        out["gpu_memory_pct"] = gp
     if "vision" in patch:
         out["vision"] = bool(patch["vision"]) \
             if patch["vision"] is not None else None
@@ -360,10 +359,10 @@ def sanitize_run_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
                     f"speculative_type must be one of {SPEC_MODES}")
             out["speculative_type"] = mode
     if "spec_draft_n_max" in patch:
-        v = _int(patch["spec_draft_n_max"])
-        if v is not None and not (1 <= v <= 16):
+        dn = _int(patch["spec_draft_n_max"])
+        if dn is not None and not (1 <= dn <= 16):
             raise ValueError("spec_draft_n_max must be 1..16")
-        out["spec_draft_n_max"] = v
+        out["spec_draft_n_max"] = dn
     for key in ("mmproj_path", "mtp_path", "extra_args"):
         if key in patch:
             s = str(patch[key] or "").strip()
@@ -437,10 +436,10 @@ def sanitize_image_settings(patch: Dict[str, Any]) -> Dict[str, Any]:
            if raw is None or not str(raw).strip():
                out[key] = None
            else:
-               v = str(raw).strip().lower()
-               if v not in options:
+               sv = str(raw).strip().lower()  # distinct name: `v` above is int|None
+               if sv not in options:
                    raise ValueError(f"{key} must be one of {options}")
-               out[key] = v
+               out[key] = sv
    if "seed" in patch:
        v = _int(patch["seed"])
        if patch["seed"] in (None, ""):

@@ -458,7 +458,9 @@ class EmbeddingClient:
                     if self.cfg is not None else None
             except Exception:
                 pass
-            out = subprocess.DEVNULL
+            # stdout sink: DEVNULL sentinel or an open handle — both are valid
+            # Popen stdout values; annotate so mypy accepts either.
+            out: Any = subprocess.DEVNULL
             if log_dir:
                 log_dir.mkdir(parents=True, exist_ok=True)
                 out = open(log_dir / "embed-server.log", "ab")
@@ -977,8 +979,10 @@ class CodebaseIndex:
         ranked = sorted(scores.items(), key=lambda x: -x[1])[:k]
         results = []
         for rid, score in ranked:
-            _rid, path, s, e, text, emb = by_id[rid]
-            results.append({"path": path, "start_line": s, "end_line": e,
+            # `e` shadows nothing here but mypy flags the name reuse with the
+            # earlier except-clause variable; end-line is what this one means.
+            _rid, path, s, end_l, text, emb = by_id[rid]
+            results.append({"path": path, "start_line": s, "end_line": end_l,
                             "score": round(float(score), 5),
                             "snippet": text[:1200],
                             "embedded": bool(emb)})

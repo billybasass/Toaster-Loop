@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Iterator
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 
 from ...serving import instances as srv_inst
@@ -17,6 +17,10 @@ from .base import ApiContext, ApiResponse, SSE_HEARTBEAT_S, _redact
 
 class OverviewRoutes(ApiContext):
     """Overview/status endpoints, the global SSE bus, /api/metrics."""
+
+    # Set by DashboardApp.__init__ (this mixin is composed into it); declared
+    # here so mypy can type the accesses in h_metrics.
+    _metrics_cache: Optional[Tuple[float, str]]
 
     def h_events(self, q: Dict[str, str], b: Dict[str, Any]) -> ApiResponse:
         """SSE global bus. Heartbeat comments every ~15 s; clean disconnect."""

@@ -43,7 +43,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Mapping, Optional
+from typing import Dict, List, Mapping, Optional, Tuple
 
 MIB = 1024 * 1024
 
@@ -114,7 +114,7 @@ def meminfo_kib() -> Optional[Dict[str, int]]:
 
 def _amd_cards(drm_base: Path) -> list:
     """AMD drm cards as (card_dir, pci_class_or_None); sorted, virtual skipped."""
-    cards = []
+    cards: List[Tuple[Path, Optional[str]]] = []
     try:
         entries = sorted(drm_base.glob("card[0-9]"))
     except OSError:

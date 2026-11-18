@@ -80,31 +80,18 @@ select = ["E4", "E9", "F"]
 # sys.path setup.
 "tests/*" = ["F841", "E402", "F811"]
 
-# mypy — incremental adoption (production-readiness pass). The store/registry
-# core is clean and GATES CI; other packages have a known error budget listed
-# per-module below (see the counts at time of writing) so CI stays green while
-# they are cleaned up module by module. Run locally: `mypy toaster-loop` (all
-# modules, report only) or `mypy` (gated subset).
+# mypy — FULL-PACKAGE GATE (production-readiness pass). Previously only the
+# store/registry core gated CI with a per-module error budget; the whole tree
+# is now clean in default mode and gates as one. Last offenders fixed: the
+# Optional-probe conditional-import rebinding pattern in doctor.py (resolve
+# into a narrowed local instead of rebinding the parameter). Future hardening:
+# --strict / check_untyped_defs per module as annotations are added.
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
 check_untyped_defs = false
-# Default target when `mypy` runs with no args (the CI gate).
-files = ["toaster_loop/store", "toaster_loop/registry", "toaster_loop/core/config.py"]
-
-# Known-debt modules: report but never gate (raise the bar by deleting a
-# module from this list once it is clean).
-[[tool.mypy.overrides]]
-module = [
-  "toaster_loop.curate.*",
-  "toaster_loop.serving.*",
-  "toaster_loop.training.*",
-  "toaster_loop.dashboard.*",
-  "toaster_loop.core.*",
-  "toaster_loop.evaluation.*",
-  "toaster_loop.cli",
-]
-ignore_errors = true
+# Default target when `mypy` runs with no args (the CI gate): everything.
+files = ["toaster_loop"]
 
 [tool.pytest.ini_options]
 # Per-test ceiling so a hang fails fast instead of eating the job timeout.

@@ -511,6 +511,9 @@ def _git_clone(repo: str, ref: Optional[str], dest: Path, recursive: bool,
 def _git_update(ref: Optional[str], dest: Path, recursive: bool,
                 log: Callable[[str], None]) -> None:
     git = _require("git", "Install git (apt/brew/winget).")
+    # Optional[str]: a detached HEAD (or empty rev-parse output) means "stay
+    # where we are" — the None case is handled downstream.
+    target: Optional[str]
     if ref:
         target = f"origin/{ref}"
     else:

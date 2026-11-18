@@ -1158,9 +1158,9 @@ def recover(content: Optional[str],
         if rep is not None:
             return rep
     # pass B: unclosed fence (``` opened, never closed).
-    m = _OPEN_FENCE_RE.search(text)
-    if m is not None:
-        rep = _try(m.group(1), ["unclosed_fence"])
+    mo = _OPEN_FENCE_RE.search(text)  # distinct name: `m` above is Match[str]
+    if mo is not None:
+        rep = _try(mo.group(1), ["unclosed_fence"])
         if rep is not None:
             return rep
     # pass C: XML-ish wrappers.

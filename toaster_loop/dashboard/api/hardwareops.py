@@ -388,7 +388,9 @@ doctor (WP7), bench (WP1) and calibrate (WP3).
         eng_id = f"llama-cpp-{str(backend).lower()}"
         taken = [str(e.get("id")) for e in engines_mod.list_engines(self.home)]
         existing = engines_mod.get_engine(self.home, eng_id)
-        body = {
+        # Annotated so body["name"] stays str (the literal's inferred value
+        # type would otherwise be the join str | list[str]).
+        body: Dict[str, Any] = {
             "name": f"llama.cpp ({str(backend).lower()})",
             "kind": "openai",
             "binary": str(exe),

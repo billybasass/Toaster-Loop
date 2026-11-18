@@ -603,7 +603,9 @@ def _start_instance_server(cfg, inst: dict, *,
                                  model_name=model_name, rt=rt)
         child_env_extra = dict(runtime.unified_memory_env(rt))
 
-    out = subprocess.DEVNULL
+    # stdout sink: DEVNULL sentinel or an open handle — both valid for Popen;
+    # annotate so mypy accepts either (same pattern as indexer's spawn).
+    out: Any = subprocess.DEVNULL
     logf = None
     if log_path:
         log_path.parent.mkdir(parents=True, exist_ok=True)

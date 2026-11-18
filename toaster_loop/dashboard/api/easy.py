@@ -97,7 +97,7 @@ the one-shot feature preset enable-all.
                 # updated (so the next manual start uses the new GGUF), but
                 # the profile's server is down right now — say so.
                 if getattr(start, "status", 500) >= 400:
-                    err = {}
+                    err: Dict[str, Any] = {}
                     if isinstance(getattr(start, "body", None), dict):
                         err = start.body.get("error") or {}
                     out["detail"] = (

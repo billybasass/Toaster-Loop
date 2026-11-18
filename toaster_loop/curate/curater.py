@@ -573,7 +573,7 @@ class Curater:
         readable-id change, so directory order is no longer chronological).
         Manifests without a usable created_at keep their directory order at
         the end."""
-        out = []
+        out: List[Dict[str, Any]] = []
         if not self.datasets_root.is_dir():
             return out
         for d in sorted(self.datasets_root.iterdir()):

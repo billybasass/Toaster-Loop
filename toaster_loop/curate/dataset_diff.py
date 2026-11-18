@@ -199,17 +199,17 @@ def diff_datasets(datasets_root: Path, a_id: str, b_id: str) -> Dict[str, Any]:
         hb = _file_hash(b_dir / fname)
         if ha is None and hb is None:
             continue  # file absent on disk in both datasets
-        entry: Dict[str, Any] = {
-            "present_a": ha is not None,
+        fentry: Dict[str, Any] = {   # distinct name: `entry` above is the
+            "present_a": ha is not None,  # trace-id dict from the prior loop
             "present_b": hb is not None,
             "sha256_a": ha,
             "sha256_b": hb,
         }
         if ha is not None and hb is not None:
-            entry["hash_equal"] = ha == hb
+            fentry["hash_equal"] = ha == hb
         else:
-            entry["hash_equal"] = None  # only one side has the file
-        files_out[fname] = entry
+            fentry["hash_equal"] = None  # only one side has the file
+        files_out[fname] = fentry
 
     # ---- row-level content diff for shared jsonl files --------------------
     rows_diff: Dict[str, Any] = {}

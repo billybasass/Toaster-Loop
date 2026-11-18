@@ -2178,8 +2178,9 @@ def cmd_traces_show(args: argparse.Namespace) -> int:
             )
     print("\ntranscript:")
     try:
-        with open(row.jsonl_path, encoding="utf-8") as f:
-            for line in f:
+        # distinct name: `f` above is the feedback dict from the prior loop
+        with open(row.jsonl_path, encoding="utf-8") as _fh:
+            for line in _fh:
                 rec = json.loads(line)
                 kind = rec.get("kind")
                 if kind == "message":
@@ -2334,21 +2335,23 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
         if cmd == "show":
             store = _load()
-            t = P.get_task(store, args.task_id)
-            if t is None:
+            # distinct locals: get_task/next_task return Optional (unlike the
+            # dict-returning branches above that reuse the name `t`)
+            task = P.get_task(store, args.task_id)
+            if task is None:
                 print(f"error: no task {args.task_id!r}", file=sys.stderr)
                 return 1
-            print(json.dumps(t, indent=2, ensure_ascii=False))
+            print(json.dumps(task, indent=2, ensure_ascii=False))
             return 0
 
         if cmd == "next":
             store = _load()
-            t = P.next_task(store)
-            if t is None:
+            nxt = P.next_task(store)
+            if nxt is None:
                 print("(no unblocked tasks)")
                 return 0
-            bl = P.blockers(store, t["id"])
-            line = f"{t['id']} [{t['priority']}] {t['title']}"
+            bl = P.blockers(store, nxt["id"])
+            line = f"{nxt['id']} [{nxt['priority']}] {nxt['title']}"
             if bl:
                 line += " (blocked by " + ", ".join(b["id"] for b in bl) + ")"
             print(line)
@@ -2474,11 +2477,13 @@ def cmd_plan(args: argparse.Namespace) -> int:
             from .core.plan_loop import read_loop_progress
             from .store.paths import resolve_toaster_loop_home
 
-            prog = read_loop_progress(project, resolve_toaster_loop_home(cfg))
-            if prog is None:
+            # distinct local: read_loop_progress is Optional (the `prog` name
+            # above belongs to the loop branch's non-None progress)
+            lp = read_loop_progress(project, resolve_toaster_loop_home(cfg))
+            if lp is None:
                 print("(no loop progress file for this project)")
                 return 0
-            print(json.dumps(prog, indent=2, ensure_ascii=False))
+            print(json.dumps(lp, indent=2, ensure_ascii=False))
             return 0
 
         print(f"error: unknown plan command {cmd!r}", file=sys.stderr)

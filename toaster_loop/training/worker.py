@@ -1017,10 +1017,11 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
                 from ..core import gpumem
                 _pool = gpumem.unified_pool()
                 if _pool is not None:
+                    # gtt_used_mib is Optional (some vendors don't expose it)
                     _diag.append(
                         f"GPU pool: {_pool.free_mib // 1024} GiB free of "
                         f"{_pool.total_mib // 1024} GiB (gtt_used="
-                        f"{_pool.gtt_used_mib // 1024} GiB)")
+                        f"{(_pool.gtt_used_mib or 0) // 1024} GiB)")
             except Exception:
                 pass
             try:
@@ -1308,8 +1309,9 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
                 Trainer,
             )
 
-            opt_kw = ({"optimizer_cls_and_kwargs": (muon_factory, {})}
-                      if muon_factory else {})
+            opt_kw: Dict[str, Any] = (
+                {"optimizer_cls_and_kwargs": (muon_factory, {})}
+                if muon_factory else {})
             return Trainer(
                 model=peft_model,
                 train_dataset=train_ds,
@@ -1320,7 +1322,14 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
                 callbacks=[cb],
                 **opt_kw,
             )
-        from transformers import SFTTrainer  # type: ignore[import-not-found]
+        # transformers 5.x moved SFTTrainer to trl (it was never in 4.x
+        # either — the old `from transformers import SFTTrainer` form dates
+        # from the trl<0.18 re-export era). Import from trl, keeping the
+        # transformers try-first for any env with an ancient combined install.
+        try:
+            from transformers import SFTTrainer  # type: ignore[attr-defined]
+        except ImportError:
+            from trl import SFTTrainer  # type: ignore[assignment]
 
         # Backlog #13: `packing` (default off). Only the unmasked SFTTrainer
         # path can pack; older/newer APIs differ, so a rejected kwarg degrades
@@ -1420,9 +1429,12 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         try:
             kwargs = dict(lora_kwargs)
             kwargs["r"] = int(next_r)
+            # peft's PeftModel.add_adapter(name, config) — mypy resolves the
+            # inherited transformers PreTrainedModel signature (config, name)
+            # here and flags arg 2; runtime dispatch is peft's.
             model.add_adapter(
                 new_name,
-                LoraConfig(**kwargs, task_type=TaskType.CAUSAL_LM, bias="none"))
+                LoraConfig(**kwargs, task_type=TaskType.CAUSAL_LM, bias="none"))  # type: ignore[arg-type]
             model.set_adapter(new_name)
             seeded = grow_lora_state(model, model.state_dict(),
                                      old_name=old_name, new_name=new_name)

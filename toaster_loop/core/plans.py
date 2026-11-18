@@ -508,7 +508,9 @@ def issues(store: Dict[str, Any]) -> set:
     are canonicalized (smallest rotation) so the same cycle never reads as
     "new" after an unrelated edit shifts traversal order."""
     rep = validate(store)
-    out = set()
+    # Heterogeneous tuples ("cycle", tuple) / ("dangling", str, str): widen
+    # the element type so both shapes are legal members.
+    out: set = set()
     for cyc in rep["cycles"]:
         k = cyc.index(min(cyc))
         out.add(("cycle", tuple(cyc[k:] + cyc[:k])))
