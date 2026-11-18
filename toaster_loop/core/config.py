@@ -335,7 +335,7 @@ class ToasterLoopConfig:
     # credentials flow into training data — the recorder logs a loud warning.
     recording_redact_secrets: bool = True
     # Buffer retention (production hardening): YAML `recording.retention_days`
-    # — the default age cutoff for `toaster_loop traces prune` (days; 0 disables
+    # — the default age cutoff for `toaster-loop traces prune` (days; 0 disables
     # the default, i.e. prune then requires an explicit --older-than). The
     # buffer is otherwise append-only forever; like the model janitor, pruning
     # stays a manual/cron action and never runs from a server thread.
@@ -432,7 +432,7 @@ class ToasterLoopConfig:
     tools: dict[str, Any] = field(default_factory=dict)
     # Raw `janitor:` YAML section (backlog #16). Recognized keys:
     #   enabled: bool — run the disk janitor at `train auto-check` time
-    #     (default false; manual runs via `toaster_loop models janitor` always work).
+    #     (default false; manual runs via `toaster-loop models janitor` always work).
     #   retention_days: int — age past which terminal models are archived
     #     (default 30). See registry/janitor.py.
     janitor: dict[str, Any] = field(default_factory=dict)
@@ -635,7 +635,7 @@ class ToasterLoopConfig:
     # Raw `serve:` YAML section (serving-side launch behavior). Recognized keys:
     #   calibration: off|auto      — WP3 per-machine autotune opt-in. `off`
     #     (default, and any unknown value) keeps the launch path byte-identical
-    #     to pre-WP3; `auto` adopts the stored profile from `toaster_loop calibrate`
+    #     to pre-WP3; `auto` adopts the stored profile from `toaster-loop calibrate`
     #     for THIS machine + model as DEFAULTS underneath explicit run_settings
     #     (manual values always win). See serving/calibrate.py.
     #   watchdog_enabled: bool     — WP4 engine watchdog master switch, OFF by

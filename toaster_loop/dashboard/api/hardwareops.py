@@ -510,7 +510,7 @@ doctor (WP7), bench (WP1) and calibrate (WP3).
 
     def h_bench_run(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         """Start a bench run in the background (WP1 semantics identical to
-        `toaster_loop bench`: temperature 0, token-identity check, persisted).
+        `toaster-loop bench`: temperature 0, token-identity check, persisted).
 
         Body: {runs?: int, max_tokens?: int, label?: str, noise_floor?: bool}.
         Progress: SSE `bench.run` events + GET /api/bench/run. A running
@@ -687,7 +687,7 @@ doctor (WP7), bench (WP1) and calibrate (WP3).
     def h_calibrate_run(self, q: Dict[str, str],
                         b: Dict[str, Any]) -> Dict[str, Any]:
         """Start a WP3 autotune sweep in the background (identical adoption
-        rules to `toaster_loop calibrate`: gain > max(3%, noise floor) AND token
+        rules to `toaster-loop calibrate`: gain > max(3%, noise floor) AND token
         identity). Body: {quick?: bool, runs?: int, knobs?: "a,b"}.
 
         Progress: SSE `calibrate.run` events + GET /api/calibrate/run."""

@@ -136,7 +136,7 @@ def requirements_hint(model: Any,
             return ("T1 needs a passing validation report — the stored one "
                     f"failed (pass_rate {v.get('pass_rate', '?')})")
         return ("T1 needs a passing validation report "
-                "(`toaster_loop train validate` golden checks) — none recorded")
+                "(`toaster-loop train validate` golden checks) — none recorded")
     if not shadow_proven(model):
         if isinstance(s, dict) and s.get("skipped"):
             return (f"T2 needs a non-regression shadow verdict — the last one "
@@ -147,7 +147,7 @@ def requirements_hint(model: Any,
                     f"flagged a regression (improvement {imp} vs "
                     f"{s.get('baseline_id', 'unknown baseline')})")
         return ("T2 needs a shadow-baseline verdict with is_regression=false "
-                "(`toaster_loop evaluate shadow`) — none recorded")
+                "(`toaster-loop evaluate shadow`) — none recorded")
     stats = served_stats or {}
     ok = int(stats.get("served_ok", 0) or 0)
     neg = int(stats.get("negative_feedback", 0) or 0)

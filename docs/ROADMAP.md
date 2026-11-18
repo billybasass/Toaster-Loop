@@ -449,7 +449,7 @@ allowlist green. New opt-in command: nothing existing changes when
 
 **Transport — stdio, no socket.** JSON-RPC 2.0 line-delimited over
 stdin/stdout (MCP's canonical local transport): the client spawns
-`python -m toaster-loop mcp` and pipes frames. No listener exists, so the
+`python -m toaster_loop mcp` and pipes frames. No listener exists, so the
 loopback-only rule holds by construction; zero cloud, zero keys. Single-
 threaded synchronous request loop (documented: spec-compliant, keeps the
 confirm store trivially safe). stdout carries JSON-RPC only; diagnostics go

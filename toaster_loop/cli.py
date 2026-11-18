@@ -322,7 +322,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     tshow = tsub.add_parser("show", help="Pretty-print a trace's JSONL record")
     _add_common(tshow)
-    tshow.add_argument("trace_id", help="Trace id (from `toaster_loop traces list`)")
+    tshow.add_argument("trace_id", help="Trace id (from `toaster-loop traces list`)")
     tshow.set_defaults(func=cmd_traces_show)
 
     tstats = tsub.add_parser("stats", help="Buffer statistics")
@@ -374,11 +374,11 @@ def build_parser() -> argparse.ArgumentParser:
                      help="Filter by agent profile/backend (e.g. toaster_loop)")
     cur.add_argument("--model-alias", metavar="ALIAS",
                      help="Filter by model alias that served the traces")
-    # WP12: project filter (same stamp `toaster_loop run --project` writes) — pairs
+    # WP12: project filter (same stamp `toaster-loop run --project` writes) — pairs
     # naturally with per-project plans: curate just this project's work.
     cur.add_argument("--project", metavar="ID",
                      help="Only traces stamped with project ID "
-                          "(see `toaster_loop run --project`)")
+                          "(see `toaster-loop run --project`)")
     cur.add_argument("--include-failures", action="store_true",
                      help="Let failure traces into selection (DPO negatives; "
                           "they still must pass quality gates for SFT)")
@@ -546,7 +546,7 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Why you expect this promotion to help "
                                "(pass 4 #36; recorded on the ledger, later "
                                "paired with the observed score delta by "
-                               "`toaster_loop history --intents`)")
+                               "`toaster-loop history --intents`)")
     mpromote.set_defaults(func=cmd_models_promote)
 
     mroll = mosub.add_parser(
@@ -593,7 +593,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Register an existing trained adapter (e.g. from a run predating "
              "auto-registration) as a model, and export its GGUF",
         description=(
-            "Adopt an adapter directory produced by `toaster_loop train start` "
+            "Adopt an adapter directory produced by `toaster-loop train start` "
             "(or any LoRA/full checkpoint) into the model registry so it shows "
             "up in `models list`, the dashboard Models panel, and can be "
             "exported to GGUF for serving. Pass the job log (--log-path) when "
@@ -673,7 +673,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(hdl)
     hdl.add_argument("repo", help="Repo id")
     hdl.add_argument("--variant", default="",
-                     help="Quant variant name (see `toaster_loop hub variants`)")
+                     help="Quant variant name (see `toaster-loop hub variants`)")
     hdl.set_defaults(func=cmd_hub_download)
 
     hls = _kind_arg(hbsub.add_parser(
@@ -772,7 +772,7 @@ def build_parser() -> argparse.ArgumentParser:
     tchk.add_argument(
         "--trigger",
         action="store_true",
-        help="When the check passes, run `toaster_loop iterate` now (cron entrypoint; "
+        help="When the check passes, run `toaster-loop iterate` now (cron entrypoint; "
              "exits 0 without acting when the gate does not pass)",
     )
     tchk.add_argument("--dry-run", action="store_true",
@@ -786,7 +786,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Stops the toaster_loop-owned llama-server (if any), starts one on the "
             "model's GGUF, and re-points an in-process runner via switch_model. "
-            "Daemonless v0: restart `toaster_loop serve --auto` to pick up new models."
+            "Daemonless v0: restart `toaster-loop serve --auto` to pick up new models."
         ),
     )
     _add_common(dep)
@@ -851,7 +851,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--intent", metavar="ONE_LINER",
         help="What this retrain run expects to improve (pass 4 #36); stored "
              "on the register/promote ledger entries and reviewable via "
-             "`toaster_loop history --intents`.")
+             "`toaster-loop history --intents`.")
     it.set_defaults(func=cmd_iterate)
 
     # -------------------------------------------------------------- evaluate
@@ -906,8 +906,8 @@ def build_parser() -> argparse.ArgumentParser:
     etr.set_defaults(func=cmd_evaluate_transfer)
 
     # --------------------------------------------------------------- evolve
-    # Shape: `toaster_loop evolve <profile> [--goldens FILE] [--k 3 --generations 2]
-    # [--wait]` runs a search; `toaster_loop evolve apply|dismiss <job_id>` are the
+    # Shape: `toaster-loop evolve <profile> [--goldens FILE] [--k 3 --generations 2]
+    # [--wait]` runs a search; `toaster-loop evolve apply|dismiss <job_id>` are the
     # gated follow-ups. One parser with a positional target + manual dispatch
     # (argparse can't make a subcommand default AND take bare positionals).
     evo = sub.add_parser(
@@ -1150,7 +1150,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Start the loopback dashboard as a background process and open it "
             "in the default browser. Idempotent: when a dashboard already runs "
-            "on this home, just prints its URL. `toaster_loop launch --stop` stops "
+            "on this home, just prints its URL. `toaster-loop launch --stop` stops "
             "the launched instance (never foreign processes)."
         ),
     )
@@ -1233,7 +1233,7 @@ def build_parser() -> argparse.ArgumentParser:
             "speculative mode) against this machine + model. A candidate is "
             "adopted only when it beats the current best by MORE THAN "
             "max(3%, measured noise floor) AND generates identical tokens at "
-            "temperature 0 (token-identity rule from `toaster_loop bench`). The "
+            "temperature 0 (token-identity rule from `toaster-loop bench`). The "
             "noise floor is read from a persisted bench record or measured + "
             "persisted on first use. Profiles save under <TOASTER_LOOP_HOME>/"
             "calibrate/ keyed by machine-id + model hash (env "
@@ -1289,7 +1289,7 @@ def build_parser() -> argparse.ArgumentParser:
         _add_common(ip)
         if name != "status":
             ip.add_argument("instance_id",
-                            help="Instance id (see `toaster_loop instances status`)")
+                            help="Instance id (see `toaster-loop instances status`)")
         ip.set_defaults(func=fn)
 
     # ------------------------------------------------------------------- mcp
@@ -1391,7 +1391,7 @@ def _resolve_endpoint(cfg: ToasterLoopConfig, spawn_if_needed: bool):
     raise ServeError(
         "No endpoint available. Provide --gguf (to spawn llama-server) or "
         "--attach <url>. (toaster_loop is standalone — no external server needed; "
-        "run `toaster_loop setup` to build llama.cpp, then `toaster_loop serve --gguf "
+        "run `toaster-loop setup` to build llama.cpp, then `toaster-loop serve --gguf "
         "<model.gguf>`.)"
     )
 
@@ -1456,7 +1456,7 @@ def _resolve_active_gguf(cfg: ToasterLoopConfig) -> None:
         reg.close()
     if active is None or not active.gguf_path:
         raise ServeError(
-            "no ACTIVE model in the registry yet — run `toaster_loop iterate` "
+            "no ACTIVE model in the registry yet — run `toaster-loop iterate` "
             "(or pass --gguf explicitly)"
         )
     print(f"active model: {active.model_id} "
@@ -1537,7 +1537,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
               "also needs a C/C++ compiler)")
         if not runtime.auto_setup_enabled(cfg):
             print("auto-setup: disabled by config/env")
-        print("\nhint: run `toaster_loop setup` to build llama.cpp for this machine.")
+        print("\nhint: run `toaster-loop setup` to build llama.cpp for this machine.")
         return 1
     return 0
 
@@ -1589,7 +1589,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     print(f"\nllama.cpp ready under {build_bin}")
-    print("run `toaster_loop doctor` to confirm, then `toaster_loop serve --gguf <model.gguf>`.")
+    print("run `toaster-loop doctor` to confirm, then `toaster-loop serve --gguf <model.gguf>`.")
     return 0
 
 
@@ -1609,7 +1609,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     status = runtime.check_llama_update(cfg)
     if not status.get("installed"):
         print(f"llama.cpp: {status.get('reason')}")
-        print("run `toaster_loop setup` to install.")
+        print("run `toaster-loop setup` to install.")
         return 1
     print(
         f"llama.cpp: repo={status['repo']} ref={status['ref']} "
@@ -1643,7 +1643,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     except runtime.SetupError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
-    print("llama.cpp updated. Restart any running server (`toaster_loop serve`) to use it.")
+    print("llama.cpp updated. Restart any running server (`toaster-loop serve`) to use it.")
     return 0
 
 
@@ -1732,7 +1732,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
     (home / "logs").mkdir(parents=True, exist_ok=True)
     logf = open(home / "logs" / "dashboard.log", "ab")
     # Only scan lines THIS launch appends: dashboard.log is append-mode and a
-    # previous run's "toaster_loop dashboard:" line would otherwise be picked up as
+    # previous run's "toaster-loop dashboard:" line would otherwise be picked up as
     # the new URL while the child is still booting (stale-port bug). NB: an
     # O_APPEND fd starts at offset 0, so seek to EOF explicitly.
     log_start = logf.seek(0, os.SEEK_END)
@@ -1758,10 +1758,10 @@ def cmd_launch(args: argparse.Namespace) -> int:
             # it seeds sessionStorage via api.js's ?token= bootstrap). The
             # plain line still works when auth was explicitly disabled.
             for line in reversed(txt.splitlines()):
-                if line.startswith("toaster_loop dashboard authed: http"):
+                if line.startswith("toaster-loop dashboard authed: http"):
                     url = line.split(": ", 1)[1].strip()
                     break
-                if line.startswith("toaster_loop dashboard: http"):
+                if line.startswith("toaster-loop dashboard: http"):
                     url = line.split(": ", 1)[1].strip()
         except OSError:
             pass
@@ -1770,8 +1770,8 @@ def cmd_launch(args: argparse.Namespace) -> int:
     state_p.write_text(_json.dumps({"pid": proc.pid, "url": url or "",
                                     "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
                                                                 time.gmtime())}))
-    print(f"toaster_loop dashboard: {url or '(starting — see logs/dashboard.log)'}")
-    print(f"launcher state   : {state_p}  (stop with `toaster_loop launch --stop`)")
+    print(f"toaster-loop dashboard: {url or '(starting — see logs/dashboard.log)'}")
+    print(f"launcher state   : {state_p}  (stop with `toaster-loop launch --stop`)")
     if not args.no_browser and url:
         webbrowser.open(url)
     return 0
@@ -1797,7 +1797,7 @@ def cmd_reset(args: argparse.Namespace) -> int:
     # --keep-models spares MODEL artifacts (exported GGUFs under models/,
     # the registry archive/, and the registry DB that tracks them). The
     # managed engine builds (llama.cpp / llama.cpp-<backend>) are NOT model
-    # artifacts: a fresh state always rebuilds them via `toaster_loop setup`.
+    # artifacts: a fresh state always rebuilds them via `toaster-loop setup`.
     keep_names = {"models", "archive"} if args.keep_models else set()
     entries = sorted(p.name for p in home.iterdir())
     protected = [e for e in entries if e in keep_names]
@@ -1861,7 +1861,7 @@ def cmd_reset(args: argparse.Namespace) -> int:
         if stash is not None:
             kept.append("buffer/toaster_loop.db (registry)")
         print(f"kept: {', '.join(kept)}")
-    print("re-run `toaster_loop doctor` / `toaster_loop setup` to rebuild the runtime if needed.")
+    print("re-run `toaster-loop doctor` / `toaster-loop setup` to rebuild the runtime if needed.")
     return 0
 
 
@@ -1876,7 +1876,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
             print(f"error: {e}", file=sys.stderr)
             return 1
 
-    # `toaster_loop serve` is an explicit user action: clear any crash-loop
+    # `toaster-loop serve` is an explicit user action: clear any crash-loop
     # refusal the dashboard supervisor recorded for the default instance (#28).
     from .serving.supervisor import clear_crash_loop
 
@@ -1919,7 +1919,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
     _apply_overrides(cfg, args)
 
-    # D-17: threadless delegation dispatcher for `toaster_loop run` — async
+    # D-17: threadless delegation dispatcher for `toaster-loop run` — async
     # delegate_task dispatches work here; results are reachable via
     # check_delegation for the process lifetime (and persisted for post-hoc
     # inspection). No inbox wake (no dashboard). Crash reconcile marks rows
@@ -1987,7 +1987,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         # (build_task_prompt: title/description/details/test-strategy +
         # completed-dependency context) and stamps the trace's plan_task so it
         # links task<->trace both ways. The spec's shorthand was
-        # `toaster_loop run --project X --task ID`, but `--task` already means "the
+        # `toaster-loop run --project X --task ID`, but `--task` already means "the
         # one-shot prompt text"; overloading it would make `--task "fix login"`
         # ambiguous, so the plan binding is a distinct flag (documented per
         # AGENTS.md). Needs plans.enabled and a known task id.
@@ -2012,7 +2012,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             except Exception:  # noqa: BLE001 - NullRecorder has no attr set
                 pass
 
-        # No profile_name here on purpose: `toaster_loop run` has no profile
+        # No profile_name here on purpose: `toaster-loop run` has no profile
         # concept (profiles are a dashboard-chat/delegation construct — their
         # system_prompt/tools/capabilities all stay unset for CLI runs). With
         # playbooks.enabled this correctly injects only GLOBAL recipes;
@@ -2079,9 +2079,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def _cmd_run_batch(cfg: ToasterLoopConfig, args: argparse.Namespace, runner,
                    tasks: list) -> int:
-    """`toaster_loop run --batch ...` body (backlog item #8).
+    """`toaster-loop run --batch ...` body (backlog item #8).
 
-    Each task executes exactly like a one-shot `toaster_loop run`: same runner,
+    Each task executes exactly like a one-shot `toaster-loop run`: same runner,
     same recorder, ordinary traces. All loop/checkpoint logic lives in
     core/batch.run_batch (testable without subprocesses); this adapter only
     maps the batch module's run_fn contract onto the live runner.
@@ -2275,7 +2275,7 @@ def _plan_enabled_or_exit(cfg) -> Optional[int]:
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
-    """`toaster_loop plan ...` dispatcher (add/list/show/next/depends/validate/
+    """`toaster-loop plan ...` dispatcher (add/list/show/next/depends/validate/
     set-status/remove/export/import/expand/loop/loop-status)."""
     _setup_logging(args.verbose, args.config)
     cfg = load_config(args.config)
@@ -2489,7 +2489,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
 
 
 def _cmd_plan_import(cfg, args, project) -> int:
-    """`toaster_loop plan import FILE` — text/JSON brief; '-' reads stdin; binaries
+    """`toaster-loop plan import FILE` — text/JSON brief; '-' reads stdin; binaries
     rejected with a clear error (core/plan_llm.clean_text_input)."""
     from pathlib import Path as _P
 
@@ -2714,7 +2714,7 @@ def _print_insights(report: dict) -> None:
                   f"(no comparable traces around promotion)")
 
     if report["empty"]:
-        print("\n(no traces in window — run `toaster_loop run` to record some)")
+        print("\n(no traces in window — run `toaster-loop run` to record some)")
 
 
 def cmd_insights(args: argparse.Namespace) -> int:
@@ -2859,7 +2859,7 @@ def cmd_playbooks_promote(args: argparse.Namespace) -> int:
         if args.check:
             # Gate against an ALREADY-available endpoint only (attach URL /
             # serve state); spawning a GPU server just to gate is left to
-            # the user (`toaster_loop serve` first) — honest refusal otherwise.
+            # the user (`toaster-loop serve` first) — honest refusal otherwise.
             base_url = cfg.effective_attach_url
             model = cfg.model_name or "toaster_loop"
             if not base_url:
@@ -3041,7 +3041,7 @@ def cmd_curate(args: argparse.Namespace) -> int:
         print(
             "  note: train.yaml has no base model yet (REPLACE_* placeholder). "
             "Set training.base_model in your config to an HF id/path "
-            "(e.g. \"Qwen/Qwen3-8B\") before `toaster_loop train start` — GGUFs are "
+            "(e.g. \"Qwen/Qwen3-8B\") before `toaster-loop train start` — GGUFs are "
             "serve-only and cannot be trained on.",
             file=sys.stderr,
         )
@@ -3365,7 +3365,7 @@ def cmd_hub_search(args: argparse.Namespace) -> int:
             m.get("sdk") or "hf")[:4].ljust(4)
         print(f"{tag}  {m['repo_id']:<55} "
               f"dl={m['downloads']:<9} likes={m['likes']}")
-    print("\nnext: toaster_loop hub variants <repo>   then   toaster_loop hub download <repo>")
+    print("\nnext: toaster-loop hub variants <repo>   then   toaster-loop hub download <repo>")
     return 0
 
 
@@ -3393,7 +3393,7 @@ def cmd_hub_variants(args: argparse.Namespace) -> int:
         print(f"{star} {v['variant']:<16} {_fmt_bytes(v['size_bytes']):>9}"
               f"{shards}")
     print("\n* = recommended default. download: "
-          f"toaster_loop hub download {args.repo} [--variant NAME]")
+          f"toaster-loop hub download {args.repo} [--variant NAME]")
     return 0
 
 
@@ -3421,7 +3421,7 @@ def cmd_hub_download(args: argparse.Namespace) -> int:
         return 1
     print(f"done: {_fmt_bytes(job.done_bytes)} -> {job.target_dir}")
     print("the model is now offered by serve/train pickers "
-          "(toaster_loop models catalog / dashboard).")
+          "(toaster-loop models catalog / dashboard).")
     return 0
 
 
@@ -3433,7 +3433,7 @@ def cmd_hub_list(args: argparse.Namespace) -> int:
     items = hub.installed(kind)
     print(f"{kind} folder: {hub.kind_base(kind)}")
     if not items:
-        print("nothing downloaded via the hub yet — try `toaster_loop hub search`")
+        print("nothing downloaded via the hub yet — try `toaster-loop hub search`")
         return 0
     for m in items:
         quants = ",".join((m.get("quants") or [])[:4]) or "full"
@@ -3475,7 +3475,7 @@ def cmd_history(args: argparse.Namespace) -> int:
         rows = ir["rows"]
         if not rows:
             print(ir.get("hint") or "no recorded intents")
-            print("record one with e.g. `toaster_loop models promote v2 "
+            print("record one with e.g. `toaster-loop models promote v2 "
                   "--intent \"fix tool-call regressions\"`")
             return 0
         print(f"{'SEQ':>5}  {'TS':<20}  {'OP':<9} {'TARGET':<7} "
@@ -3523,7 +3523,7 @@ def cmd_models_list(args: argparse.Namespace) -> int:
         reg.close()
     if not models:
         store.close()
-        print("no models registered yet — run `toaster_loop iterate`")
+        print("no models registered yet — run `toaster-loop iterate`")
         return 0
     for m in models:
         mark = "* ACTIVE" if (active and m.model_id == active.model_id) else " "
@@ -3582,8 +3582,8 @@ def cmd_models_promote(args: argparse.Namespace) -> int:
     finally:
         reg.close()
     print(f"promoted {m.model_id} (base={m.base_model})")
-    print("the running server is unchanged — `toaster_loop deploy "
-          f"{m.model_id}` or restart `toaster_loop serve --auto` to go live")
+    print("the running server is unchanged — `toaster-loop deploy "
+          f"{m.model_id}` or restart `toaster-loop serve --auto` to go live")
     return 0
 
 
@@ -3622,7 +3622,7 @@ def cmd_models_archive(args: argparse.Namespace) -> int:
     rec = m.pre_archive or {}
     print(f"archived {m.model_id} "
           f"(was {rec.get('previous_status', '?')}) -> {rec.get('archive_dir')}")
-    print(f"restore with `toaster_loop models restore {m.model_id}`")
+    print(f"restore with `toaster-loop models restore {m.model_id}`")
     return 0
 
 
@@ -3709,7 +3709,7 @@ def cmd_models_adopt(args: argparse.Namespace) -> int:
     print(res.get("note") or "")
     if res.get("gguf_path"):
         print(f"GGUF ready: {res['gguf_path']}")
-    print(f"validate + serve with `toaster_loop models promote "
+    print(f"validate + serve with `toaster-loop models promote "
           f"{res['model_id']}` (promotion requires a validation pass) or "
           "deploy the GGUF from the dashboard Serve panel")
     return 0
@@ -3860,7 +3860,7 @@ def cmd_train_start(args: argparse.Namespace) -> int:
             print(res.get("note") or "")
             if res.get("gguf_path"):
                 print(f"GGUF ready: {res['gguf_path']} — deploy with "
-                      f"`toaster_loop models promote {res['model_id']}` "
+                      f"`toaster-loop models promote {res['model_id']}` "
                       "after validation, or serve directly")
         return 0
     finally:
@@ -3980,7 +3980,7 @@ def cmd_train_resume(args: argparse.Namespace) -> int:
         ckpt = find_resumable_checkpoint(prior_out)
         if ckpt is None:
             print(f"note: no unfinished checkpoint under {prior_out} — "
-                  f"resuming would start from scratch. Run `toaster_loop train "
+                  f"resuming would start from scratch. Run `toaster-loop train "
                   f"start --dataset {dataset_id}` for a clean job.")
             return 1
 
@@ -4237,7 +4237,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
           f"(gguf={result['gguf_path']})")
     if result["stopped_previous"] and result["previous"]:
         print(f"stopped previous server (was {result['previous'].get('base_url')})")
-    print("live agents: restart `toaster_loop run`/`serve`, or in daemon mode "
+    print("live agents: restart `toaster-loop run`/`serve`, or in daemon mode "
           "switch_model is called automatically.")
     return 0
 
@@ -4292,7 +4292,7 @@ def cmd_iterate(args: argparse.Namespace) -> int:
             model_alias=None,
             # None stubs keep the YAML-loaded values (the easy preset already
             # sets curation.formats: both); forcing "both" here silently
-            # overrode a user's formats: setting on plain `toaster_loop iterate`.
+            # overrode a user's formats: setting on plain `toaster-loop iterate`.
             include_failures=False, limit=None, fmt=None,
         ))
         tc = _training_config(cfg, args.config)
@@ -4321,7 +4321,7 @@ def cmd_iterate(args: argparse.Namespace) -> int:
     if res.ok:
         if res.promoted:
             print(f"\nOK: {res.model_id} promoted. "
-                  f"`toaster_loop deploy {res.model_id}` to go live now.")
+                  f"`toaster-loop deploy {res.model_id}` to go live now.")
         elif args.dry_run:
             print("\nOK (dry run): config + dataset validated; nothing trained.")
         return 0
@@ -4506,11 +4506,11 @@ def _print_evolve_result(job) -> None:
     else:
         print("\nno variant beat the current prompt — nothing to apply.")
     print(f"\nproposal stored on job {job.job_id} (params._result). Apply with:"
-          f"\n  toaster_loop evolve apply {job.job_id}")
+          f"\n  toaster-loop evolve apply {job.job_id}")
 
 
 def cmd_evolve(args: argparse.Namespace) -> int:
-    """`toaster_loop evolve <profile> …` — plus manual dispatch of the gated
+    """`toaster-loop evolve <profile> …` — plus manual dispatch of the gated
     follow-ups `evolve apply <job_id>` / `evolve dismiss <job_id>`."""
     if args.target in ("apply", "dismiss"):
         if not args.job_id:
@@ -4665,7 +4665,7 @@ def _utcnow_stamp() -> str:
 
 
 def cmd_rft(args: argparse.Namespace) -> int:
-    """`toaster_loop rft` — rejection-sampling pass as a queued job.
+    """`toaster-loop rft` — rejection-sampling pass as a queued job.
 
     Mirrors `evolve`'s queued-or-runs contract. The master switch (rft.enabled)
     is checked here for a friendly early refusal AND enforced again by the job
@@ -4687,7 +4687,7 @@ def cmd_rft(args: argparse.Namespace) -> int:
         # The job samples from what SERVES; attach-only resolution inside the
         # runner never spawns. Fail early with actionable advice instead of a
         # queued job that errors on endpoint resolution.
-        print("error: no serving endpoint configured — start `toaster_loop serve` "
+        print("error: no serving endpoint configured — start `toaster-loop serve` "
               "/ set attach_url (or --gguf) before rft; rejection sampling "
               "mines the SERVED model and never spawns its own server",
               file=sys.stderr)
@@ -4739,7 +4739,7 @@ def cmd_rft(args: argparse.Namespace) -> int:
 
 
 def cmd_mine_goldens(args: argparse.Namespace) -> int:
-    """`toaster_loop mine-goldens` — distill 👍 traces into golden tasks as a queued
+    """`toaster-loop mine-goldens` — distill 👍 traces into golden tasks as a queued
     job. Mirrors `rft`'s queued-or-runs contract: master switch
     (goldens_mine.enabled) checked here for a friendly early refusal AND
     enforced again by the job runner. No endpoint needed unless --use-judge."""
@@ -4757,7 +4757,7 @@ def cmd_mine_goldens(args: argparse.Namespace) -> int:
         return 2
     if args.use_judge and not cfg.effective_attach_url and not cfg.gguf_path:
         print("error: --use-judge needs a serving endpoint — start "
-              "`toaster_loop serve` / set attach_url first (mining itself does "
+              "`toaster-loop serve` / set attach_url first (mining itself does "
               "not need one)", file=sys.stderr)
         return 2
 
@@ -4821,7 +4821,7 @@ def _bench_resolve_ref(ref: str):
 
 
 def cmd_bench(args: argparse.Namespace) -> int:
-    """`toaster_loop bench` — throughput measurement harness (WP1).
+    """`toaster-loop bench` — throughput measurement harness (WP1).
 
     Modes: measure (default), ``--noise-floor`` (persist a baseline),
     ``--compare A B`` (token-identity-gated speedup verdict), ``--list``.
@@ -4922,7 +4922,7 @@ def _calibrate_model_ref(cfg, ref: Optional[str]) -> Optional[str]:
 
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
-    """`toaster_loop calibrate` — per-machine autotune (WP3).
+    """`toaster-loop calibrate` — per-machine autotune (WP3).
 
     Modes: sweep (default), ``--list``, ``--show``, ``--clear``. The sweep is
     coordinate-wise over run_settings knobs; adoption requires a gain above
@@ -5056,7 +5056,7 @@ def _instances_coexist(args: argparse.Namespace):
 
 
 def cmd_instances_status(args: argparse.Namespace) -> int:
-    """`toaster_loop instances status` — every named instance + WP5 load state."""
+    """`toaster-loop instances status` — every named instance + WP5 load state."""
     from .serving import instances as srv_inst
 
     _setup_logging(args.verbose, args.config)
@@ -5080,14 +5080,14 @@ def cmd_instances_status(args: argparse.Namespace) -> int:
 
 
 def cmd_instances_load(args: argparse.Namespace) -> int:
-    """`toaster_loop instances load <id>` — explicit (re)launch (WP5)."""
+    """`toaster-loop instances load <id>` — explicit (re)launch (WP5)."""
     _setup_logging(args.verbose, args.config)
     coex, cfg, home = _instances_coexist(args)
     from .serving import instances as srv_inst
 
     if srv_inst.get_instance(home, args.instance_id, cfg=cfg) is None:
         print(f"error: no server instance {args.instance_id!r} "
-              "(see `toaster_loop instances status`)", file=sys.stderr)
+              "(see `toaster-loop instances status`)", file=sys.stderr)
         return 1
     try:
         st = coex.load_instance(args.instance_id, reason="manual")
@@ -5100,7 +5100,7 @@ def cmd_instances_load(args: argparse.Namespace) -> int:
 
 
 def cmd_instances_unload(args: argparse.Namespace) -> int:
-    """`toaster_loop instances unload <id>` — graceful stop + unloaded marker (WP5)."""
+    """`toaster-loop instances unload <id>` — graceful stop + unloaded marker (WP5)."""
     from .serving import instances as srv_inst
     from .serving.watchdog import inflight_count
 
@@ -5108,7 +5108,7 @@ def cmd_instances_unload(args: argparse.Namespace) -> int:
     coex, cfg, home = _instances_coexist(args)
     if srv_inst.get_instance(home, args.instance_id, cfg=cfg) is None:
         print(f"error: no server instance {args.instance_id!r} "
-              "(see `toaster_loop instances status`)", file=sys.stderr)
+              "(see `toaster-loop instances status`)", file=sys.stderr)
         return 1
     st = coex._read_state(args.instance_id) or {}
     url = str(st.get("base_url") or "")
@@ -5122,17 +5122,17 @@ def cmd_instances_unload(args: argparse.Namespace) -> int:
               f"(state={coex.load_state_of(args.instance_id)})")
         return 0
     print(f"{args.instance_id}: unloaded (load it again with "
-          f"`toaster_loop instances load {args.instance_id}`)")
+          f"`toaster-loop instances load {args.instance_id}`)")
     return 0
 
 
 def cmd_mcp(args: argparse.Namespace) -> int:
-    """`toaster_loop mcp` — MCP control plane over stdio (WP6).
+    """`toaster-loop mcp` — MCP control plane over stdio (WP6).
 
     Serves JSON-RPC 2.0 line-delimited on stdin/stdout (MCP's canonical
     stdio transport): no socket is opened, so the loopback-only rule holds
     by construction. Opt-in command: nothing else changes when it is not
-    invoked. See toaster_loop/mcp/ and README "toaster_loop mcp".
+    invoked. See toaster_loop/mcp/ and README "toaster-loop mcp".
     """
     from .mcp.server import serve_stdio
 

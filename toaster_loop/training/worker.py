@@ -1233,7 +1233,7 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     # Checkpoints + eval cadence (backlog item #4). save_strategy="no" is
     # replaced with step/epoch cadence under the job's output_dir; this also
     # powers checkpoint resume (pass 3 #21: resolve_resume_path below feeds
-    # trainer.train(resume_from_checkpoint=...); `toaster_loop train resume` re-queues
+    # trainer.train(resume_from_checkpoint=...); `toaster-loop train resume` re-queues
     # an interrupted job against these checkpoints).
     cadence = plan_cadence(
         len(train_ds),
@@ -1828,7 +1828,7 @@ def find_llama_cpp_root() -> Optional[Path]:
     """Locate a llama.cpp checkout with the conversion scripts.
 
     toaster_loop is standalone: checks $TOASTER_LOOP_LLAMA_CPP first, then its own
-    managed build (<TOASTER_LOOP_HOME>/llama.cpp, created by `toaster_loop setup`),
+    managed build (<TOASTER_LOOP_HOME>/llama.cpp, created by `toaster-loop setup`),
     /opt, and a sibling ../llama.cpp checkout. It does NOT probe foreign
     per-installer directories.
     """
@@ -2030,7 +2030,7 @@ def run_export(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> D
         raise RuntimeError(
             "GGUF export needs a llama.cpp checkout with convert_hf_to_gguf.py. "
             "Checked $TOASTER_LOOP_LLAMA_CPP, <TOASTER_LOOP_HOME>/llama.cpp, /opt/llama.cpp "
-            "and ../llama.cpp. Run `toaster_loop setup` (or point TOASTER_LOOP_LLAMA_CPP at "
+            "and ../llama.cpp. Run `toaster-loop setup` (or point TOASTER_LOOP_LLAMA_CPP at "
             f"it) and re-run the export job. Adapter artifact kept at {adapter_dir}."
         )
 

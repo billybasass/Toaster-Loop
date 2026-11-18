@@ -6,25 +6,25 @@ dashboard uses (``DashboardApp.handle``) or read the same files the CLI
 reads. Mutating tools are wrapped by the server's plan-then-confirm flow
 before their executor runs.
 
-Classification table (also in README "toaster_loop mcp"):
+Classification table (also in README "toaster-loop mcp"):
 
   tool              class     mirrors
   ────────────────  ────────  ─────────────────────────────────────────────
   status            read      GET /api/status  (`toaster_loop` overview chips)
-  instances_list    read      GET /api/servers (`toaster_loop instances status`)
-  models_list       read      GET /api/models  (`toaster_loop models list`)
+  instances_list    read      GET /api/servers (`toaster-loop instances status`)
+  models_list       read      GET /api/models  (`toaster-loop models list`)
   logs_tail         read      <home>/logs/server-<id>.log (bounded tail)
   instance_start    MUTATING  POST /api/servers/<id>/start
   instance_stop     MUTATING  POST /api/servers/<id>/stop
   instance_load     MUTATING  POST /api/servers/<id>/load   (WP5)
   instance_unload   MUTATING  POST /api/servers/<id>/unload (WP5)
-  curate_enqueue    MUTATING  POST /api/curate  (`toaster_loop curate`, queued)
-  train_enqueue     MUTATING  POST /api/train   (`toaster_loop train start`)
+  curate_enqueue    MUTATING  POST /api/curate  (`toaster-loop curate`, queued)
+  train_enqueue     MUTATING  POST /api/train   (`toaster-loop train start`)
   validate          MUTATING  training.validate.validate_model (spawns a
                               llama-server + occupies the GPU: side effects,
                               even though no registry/buffer state is written)
-  promote           MUTATING  POST /api/models/promote (`toaster_loop models promote`)
-  bench             MUTATING  `toaster_loop bench` measure mode (may spawn a
+  promote           MUTATING  POST /api/models/promote (`toaster-loop models promote`)
+  bench             MUTATING  `toaster-loop bench` measure mode (may spawn a
                               server; persists a record under <home>/bench/)
 
 `validate` classification rationale: it does not mutate the registry, but its
@@ -212,7 +212,7 @@ def _exec_promote(ctx: ToolContext, args: Dict[str, Any]) -> Any:
 def _exec_validate(ctx: ToolContext, args: Dict[str, Any]) -> Any:
     """Replay the golden suite against one registry model's GGUF.
 
-    Same code path `toaster_loop iterate` uses for its validation gate
+    Same code path `toaster-loop iterate` uses for its validation gate
     (training.validate.validate_model + cli._validation_config). Spawns a
     temporary llama-server; writes no registry/buffer state — classified
     mutating because of the process/GPU side effect.
@@ -240,7 +240,7 @@ def _exec_validate(ctx: ToolContext, args: Dict[str, Any]) -> Any:
 
 
 def _exec_bench(ctx: ToolContext, args: Dict[str, Any]) -> Any:
-    """`toaster_loop bench` measure mode (WP1 harness), same functions.
+    """`toaster-loop bench` measure mode (WP1 harness), same functions.
 
     Endpoint resolution mirrors cmd_bench: an --attach URL (loopback-only,
     enforced here before anything else) or the configured/spawned
@@ -472,7 +472,7 @@ def build_tools() -> List[Tool]:
             name="instances_list",
             description=("Every managed serving instance with its load state "
                          "(loaded|unloaded|unloading|stopped) — mirrors "
-                         "`toaster_loop instances status`."),
+                         "`toaster-loop instances status`."),
             input_schema=_obj({}),
             mutating=False,
             executor=_exec_instances_list,
@@ -480,7 +480,7 @@ def build_tools() -> List[Tool]:
         Tool(
             name="models_list",
             description=("Model registry rows + lineage + active pointer — "
-                         "mirrors `toaster_loop models list`."),
+                         "mirrors `toaster-loop models list`."),
             input_schema=_obj({}),
             mutating=False,
             executor=_exec_models_list,
@@ -566,7 +566,7 @@ def build_tools() -> List[Tool]:
         Tool(
             name="curate_enqueue",
             description=("Queue a curation job over the experience buffer — "
-                         "mirrors `toaster_loop curate` / POST /api/curate. The "
+                         "mirrors `toaster-loop curate` / POST /api/curate. The "
                          "job runs in-process (no GPU slot). "
                          "Plan-then-confirm."),
             input_schema=_obj({**{
@@ -577,7 +577,7 @@ def build_tools() -> List[Tool]:
                 "since": {"type": "string",
                           "description": "ISO8601 lower bound."},
                 "profile": {"type": "string"},
-                # WP12: project id filter (mirrors `toaster_loop curate --project`);
+                # WP12: project id filter (mirrors `toaster-loop curate --project`);
                 # the dashboard handler already honors body["project"].
                 "project": {"type": "string",
                             "description": ("Only curate traces stamped with "
@@ -600,7 +600,7 @@ def build_tools() -> List[Tool]:
         Tool(
             name="train_enqueue",
             description=("Queue an SFT/DPO/GRPO training job for a curated "
-                         "dataset — mirrors `toaster_loop train start` / POST "
+                         "dataset — mirrors `toaster-loop train start` / POST "
                          "/api/train. Single-flight: while one job runs this "
                          "returns an error (HTTP 409 semantics), it never "
                          "queues silently. Plan-then-confirm."),
@@ -622,7 +622,7 @@ def build_tools() -> List[Tool]:
         Tool(
             name="validate",
             description=("Replay the golden validation suite against one "
-                         "registry model's GGUF (same gate `toaster_loop iterate` "
+                         "registry model's GGUF (same gate `toaster-loop iterate` "
                          "uses). Classified MUTATING: it spawns a temporary "
                          "llama-server and occupies the GPU, though it writes "
                          "no registry state. Plan-then-confirm."),
@@ -641,7 +641,7 @@ def build_tools() -> List[Tool]:
         Tool(
             name="promote",
             description=("Promote a validated model to the active pointer — "
-                         "mirrors `toaster_loop models promote` / POST "
+                         "mirrors `toaster-loop models promote` / POST "
                          "/api/models/promote. Plan-then-confirm."),
             input_schema=_obj({**{
                 "model_id": {"type": "string"},
@@ -658,7 +658,7 @@ def build_tools() -> List[Tool]:
         Tool(
             name="bench",
             description=("Measure prompt/generation tokens/sec (WP1 harness; "
-                         "mirrors `toaster_loop bench` measure mode). May spawn a "
+                         "mirrors `toaster-loop bench` measure mode). May spawn a "
                          "server and persists a record under <home>/bench/. "
                          "Plan-then-confirm."),
             input_schema=_obj({**{

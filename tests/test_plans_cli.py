@@ -1,4 +1,4 @@
-"""WP12 plans: CLI round-trips (`toaster_loop plan ...`, run --plan-task)."""
+"""WP12 plans: CLI round-trips (`toaster-loop plan ...`, run --plan-task)."""
 
 from __future__ import annotations
 
@@ -204,7 +204,7 @@ def test_plan_loop_status_empty(env, capsys):
 
 
 def test_plan_loop_single_flight_conflict(env, monkeypatch, capsys):
-    """Second `toaster_loop plan loop` while one runs => conflict exit 1, no queue."""
+    """Second `toaster-loop plan loop` while one runs => conflict exit 1, no queue."""
     import threading
 
     from toaster_loop.core import plan_loop as pl

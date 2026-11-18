@@ -169,8 +169,8 @@ def make_server(
     sse_slots = threading.Semaphore(_max_sse_connections(app.cfg))
 
     class Handler(BaseHTTPRequestHandler):
-        server_version = "toaster_loop-dashboard"
-        sys_version = ""  # do not leak the Python version
+        server_version = "httpd"  # generic; no product/Python fingerprint
+        sys_version = ""
         protocol_version = "HTTP/1.1"  # needed for chunked SSE responses
 
         # -- helpers ------------------------------------------------------
@@ -588,7 +588,7 @@ def serve_dashboard(
         httpd.toaster_loop_app.startup_dispatcher()  # type: ignore[attr-defined]
     except DispatcherAlreadyRunning as e:
         httpd.server_close()
-        raise SystemExit(f"toaster_loop dashboard refused to start: {e}")
+        raise SystemExit(f"toaster-loop dashboard refused to start: {e}")
     except Exception:
         logger.exception("queue dispatcher failed to start")
     # D-17 (audit §4): delegation dispatcher — bounded worker pool + inbox
@@ -670,21 +670,27 @@ def serve_dashboard(
     except Exception:
         logger.exception("coexistence idle loop failed to start")
     if block:
-        print(f"toaster_loop dashboard: {url}")
+        print(f"toaster-loop dashboard: {url}")
         if tok:
-            # Machine-readable line `toaster_loop launch` parses so the browser is
+            # Machine-readable line `toaster-loop launch` parses so the browser is
             # opened already authenticated (api.js moves ?token= into
-            # sessionStorage and strips it from history).
-            print(f"toaster_loop dashboard authed: {url}?token={tok}")
-            print(f"token auth ON — open {url}?token={tok} or set the "
+            # sessionStorage and strips it from history). Kept for the launcher;
+            # the human-facing advice below deliberately does NOT repeat a
+            # token-bearing URL — that string would land in shell history and,
+            # when typed manually, browser history too. The token file is the
+            # durable, copy-safe source.
+            print(f"toaster-loop dashboard authed: {url}?token={tok}")
+            print("token auth ON — open the URL above from `toaster-loop launch` "
+                  "(auto-authenticated), or read the token from "
+                  "<home>/dashboard.token and send it as the "
                   "X-Toaster-Loop-Token header on /api/* calls")
         if lan_on:
             lan = _lan_ip()
             if lan:
                 lan_url = f"http://{lan}:{p}/"
-                print(f"toaster_loop dashboard (LAN): {lan_url}")
+                print(f"toaster-loop dashboard (LAN): {lan_url}")
                 if tok:
-                    print(f"toaster_loop dashboard LAN authed: {lan_url}?token={tok}")
+                    print(f"toaster-loop dashboard LAN authed: {lan_url}?token={tok}")
             print("Exposed to the local network (dashboard.expose_lan) — "
                   "everyone on this network can reach the UI; token auth is "
                   "required.")

@@ -7,7 +7,7 @@ on prompt *text*, not line index, so reordering/duplicating the input file
 never re-runs finished work — and deliberately NOT checkpointing infra
 failures so they retry on resume). Multiprocessing Pool is dropped:
 toaster_loop drives a single local GPU, so batch tasks run sequentially through
-the same runner/recorder path as one-shot ``toaster_loop run`` calls. Output
+the same runner/recorder path as one-shot ``toaster-loop run`` calls. Output
 traces are ordinary buffer records; curation picks them up unchanged.
 
 Resume semantics (the valuable part):
@@ -65,7 +65,7 @@ class BatchInputError(Exception):
 def load_tasks(path: Path | str) -> List[str]:
     """Parse a batch task file into a list of task strings.
 
-    Schema (documented in ``toaster_loop run --help`` / README): one JSON value
+    Schema (documented in ``toaster-loop run --help`` / README): one JSON value
     per line — either ``{"task": "..."}`` (extra keys are ignored in v0) or
     a bare JSON string. Blank/whitespace-only lines are tolerated. Anything
     else raises :class:`BatchInputError` with the 1-based line number.

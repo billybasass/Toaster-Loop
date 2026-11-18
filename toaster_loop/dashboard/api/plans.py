@@ -1,7 +1,7 @@
 """WP12 plan endpoints: GET/POST /api/plans/<project_id>.
 
 One store, three surfaces (CLI, dashboard, MCP): everything here goes
-through core/plans.py — the same functions `toaster_loop plan ...` uses — so the
+through core/plans.py — the same functions `toaster-loop plan ...` uses — so the
 dashboard and CLI can never disagree. Mutations publish SSE ``plan.updated``
 {project, task_ids}; the autonomous loop publishes ``plan.loop`` per
 iteration (injected bus publish; see core/plan_loop.py).

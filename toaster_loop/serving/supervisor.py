@@ -72,7 +72,7 @@ def find_llama_server(
         raise ServeError(
             "Could not find llama-server on PATH or in common locations "
             f"({', '.join(str(d) for d in runtime.search_dirs())}). "
-            "Install llama.cpp, run `toaster_loop setup`, set TOASTER_LOOP_LLAMA_SERVER, "
+            "Install llama.cpp, run `toaster-loop setup`, set TOASTER_LOOP_LLAMA_SERVER, "
             "or use --attach mode."
         )
 
@@ -298,7 +298,7 @@ _multi_atexit_registered = False
 # MAX_FAILURES failed start/healthcheck cycles inside CRASH_LOOP_WINDOW_S put
 # the instance in a refused `crash_loop` state: further AUTO starts (the
 # dashboard autostart thread) raise instead of respawning. An explicit
-# user-initiated start (dashboard Start button, `toaster_loop serve`) calls
+# user-initiated start (dashboard Start button, `toaster-loop serve`) calls
 # clear_crash_loop() and retries normally. Only failed spawn/healthcheck
 # cycles count; a server that goes healthy resets its history.
 # ---------------------------------------------------------------------------
@@ -499,7 +499,7 @@ def start_instance_server(cfg, inst: dict, *, log_path: Optional[Path] = None,
             f"instance {crash_key!r} is in a crash loop "
             f"({CRASH_LOOP_MAX_FAILURES} failed starts within "
             f"{CRASH_LOOP_WINDOW_S / 60:.0f} min) — refusing to respawn. "
-            "Start it explicitly from the dashboard or `toaster_loop serve` to "
+            "Start it explicitly from the dashboard or `toaster-loop serve` to "
             "clear the crash-loop state."
         )
     try:

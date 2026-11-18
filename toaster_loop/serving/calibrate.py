@@ -1,4 +1,4 @@
-"""Per-machine autotune (WP3): `toaster_loop calibrate` sweep + profile store.
+"""Per-machine autotune (WP3): `toaster-loop calibrate` sweep + profile store.
 
 Sweeps llama-server knobs that are ALREADY mapped in :mod:`run_args`
 (kv cache dtype, flash attention, -ngl via the gpu_memory_pct budget,
@@ -15,7 +15,7 @@ Two rules this module adds on top:
 1. ADOPTION THRESHOLD — a candidate value is adopted only when it beats the
    current best by MORE THAN ``max(3%, noise_floor_pct)``, where the noise
    floor comes from :func:`bench.load_noise_floor` (measured + persisted on
-   first use, exactly like ``toaster_loop bench --noise-floor``). Effects inside the
+   first use, exactly like ``toaster-loop bench --noise-floor``). Effects inside the
    floor are recorded as rejected, never claimed as wins.
 2. TOKEN IDENTITY — the candidate's generated token streams must match the
    current best's (same semantics as :func:`bench.compare_records`); a faster
@@ -338,7 +338,7 @@ def ensure_noise_floor(measure_fn: "MeasureFn", baseline_settings: Dict[str, Any
                        ) -> Tuple[Optional[Dict[str, Any]], Optional[float]]:
     """The newest persisted noise floor, or a fresh estimate (persisted).
 
-    Mirrors ``toaster_loop bench --noise-floor``: repeat the BASELINE settings and
+    Mirrors ``toaster-loop bench --noise-floor``: repeat the BASELINE settings and
     persist the record as kind=noise_floor so later runs (and WPs) share it."""
     nf = bench.load_noise_floor()
     if nf is not None:
@@ -560,7 +560,7 @@ def format_summary(profile: Dict[str, Any]) -> str:
     nf_pct = (profile.get("noise_floor") or {}).get("spread_pct")
     thr = profile.get("threshold_pct", MIN_GAIN_PCT)
     lines = [
-        f"toaster_loop calibrate — machine={str(profile.get('machine_id', ''))[:16]} "
+        f"toaster-loop calibrate — machine={str(profile.get('machine_id', ''))[:16]} "
         f"model={str(profile.get('model_hash', ''))[:12]}… "
         f"(runs/candidate={profile.get('runs_per_candidate')})",
         f"noise floor: {nf_pct if nf_pct is not None else 'n/a'}%  |  adoption "

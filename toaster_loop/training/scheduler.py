@@ -472,7 +472,7 @@ def cron_trigger_status(cfg_home: Optional[str] = None) -> Dict[str, Any]:
     out: Dict[str, Any] = {"installed": None, "line": line,
                            "note": "could not inspect the crontab"}
     if os.name == "nt":
-        out["note"] = ("Windows: schedule `toaster_loop train auto-check --trigger` "
+        out["note"] = ("Windows: schedule `toaster-loop train auto-check --trigger` "
                        "in Task Scheduler (toaster_loop does not touch it)")
         return out
     try:
@@ -505,7 +505,7 @@ class Scheduler:
     ``worker_command`` is an argv prefix; the worker args are appended. Default
     runs this package's worker with the current interpreter (or
     TrainingConfig.python when set). Tests inject a stub script — that is how
-    `toaster_loop iterate` is exercised without GPU.
+    `toaster-loop iterate` is exercised without GPU.
 
     ``observer`` (Phase 5a) is an optional callback ``(job_id, state)`` invoked
     after every state transition this scheduler performs (running/done/error/

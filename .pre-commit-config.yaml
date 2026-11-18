@@ -1,0 +1,26 @@
+# Pre-commit gates — the CI checks as honor-system insurance (production-
+# readiness pass finding: lint was failing on main because nothing ran it).
+# Hooks mirror CI exactly so a clean commit is a green push. Install once:
+#   uv run pre-commit install
+# Run manually over everything:  uv run pre-commit run --all-files
+#
+# Local hooks (not remote language-runners) reuse the project venv via `uv
+# run`, so hook and CI resolve identical locked versions — no second copy of
+# ruff/mypy drifting from uv.lock.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff (CI lint set)
+        entry: uv run --frozen ruff check toaster_loop tests
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Gated mypy subset only (same default target as CI; see [tool.mypy]).
+      - id: mypy-gated
+        name: mypy (gated core)
+        entry: uv run --frozen mypy
+        language: system
+        pass_filenames: false
+        always_run: true

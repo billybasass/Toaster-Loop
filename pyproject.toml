@@ -20,14 +20,26 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.6", "mypy>=1.11"]
+# pytest-timeout: a hung test must fail CI, not wedge a runner (the plugin is
+# also a local guard; --timeout is set in [tool.pytest.ini_options]).
+dev = ["pytest>=8.0", "pytest-cov>=5.0", "pytest-timeout>=2.3", "ruff>=0.6", "mypy>=1.11",
+       # Artifacts smoke: CI builds the wheel and installs it into a clean venv
+       # (packaging regressions — e.g. missing dashboard static — otherwise
+       # ship silently since every test runs from the source tree).
+       "build>=1.2",
+       # Local git hooks mirroring the CI gates (.pre-commit-config.yaml).
+       "pre-commit>=3.7"]
+# Upper bounds: transformers/trl churn their trainer APIs between majors, and
+# uv.lock resolves to 5.x/1.x today (validated by scripts/ci_train_smoke.py in
+# CI). Bounding keeps a fresh `uv sync` from silently pulling an incompatible
+# major; bump deliberately together with a smoke run.
 training = [
-  "torch>=2.4",
-  "transformers>=4.45",
-  "peft>=0.13",
-  "trl>=0.12",
-  "datasets>=3.0",
-  "accelerate>=0.34",
+  "torch>=2.4,<3",
+  "transformers>=4.45,<6",
+  "peft>=0.13,<1",
+  "trl>=0.12,<2",
+  "datasets>=3.0,<6",
+  "accelerate>=0.34,<2",
   "bitsandbytes>=0.43; platform_system == 'Linux'",
   # Pre-quantized HF checkpoints (compressed-tensors format, e.g. NVFP4/
   # FP8 releases) carry a quantization_config transformers cannot even parse
@@ -93,3 +105,8 @@ module = [
   "toaster_loop.cli",
 ]
 ignore_errors = true
+
+[tool.pytest.ini_options]
+# Per-test ceiling so a hang fails fast instead of eating the job timeout.
+# Generous: the hermetic suite's slowest tests are process-lifecycle ones.
+timeout = 180

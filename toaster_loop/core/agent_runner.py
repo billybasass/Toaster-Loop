@@ -382,7 +382,7 @@ class ToasterLoopAgentClient:
                     lsp_config=self.lsp_config)
         # Backlog #9: workspace containment — THE single enforcement point.
         # Applied here (tool-impl construction time) so every runner built by
-        # create_runner — CLI `toaster_loop run` and dashboard chat alike — shares
+        # create_runner — CLI `toaster-loop run` and dashboard chat alike — shares
         # identical semantics, while direct ToasterLoopAgentClient construction in
         # tests stays unrestricted unless roots are passed. The wrapper is
         # outermost: containment refusals short-circuit before the tool (and
@@ -770,7 +770,7 @@ class ToasterLoopAgentClient:
         except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
             raise AgentBackendError(
                 f"Cannot reach inference server at {self.base_url}: {e}. "
-                "Is `toaster_loop serve` running?"
+                "Is `toaster-loop serve` running?"
             ) from e
         if r.status_code != 200:
             raise AgentBackendError(
@@ -902,7 +902,7 @@ class ToasterLoopAgentClient:
         except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
             raise AgentBackendError(
                 f"Cannot reach inference server at {self.base_url}: {e}. "
-                "Is `toaster_loop serve` running?"
+                "Is `toaster-loop serve` running?"
             ) from e
         if not got_any:
             # Stream opened but carried nothing: let _chat retry non-stream.

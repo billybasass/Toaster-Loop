@@ -36,7 +36,7 @@ panel-side file access is needed):
                 "rows":[{"line","exact","norm","in_key","out"},...]} —
     per-row comparison keys. ``out`` is normalized + truncated to
     _MAX_STORED_OUTPUT chars; edit-distance runs on that stored view. Built
-    at import time; ``toaster_loop datasets lint`` regenerates it; imports rebuild
+    at import time; ``toaster-loop datasets lint`` regenerates it; imports rebuild
     missing/stale sidecars of OTHER datasets on demand (cheap, O(rows) once
     per dataset — cross-dataset scans never re-read sft.jsonl per row).
   flags.json   {"sidecar_version":1,"flags":{"<line>":[reasons]}} — written

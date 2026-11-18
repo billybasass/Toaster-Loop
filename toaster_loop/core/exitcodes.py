@@ -9,7 +9,7 @@ Established codes are NOT renumbered; new ones extend the set:
        invocation mistakes checked after parsing (mutually exclusive
        flags, bad ``--config-key`` override shape, missing required
        operand for a sub-operation). This matches argparse's own
-       exit code, so the convention is coherent. `toaster_loop bench
+       exit code, so the convention is coherent. `toaster-loop bench
        compare` with an unreadable/invalid operand also exits 2 (WP1).
   3    invalid configuration — the YAML config failed validation and
        the consolidated problem report (core/config.ConfigError,

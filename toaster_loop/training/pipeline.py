@@ -1,4 +1,4 @@
-"""`toaster_loop iterate` — one-call loop closure: curate → train → export → validate.
+"""`toaster-loop iterate` — one-call loop closure: curate → train → export → validate.
 
 Stage flow (each stage records its job id in the returned report):
 
@@ -983,7 +983,7 @@ def run_iterate(
                 f"auto-promotion skipped: derived capability tier T{tier} < "
                 f"T{min_tier} (validation.min_tier_auto_deploy; set 0 to "
                 f"disable) — {requirements_hint(row_now, stats)}. Model "
-                f"stays validated for manual `toaster_loop models promote "
+                f"stays validated for manual `toaster-loop models promote "
                 f"{model.model_id}`.")
     try:
         # actor="worker": the pipeline runs inside the worker subprocess (#31).

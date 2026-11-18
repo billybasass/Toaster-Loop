@@ -26,7 +26,7 @@ with toaster_loop's safety rails bolted on:
   * The output is ALWAYS a proposal: lineage + best variant + unified diff,
     stored on the job row (``params._result``). Nothing here ever touches the
     profile config; applying happens only through the explicit
-    ``toaster_loop evolve apply <job_id>`` command or the dashboard Apply button.
+    ``toaster-loop evolve apply <job_id>`` command or the dashboard Apply button.
 
 Cost bound (documented): at most ``k x G`` mutation calls,
 ``(1 + k x G) x |goldens|`` golden replay generations per generation wave and
@@ -659,7 +659,7 @@ def apply_prompt_to_config(config_path: Path, profile_name: str,
     and the full lineage stays on the job row). The file itself also gets a
     ``.bak`` copy, matching h_config_put's write pattern.
 
-    NEVER called automatically — only from `toaster_loop evolve apply` or the
+    NEVER called automatically — only from `toaster-loop evolve apply` or the
     dashboard Apply button.
     """
     import yaml

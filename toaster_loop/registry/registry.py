@@ -1131,7 +1131,7 @@ class ModelRegistry:
             if m.pinned:
                 raise RegistryError(
                     f"refusing to archive pinned model {model_id} "
-                    "(`toaster_loop models unpin " + model_id + "` first)"
+                    "(`toaster-loop models unpin " + model_id + "` first)"
                 )
             if m.status not in ARCHIVABLE_STATUSES:
                 hint = ""

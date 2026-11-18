@@ -465,7 +465,6 @@ dependency wiring only. Route handlers resolve by name via getattr.
 
         def _work() -> None:
             from ..training.pipeline import finalize_standalone_train
-            from ..training.scheduler import SchedulerError
 
             params = job.params if isinstance(job.params, dict) else {}
             # Wait for the train job's slot to actually release (its run_job

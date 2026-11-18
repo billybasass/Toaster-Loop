@@ -2135,6 +2135,46 @@ def test_playbooks_table_via_tracestore(tmp_path):
         s.close()
 
 
+def test_tracestore_refuses_newer_schema(tmp_path):
+    """Rolling back to an older binary must refuse, not corrupt (P1 #11)."""
+    from toaster_loop.store.db import SCHEMA_VERSION, SchemaTooNewError
+
+    db = tmp_path / "x.db"
+    s = TraceStore(db)  # opens + stamps user_version = SCHEMA_VERSION
+    s.close()
+    # Simulate a future release having migrated this DB forward.
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(SchemaTooNewError, match="written by toaster_loop schema v11"):
+        TraceStore(db)
+
+
+def test_tracestore_opens_legacy_unmarked_db(tmp_path):
+    """A DB from before the user_version guard (marker 0) opens + gets stamped."""
+    import sqlite3
+    from toaster_loop.store.db import SCHEMA_VERSION
+
+    db = tmp_path / "x.db"
+    s = TraceStore(db)
+    s.close()
+    # Simulate a pre-guard release: wipe the marker back to 0.
+    conn = sqlite3.connect(str(db))
+    conn.execute("PRAGMA user_version = 0")
+    conn.commit()
+    conn.close()
+
+    s2 = TraceStore(db)  # must NOT raise; legacy DB is forward-tolerant
+    try:
+        ver = s2._conn.execute("PRAGMA user_version").fetchone()[0]
+        assert ver == SCHEMA_VERSION  # re-stamped on open
+    finally:
+        s2.close()
+
+
 # -------------------------------------------------------------- CLI smoke
 
 def test_cli_playbooks_end_to_end(tmp_path, monkeypatch, capsys):
@@ -6369,10 +6409,10 @@ def test_legacy_start_respects_crash_loop_budget(tmp_path, stub_binary):
 # ------------------------- CLI deploy detached path: budget + state parity (#4)
 
 def test_cli_deploy_records_crash_loop_failure(tmp_path, stub_binary):
-    """start_server_detached (the `toaster_loop models deploy` path) records each
+    """start_server_detached (the `toaster-loop models deploy` path) records each
     failed spawn/healthcheck cycle under the "default" key so the dashboard's
     crash_loop_status is honest — but an explicit CLI invocation never refuses:
-    it clears the budget up front (user-intent signal, like `toaster_loop serve`)
+    it clears the budget up front (user-intent signal, like `toaster-loop serve`)
     and re-arms only on failure."""
     from toaster_loop.serving import supervisor as sup_mod
     from toaster_loop.serving.deploy import start_server_detached

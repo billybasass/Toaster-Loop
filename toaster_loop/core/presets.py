@@ -22,7 +22,7 @@ Deliberate exclusions (the "optimal" part; mirror training/easy.py's reasoning):
   * ``janitor.enabled`` — makes the cron entrypoint archive (and operational
     files age-delete) automatically; opt-in stays with the human.
   * ``serve.calibration: auto`` — only when a calibration profile exists for
-    this machine (``toaster_loop calibrate`` hasn't been run => nothing to apply and
+    this machine (``toaster-loop calibrate`` hasn't been run => nothing to apply and
     launch behavior would change for no benefit).
   * ``tools.lsp.enabled`` — only when a language server is actually on PATH
     (otherwise it is pure probe overhead per write).
@@ -80,7 +80,7 @@ def lsp_available(path: Optional[str] = None) -> bool:
 def calibration_ready(home: Optional[str] = None) -> bool:
     """True if at least one calibration profile is stored for this machine.
 
-    serve.calibration:auto only means something once `toaster_loop calibrate` has
+    serve.calibration:auto only means something once `toaster-loop calibrate` has
     produced (and adopted) a profile; enabling it blind changes launch code
     for zero measured benefit.
     """

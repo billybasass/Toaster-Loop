@@ -2020,7 +2020,7 @@ def test_cron_trigger_status_reads_crontab(tmp_path, monkeypatch):
     def fake_run(cmd, **kw):
         class R:
             returncode = 0
-            stdout = "15 3 * * * /abs/toaster_loop train auto-check --trigger\n"
+            stdout = "15 3 * * * /abs/toaster-loop train auto-check --trigger\n"
         return R()
 
     monkeypatch.setattr(sp, "run", fake_run)

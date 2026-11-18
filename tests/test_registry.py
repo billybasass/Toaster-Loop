@@ -1393,7 +1393,7 @@ def test_deploy_rejects_archived_model(home, registry):
 # ------------------------------------------------- auto-check cron hook
 
 def _auto_check(tmp_path, monkeypatch, janitor_cfg):
-    """Run `toaster_loop train auto-check` with a config carrying a janitor section."""
+    """Run `toaster-loop train auto-check` with a config carrying a janitor section."""
     import toaster_loop.registry.janitor as jm
 
     calls: list = []

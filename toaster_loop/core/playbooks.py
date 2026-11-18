@@ -121,7 +121,7 @@ PLAYBOOK_STATUSES = ("candidate", "active", "retired")
 #: Honest marker written into exported metadata files (scope reduction E).
 EXPORT_NOTE = (
     "Playbook metadata, NOT training rows. This file records a distilled "
-    "recipe and the real trace ids it was mined from; run `toaster_loop curate` "
+    "recipe and the real trace ids it was mined from; run `toaster-loop curate` "
     "over real trace exports for actual ShareGPT conversations."
 )
 

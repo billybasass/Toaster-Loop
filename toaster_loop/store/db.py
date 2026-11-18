@@ -1,6 +1,8 @@
 """SQLite index for the experience buffer.
 
-Schema v1 (SCHEMA_VERSION below). Two tables:
+Schema v10 (SCHEMA_VERSION below). Two core tables (traces, feedback) plus
+failure_notes/playbooks/rft_prompts added by later versions; see the version
+notes above SCHEMA_VERSION.
 
 traces   — one row per agent task execution. Metadata/index only; the full
            conversation lives in the JSONL file pointed to by ``jsonl_path``.
@@ -12,7 +14,7 @@ Design notes for Phase 3 (curation):
 - ``curated`` + ``dataset_id`` let the curater claim traces idempotently.
 - Single-writer assumption (one toaster_loop process at a time) — matches
   ARCHITECTURE.md §5; WAL is enabled anyway for cheap concurrent readers
-  (`toaster_loop traces list` while an agent run is in flight).
+  (`toaster-loop traces list` while an agent run is in flight).
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ logger = logging.getLogger("toaster_loop.store")
 # defensively so it also works against DBs opened before this bump.
 # v7 (RFT): rft_prompts table — provenance ledger for rejection-sampling
 # (STaR) prompt selection: one row per sampled prompt key, so re-running
-# `toaster_loop rft` never resamples the same prompt forever. New table again, so
+# `toaster-loop rft` never resamples the same prompt forever. New table again, so
 # the idempotent CREATE TABLE IF NOT EXISTS in _SCHEMA is the whole migration.
 # v8 (mine_goldens): mined_goldens table — claim/dedup/provenance ledger for
 # auto-mined golden tasks (curate/mine_goldens.py). Same new-table-again
@@ -61,6 +63,28 @@ logger = logging.getLogger("toaster_loop.store")
 # started from ("Start task" / plan loop / delegate_task plan_task=); NULL for
 # every other run and every pre-WP12 row (tolerant read, no data migration).
 SCHEMA_VERSION = 10
+
+
+class SchemaTooNewError(RuntimeError):
+    """The database on disk was written by a NEWER toaster_loop release.
+
+    Rolling back to an older binary after a newer one ran its migrations would
+    otherwise have the old code ``executescript()``-ing against a schema it has
+    no knowledge of — silent corruption risk in a product where promote/rollback
+    is a first-class feature. Opening refuses; the user must upgrade (or restore
+    an older backup) instead.
+    """
+
+
+def _release_schema_version(conn: sqlite3.Connection) -> int:
+    """Application-controlled schema marker via ``PRAGMA user_version``.
+
+    Unlike ``PRAGMA schema_version`` (bumped automatically by ANY DDL — see
+    _migrate), user_version only changes when WE set it, so it reliably means
+    "written by code at SCHEMA_VERSION N". 0 = a DB from before this guard
+    existed: never refuses, gets stamped on the next successful open.
+    """
+    return int(conn.execute("PRAGMA user_version").fetchone()[0])
 
 STATUS_VALUES = ("success", "failure", "partial", "unknown")
 
@@ -287,14 +311,24 @@ class TraceStore:
             # does instead of erroring.
             self._conn.execute("PRAGMA busy_timeout=5000")
             self._conn.execute("PRAGMA foreign_keys=ON")
-            ver = self._conn.execute("PRAGMA schema_version").fetchone()[0]
-            if ver < SCHEMA_VERSION:
-                # Legacy hook kept for visibility; PRAGMA schema_version is
-                # not a reliable migration key (DDL bumps it automatically),
-                # so migrations are shape-detected and idempotent below.
-                pass
+            release_ver = _release_schema_version(self._conn)
+            if release_ver > SCHEMA_VERSION:
+                # DB was written by a newer release — refuse BEFORE running any
+                # DDL against it (see SchemaTooNewError). Close the connection
+                # so callers don't leak handles on the refusal path.
+                self._conn.close()
+                raise SchemaTooNewError(
+                    f"{self.db_path} was written by toaster_loop schema v"
+                    f"{release_ver}; this build understands v{SCHEMA_VERSION}. "
+                    "Upgrade toaster_loop (or restore a backup from before the "
+                    "newer version ran) instead of rolling back."
+                )
             self._migrate()
             self._conn.executescript(_SCHEMA)
+            # Stamp the release marker only after migrations + schema DDL
+            # succeed, so a half-migrated DB is never marked as current.
+            if release_ver < SCHEMA_VERSION:
+                self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
             self._conn.commit()
 
     def _migrate(self) -> None:

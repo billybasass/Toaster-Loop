@@ -104,7 +104,7 @@ class ConfigRoutes(ApiContext):
                         "module_levels"},
             # redact_secrets was loadable but un-patchable through the
             # dashboard validator (latent gap); retention_days is the
-            # `toaster_loop traces prune` default window.
+            # `toaster-loop traces prune` default window.
             "recording": {"enabled", "redact_secrets", "retention_days"},
             # Persistent skills (core/skills.py) — agent-authored procedures;
             # this section toggles exposure + index cap. The skill list

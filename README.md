@@ -26,7 +26,7 @@ Phase 1 delivered:
   on the filesystems export writes to, MemAvailable → serve/train presets with
   printed formulas, nvidia-smi VRAM tiers when present, config parse, ports,
   stale instance state (`--fix` removes only verified-dead entries), and prints
-  THE exact next command per finding ([`toaster-loop/doctor.py`](toaster-loop/doctor.py)).
+  THE exact next command per finding ([`toaster-loop/doctor.py`](toaster_loop/doctor.py)).
 - `toaster-loop launch [--stop]` — one-click program launcher: detached dashboard +
   browser, idempotent, stops only what it launched.
 - `toaster-loop reset --yes [--keep-models]` — cleanup back to a fresh state: wipes
@@ -154,7 +154,7 @@ header; when the pill is grey, reconnecting EventSource retries automatically.
     agent profile bound to a managed instance and one click runs the full
     iterate pipeline with a documented optimal preset, optionally hot-deploying
     the promoted model back onto that profile's server. See
-    [`toaster-loop/training/easy.py`](toaster-loop/training/easy.py).
+    [`toaster-loop/training/easy.py`](toaster_loop/training/easy.py).
   - **Train** — readiness gauges + dataset picker + dry-run; single-flight
     (`409 already_running` links to the live job).
   - **Iterate** — full loop (curate → train → export → validate → promote)
@@ -362,7 +362,7 @@ One-click from a fresh clone — creates the venv, installs everything
 desktop launcher icon:
 
 ```bash
-cd toaster-loop
+cd Toaster-Loop
 ./setup.sh            # add --no-training to skip the torch/transformers/trl extras
 ./launch.sh           # start front+back end + browser (or click the icon)
 ./cleanup.sh          # back to a freshly-downloaded state
@@ -374,8 +374,8 @@ run them from PowerShell). `bitsandbytes` is Linux-only, so pass
 equivalently, every script command has a pure-CLI form that works on any OS:
 
 ```powershell
-cd toaster-loop
-.\setup.ps1 --no-training      # or: python -m toaster-loop launch (no scripts at all)
+cd Toaster-Loop
+.\setup.ps1 --no-training      # or: python -m toaster_loop launch (no scripts at all)
 .\launch.ps1                   # start front+back end + browser
 .\cleanup.ps1                  # back to a freshly-downloaded state
 ```
@@ -384,7 +384,7 @@ cd toaster-loop
 --keep-models` keeps trained models. Manual install (equivalent steps):
 
 ```bash
-cd toaster-loop
+cd Toaster-Loop
 uv venv --python 3.13 .venv          # Python >=3.11,<3.14
 source .venv/bin/activate
 uv pip install -e ".[dev]"
@@ -677,7 +677,7 @@ Wire it into any MCP client config (the entry point is the module form):
 }
 ```
 
-(`python -m toaster-loop mcp --config path/to/toaster_loop.yaml` also works; the CLI's
+(`python -m toaster_loop mcp --config path/to/toaster_loop.yaml` also works; the CLI's
 standard `--config`/`--verbose` flags apply.)
 
 **Tool table** — tools mirror existing CLI/API code paths exactly and add no
@@ -720,7 +720,7 @@ Python functions in-process; a test greps the package for shell/exec
 patterns). No tool accepts a filesystem path — `logs_tail` takes an instance
 id validated against the same pattern `serving/instances.py` enforces, and
 the constructed path is containment-checked with
-[`core/path_security.py`](toaster-loop/core/path_security.py) before opening.
+[`core/path_security.py`](toaster_loop/core/path_security.py) before opening.
 Malformed input yields JSON-RPC parse errors, never a crash.
 
 ### Dataset curation (Phase 3)
@@ -1067,7 +1067,7 @@ the server; top_k is an internal constant).
 ### Exit codes
 
 Every `toaster-loop` command follows this taxonomy (source of truth:
-[`toaster-loop/core/exitcodes.py`](toaster-loop/core/exitcodes.py)):
+[`toaster-loop/core/exitcodes.py`](toaster_loop/core/exitcodes.py)):
 
 | Code | Meaning |
 |------|---------|

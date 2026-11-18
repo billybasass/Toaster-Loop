@@ -14,6 +14,12 @@ on:
     branches: [main]
   pull_request:
 
+# Superseded pushes to the same branch cancel older runs (saves the 9-job
+# matrix from stacking up during rapid iteration).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ${{ matrix.os }}
@@ -43,8 +49,17 @@ jobs:
       - name: Type check (mypy — gated core; see [tool.mypy] in pyproject.toml)
         run: uv run --frozen mypy
 
-      - name: Test (with coverage report, non-gating)
-        run: uv run --frozen pytest tests/ -q --cov=toaster_loop --cov-report=term
+      # BLE001 convention audit (non-blocking): broad except is deliberate
+      # here, but every site must carry `# noqa: BLE001 - <reason>`. Report
+      # the count so it can't drift silently; promote to blocking once stable.
+      - name: BLE001 annotation-count report (advisory)
+        continue-on-error: true
+        run: uv run --frozen ruff check --select BLE --output-format concise toaster_loop | wc -l
+
+      # Floor set below current ~81% so coverage can only go up; ratchet as
+      # the low spots (training/worker, serving/runtime, watchdog) get tests.
+      - name: Test (coverage-gated floor)
+        run: uv run --frozen pytest tests/ -q --cov=toaster_loop --cov-report=term --cov-fail-under=78
 
   js-check:
     # Real ES-module parse of the shipped dashboard JS; on machines without
@@ -62,3 +77,70 @@ jobs:
             node --check "$f" || fail=1
           done
           exit $fail
+
+  # The train->export path is the actual product, yet no test executes it
+  # (torch stays lazy by design). This job runs the REAL worker entry point on
+  # a ~1 MB random-init model: any transformers/trl/peft API break in the
+  # locked set fails here instead of in a user's `iterate` loop. CPU-only.
+  train-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install (locked deps incl. training extra)
+        run: uv sync --frozen --extra dev --extra training
+
+      - name: CPU tiny-model SFT through the real worker
+        run: uv run --frozen python scripts/ci_train_smoke.py
+
+  # Every other test runs from the source tree, so packaging regressions
+  # (missing dashboard static, bad entry point) ship silently. Build the
+  # wheel and install it into a clean venv, then smoke the installed CLI.
+  artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Build sdist + wheel
+        run: |
+          uv sync --frozen --extra dev
+          uv run --frozen python -m build
+
+      - name: Install wheel into a clean venv and smoke it
+        run: |
+          uv venv /tmp/wheel-venv --python 3.12
+          uv pip install --python /tmp/wheel-venv/bin/python dist/*.whl
+          /tmp/wheel-venv/bin/toaster-loop --help > /dev/null
+          # package-data: the dashboard HTML/JS must ship inside the wheel,
+          # not just exist in the repo.
+          /tmp/wheel-venv/bin/python - <<'PY'
+          from importlib.resources import files
+          static = files("toaster_loop.dashboard") / "static"
+          names = {p.name for p in static.iterdir()}
+          assert any(n.endswith(".html") for n in names), f"no HTML in wheel static: {names}"
+          print("wheel dashboard static OK:", sorted(names)[:6])
+          PY
+
+  # Real attack surface (loopback web UI + file tools) => dependency audit.
+  # Non-blocking for now: reports new CVEs on the locked set without holding
+  # PRs hostage to upstream advisories.
+  pip-audit:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Audit the locked dependency set
+        run: |
+          uv export --frozen --no-emit-project -o reqs.lock
+          uvx pip-audit -r reqs.lock --disable-notes

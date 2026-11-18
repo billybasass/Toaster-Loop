@@ -44,7 +44,7 @@ Events (dashboard bus kind ``serve.watchdog``, plus logger):
   restart_capped     max restarts within the window reached — watching stops
 
 OPT-IN: with no config changes nothing here runs — ``serve.watchdog_enabled``
-defaults to false and neither the dashboard boot nor ``toaster_loop serve`` start
+defaults to false and neither the dashboard boot nor ``toaster-loop serve`` start
 the loop unless it is set. Health probes never happen at all (we read
 /proc, not HTTP), so there are zero new network paths.
 

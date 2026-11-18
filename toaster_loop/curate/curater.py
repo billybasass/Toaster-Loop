@@ -526,7 +526,7 @@ def render_train_yaml(dataset_dir: Path, cfg: CurationConfig,
         # strictly, and manifest.json already carries toaster_loop metadata.
     }
     header = (
-        f"# toaster_loop train.yaml template (v{TRAIN_YAML_TEMPLATE_VERSION}) for "
+        f"# toaster-loop train.yaml template (v{TRAIN_YAML_TEMPLATE_VERSION}) for "
         f"dataset {dataset_id}\n"
         "# Contract: model/data/training/lora/logging.\n"
         "# Phase 4 (training scheduler) resolves REPLACE_* placeholders and may\n"

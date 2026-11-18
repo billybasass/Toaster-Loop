@@ -7,7 +7,7 @@ Curator invariants (built in):
     :meth:`ModelRegistry.restore_model`.
   * **Pinned bypasses automation.** Pinned models are never touched.
   * **State file, not a scheduler.** Maintenance runs at an existing
-    entrypoint (``toaster_loop train auto-check`` — already the cron hook) and
+    entrypoint (``toaster-loop train auto-check`` — already the cron hook) and
     persists ``{last_run_at, run_count, last_summary}`` in
     ``<home>/janitor_state.json`` instead of owning a timer.
 
@@ -25,7 +25,7 @@ Safety invariants:
 
 Config (YAML ``janitor:`` section, see config.example.yaml):
   enabled: false (default — conservative; opt in via config or run manually
-    with ``toaster_loop models janitor``)
+    with ``toaster-loop models janitor``)
   retention_days: 30
   disk_retention_days: 90   — aged *operational* files (worker logs, server
     logs, chat uploads, batch checkpoints) are deleted after this many days.

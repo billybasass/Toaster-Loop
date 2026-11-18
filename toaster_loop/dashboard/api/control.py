@@ -31,7 +31,7 @@ class ControlRoutes(ApiContext):
     def h_shutdown(self, q: Dict[str, str], b: Dict[str, Any]) -> Dict[str, Any]:
         """Close the program: stop the owned llama-server, then exit ourselves.
 
-        Only meaningful for `toaster_loop dashboard`/`launch` processes; a graceful
+        Only meaningful for `toaster-loop dashboard`/`launch` processes; a graceful
         self-terminate via SIGTERM so the serve_dashboard signal handler runs
         (server socket closed, 'dashboard stopped.' printed). The owned
         llama-server child is stopped first so nothing is orphaned.

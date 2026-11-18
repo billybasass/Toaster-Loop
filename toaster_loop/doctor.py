@@ -1,4 +1,4 @@
-"""toaster_loop doctor — MEASURE the environment, never assume (WP7).
+"""toaster-loop doctor — MEASURE the environment, never assume (WP7).
 
 Pattern inspiration: kimi-k3-doctor's "a doctor script that measures rather
 than assumes" idea — re-implemented inline, no imports from any reference
@@ -24,15 +24,15 @@ Checks (each returns ok | warn | problem):
   memory      MemAvailable -> recommended serve context / train batch presets
   vram        free VRAM via nvidia-smi when available -> -ngl/context tiers
   binary      llama-server discovery (reuses serving.supervisor.find path)
-  ports       configured loopback ports bindable (live toaster_loop instances OK)
+  ports       configured loopback ports bindable (live toaster-loop instances OK)
   state       stale instance state files with dead pids (report; --fix removes
               ONLY files whose pid is deterministically gone per the existing
               ownership rule — never foreign/recycled pids)
 
 Next-command logic: findings map to copy-paste remediations, e.g. no
-persisted noise floor -> ``toaster_loop bench --noise-floor``; serve.calibration
-auto with no stored profile -> ``toaster_loop calibrate --quick``; llama-server
-missing -> ``toaster_loop setup``.
+persisted noise floor -> ``toaster-loop bench --noise-floor``; serve.calibration
+auto with no stored profile -> ``toaster-loop calibrate --quick``; llama-server
+missing -> ``toaster-loop setup``.
 
 Exit codes (core/exitcodes.py taxonomy): 0 all good (warnings allowed),
 1 actionable problems found, 3 invalid configuration.
@@ -211,7 +211,7 @@ def check_config(config_path: Optional[str], *, out: Callable[[str], None],
         out(str(e))
         return CheckResult("config", "problem",
                            [f"invalid configuration ({type(e).__name__})"],
-                           next_commands=["fix every field listed above, then re-run: toaster_loop doctor"])
+                           next_commands=["fix every field listed above, then re-run: toaster-loop doctor"])
     return CheckResult("config", "ok", ["parses"]) if cfg is not None \
         else CheckResult("config", "ok", [])
 
@@ -318,8 +318,8 @@ def check_disk(paths: Sequence[Path], required_bytes: int,
         return CheckResult(
             "disk", "problem", lines,
             next_commands=["free space or point training.export output_dir at a "
-                           "bigger volume, then re-run: toaster_loop doctor",
-                           "prune old artifacts: toaster_loop models janitor"])
+                           "bigger volume, then re-run: toaster-loop doctor",
+                           "prune old artifacts: toaster-loop models janitor"])
     return CheckResult("disk", "ok", lines)
 
 
@@ -533,7 +533,7 @@ def check_llama_binary(binary_probe: Callable[[], str]) -> CheckResult:
         binary = binary_probe()
     except Exception as e:  # noqa: BLE001 - ServeError or anything discovery does
         return CheckResult("llama-server", "problem", [f"NOT FOUND — {e}"],
-                           next_commands=["run: toaster_loop setup"])
+                           next_commands=["run: toaster-loop setup"])
     return CheckResult("llama-server", "ok", [str(binary)])
 
 
@@ -573,7 +573,7 @@ def check_ports(ports: Sequence[int], live_owned_ports: Sequence[int] = (), *,
         return CheckResult(
             "ports", "problem", lines,
             next_commands=["free the port (stop the foreign process) or use a "
-                           "dynamic port: toaster_loop serve --port 0"])
+                           "dynamic port: toaster-loop serve --port 0"])
     return CheckResult("ports", "ok", lines or ["no static ports configured"])
 
 
@@ -639,7 +639,7 @@ def check_stale_state(home: Path, *, alive_fn: Callable[[int], Optional[bool]],
     cleanup = " ".join(str(p) for p, _ in stale)
     return CheckResult("state", "problem", lines,
                        next_commands=[f"review then remove: rm {cleanup}",
-                                      "or let doctor do it: toaster_loop doctor --fix"])
+                                      "or let doctor do it: toaster-loop doctor --fix"])
 
 
 # ------------------------------------------------------- chat durability (WP1)
@@ -767,7 +767,7 @@ def check_noise_floor(home: Path, *,
         "noise-floor", "warn",
         ["no persisted noise-floor baseline — effect-vs-noise judgments "
          "fall back to the 3% default threshold"],
-        next_commands=["run: toaster_loop bench --noise-floor"])
+        next_commands=["run: toaster-loop bench --noise-floor"])
 
 
 def check_calibration_profile(cfg: Any, home: Path, *,
@@ -789,7 +789,7 @@ def check_calibration_profile(cfg: Any, home: Path, *,
         "calibration", "warn",
         ["serve.calibration: auto but no stored calibration profile — serve "
          "runs with uncalibrated defaults"],
-        next_commands=["run: toaster_loop calibrate --quick"])
+        next_commands=["run: toaster-loop calibrate --quick"])
 
 
 # ------------------------------------------------------------------ runner
@@ -900,7 +900,7 @@ def run_doctor(*, config_path: Optional[str] = None, fix: bool = False,
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    """`python -m toaster_loop.doctor` entry (the CLI `toaster_loop doctor --env` path
+    """`python -m toaster_loop.doctor` entry (the CLI `toaster-loop doctor --env` path
     calls run_doctor directly)."""
     import argparse
 
@@ -926,7 +926,7 @@ def _default_load_config():
 def _print_report(results: Sequence[CheckResult],
                   out: Callable[[str], None]) -> None:
     marks = {"ok": "OK  ", "warn": "WARN", "problem": "FAIL"}
-    out("toaster_loop doctor — measured environment report")
+    out("toaster-loop doctor — measured environment report")
     out("=" * 44)
     for r in results:
         out(f"[{marks.get(r.status, '?')}] {r.name}")

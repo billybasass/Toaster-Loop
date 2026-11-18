@@ -809,7 +809,7 @@ playbooks:
 
 ---
 
-## 9. CLI conventions (toaster-loop/cli.py + core/exitcodes.py)
+## 9. CLI conventions (toaster_loop/cli.py + core/exitcodes.py)
 
 ### Subparser pattern (traces example, cli.py:176-222)
 

@@ -431,7 +431,7 @@ def test_curate_enqueue_queues_via_api(home):
 
 def test_curate_enqueue_project_passthrough(home):
     """WP12: curate_enqueue accepts the optional project id filter (mirrors
-    `toaster_loop curate --project`) and forwards it to POST /api/curate."""
+    `toaster-loop curate --project`) and forwards it to POST /api/curate."""
     srv, app = make_server(home)
     init(srv)
     out = call_tool(srv, 78, "curate_enqueue",
@@ -517,7 +517,7 @@ def test_stdio_banishes_nothing_to_stdout_on_diagnostics(home, capsys):
     serve_stdio(stdin=stdin, stdout=stdout)
     # The banner went to stderr (capsys), stdout holds exactly one JSON line.
     assert len(stdout.getvalue().strip().splitlines()) == 1
-    assert "toaster_loop mcp" in capsys.readouterr().err
+    assert "toaster-loop mcp" in capsys.readouterr().err
 
 # ------------------------------------------------------------------------
 # from tests/test_delegation.py
@@ -4182,7 +4182,7 @@ def test_transfers_migration_on_old_db(home__test_transfer):
 # ------------------------------------------------------------------ CLI smoke
 
 def test_cli_evaluate_transfer_smoke(home__test_transfer, monkeypatch, capsys):
-    """`toaster_loop evaluate transfer v2 --profile writer` queues the reused
+    """`toaster-loop evaluate transfer v2 --profile writer` queues the reused
     shadow_eval job with store_as=transfer and reports the stored entry."""
     import toaster_loop.cli as cli_mod
     import toaster_loop.evaluation.shadow as sh

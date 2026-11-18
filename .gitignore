@@ -29,3 +29,5 @@ htmlcov/
 # local config with possible secrets
 config.yaml
 .env
+dist/
+build/

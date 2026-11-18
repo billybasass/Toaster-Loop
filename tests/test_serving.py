@@ -290,7 +290,7 @@ def test_find_binary_auto_setup_disabled_no_clone(monkeypatch, tmp_path):
         raise AssertionError("must not clone when auto_setup is disabled")
 
     monkeypatch.setattr(runtime, "setup_llama_cpp", boom)
-    with pytest.raises(ServeError, match="toaster_loop setup"):
+    with pytest.raises(ServeError, match="toaster-loop setup"):
         find_llama_server(auto_setup=False)
 
 
@@ -2650,7 +2650,7 @@ def test_cli_sweep_attach_end_to_end(cal_dirs, gguf, capsys, monkeypatch):
                        "--quick", "--attach", srv.base_url])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "toaster_loop calibrate" in out
+    assert "toaster-loop calibrate" in out
     assert "adoption threshold" in out
     profs = cal.list_profiles()
     assert len(profs) == 1
@@ -5717,7 +5717,7 @@ def test_cli_bench_attach_end_to_end(bench_home, capsys):
                        "--label", "cli-run"])
     out = capsys.readouterr().out
     assert rc == 0
-    assert "toaster_loop bench" in out
+    assert "toaster-loop bench" in out
     assert "median=" in out
     assert "spread=" in out
     assert "token identity: OK" in out
@@ -6787,9 +6787,14 @@ def test_disk_check_flags_low_space_on_export_paths(tmp_path):
     required = 10 * 1024 ** 3  # 10 GiB largest model
     # need = required + max(2 GiB, 10%) = 11 GiB; report 10 GiB free -> FAIL.
     ok_free = 12 * 1024 ** 3
+    # Key off the exact path, not a substring: when TMPDIR itself lives under
+    # /home (e.g. tmp_path=/home/.../tmpN), `"home" in p` matches BOTH paths
+    # and the fake reports free space everywhere — the test then fails for
+    # environment reasons, not product ones.
+    low_free_path = str(paths[1])
 
     def usage_fn(p):
-        return FakeUsage(free=ok_free if "home" in p else 10 * 1024 ** 3)
+        return FakeUsage(free=10 * 1024 ** 3 if str(p) == low_free_path else ok_free)
 
     res = doctor.check_disk(paths, required, "m-1", disk_usage_fn=usage_fn)
     assert res.status == "problem"
@@ -6921,7 +6926,7 @@ def test_free_vram_via_smi_parses_output(monkeypatch):
 def test_noise_floor_missing_suggests_bench(tmp_path):
     res = doctor.check_noise_floor(tmp_path, load_fn=lambda **kw: None)
     assert res.status == "warn"
-    assert res.next_commands == ["run: toaster_loop bench --noise-floor"]
+    assert res.next_commands == ["run: toaster-loop bench --noise-floor"]
 
 
 def test_noise_floor_present_is_ok(tmp_path):
@@ -6935,7 +6940,7 @@ def test_calibration_auto_without_profile_suggests_calibrate(tmp_path):
     res = doctor.check_calibration_profile(
         cfg, tmp_path, mode_fn=lambda c: "auto", list_fn=lambda **kw: [])
     assert res.status == "warn"
-    assert res.next_commands == ["run: toaster_loop calibrate --quick"]
+    assert res.next_commands == ["run: toaster-loop calibrate --quick"]
 
 
 def test_calibration_off_needs_nothing(tmp_path):
@@ -6951,7 +6956,7 @@ def test_llama_binary_missing_suggests_setup():
 
     res = doctor.check_llama_binary(boom)
     assert res.status == "problem"
-    assert res.next_commands == ["run: toaster_loop setup"]
+    assert res.next_commands == ["run: toaster-loop setup"]
 
 
 # --------------------------------------------------------------------- ports
@@ -7104,9 +7109,9 @@ def test_run_doctor_prints_report_and_next_commands(tmp_path, monkeypatch):
         alive_fn=lambda _pid: True,
     )
     text = "\n".join(lines)
-    assert "toaster_loop doctor" in text and "next commands:" in text
+    assert "toaster-loop doctor" in text and "next commands:" in text
     # No noise floor persisted in tmp home -> the bench suggestion appears.
-    assert "toaster_loop bench --noise-floor" in text
+    assert "toaster-loop bench --noise-floor" in text
     assert rc == EXIT_OK
 
 

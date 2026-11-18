@@ -41,14 +41,14 @@ logger = logging.getLogger("toaster_loop.runtime")
 FULL_OFFLOAD_LAYERS = 999
 
 #: Default upstream; overridable per install via config `llama_repo` /
-#: `toaster_loop setup --repo` (e.g. a vendor fork like
+#: `toaster-loop setup --repo` (e.g. a vendor fork like
 #: https://github.com/Lychee-Technology/llama-cpp-for-strix-halo).
 LLAMA_CPP_REPO = "https://github.com/ggml-org/llama.cpp"
 
 #: Git ref (branch/tag) built by default when nothing else is configured.
 LLAMA_CPP_REF = "master"
 
-# Backend names (stable, reported by `toaster_loop doctor` / dashboard).
+# Backend names (stable, reported by `toaster-loop doctor` / dashboard).
 BACKEND_CUDA = "cuda"
 BACKEND_ROCM = "rocm"
 BACKEND_METAL = "metal"
@@ -998,7 +998,7 @@ def setup_llama_cpp(
                 "Vulkan backend needs a Vulkan SDK with SPIRV-Headers "
                 "(spirv/unified1/spirv.hpp + its cmake config). Install one "
                 "(e.g. apt install spirv-headers vulkan-sdk, or the LunarG "
-                "SDK) and re-run; CPU fallback: `toaster_loop setup --backend cpu`.")
+                "SDK) and re-run; CPU fallback: `toaster-loop setup --backend cpu`.")
         child_env.update(venv_extra)
 
     log(f"configuring llama.cpp for backend={backend} …")
@@ -1041,7 +1041,7 @@ def setup_llama_cpp(
         raise SetupError(
             f"llama.cpp build failed (rc={rc}). Backend {backend} needs its SDK "
             "(CUDA toolkit / ROCm / Vulkan SDK); re-run with a different backend "
-            f"via `toaster_loop setup --backend cpu` as a fallback.{extra}"
+            f"via `toaster-loop setup --backend cpu` as a fallback.{extra}"
         )
 
     exe = llama_server_path(root)
@@ -1094,7 +1094,7 @@ def check_llama_update(cfg=None, backend: Optional[str] = None) -> dict:
         return {
             "installed": False,
             "update_available": False,
-            "reason": "no toaster_loop-managed llama.cpp install (run `toaster_loop setup`)",
+            "reason": "no toaster_loop-managed llama.cpp install (run `toaster-loop setup`)",
         }
     repo = st.get("repo") or LLAMA_CPP_REPO
     ref = st.get("ref") or LLAMA_CPP_REF

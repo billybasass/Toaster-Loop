@@ -12,13 +12,15 @@ record carries `schema_version` for future migrations.
 """
 
 from .paths import resolve_toaster_loop_home
-from .db import SCHEMA_VERSION, TraceStore, TraceRow, STATUS_VALUES
+from .db import (SCHEMA_VERSION, SchemaTooNewError, TraceStore, TraceRow,
+                 STATUS_VALUES)
 from .recorder import TraceRecorder, heuristic_score
 from .insights import generate_insights
 
 __all__ = [
     "resolve_toaster_loop_home",
     "SCHEMA_VERSION",
+    "SchemaTooNewError",
     "TraceStore",
     "TraceRow",
     "STATUS_VALUES",

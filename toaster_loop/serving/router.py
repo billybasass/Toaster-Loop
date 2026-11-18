@@ -371,7 +371,7 @@ def select_target(pool: List[Candidate], requirement: Optional[int], *,
             "no running serving instances to route to"
             + (f" (request wants tier >= {requirement})"
                if requirement else "")
-            + " — start a server from the Serve panel or `toaster_loop serve`")
+            + " — start a server from the Serve panel or `toaster-loop serve`")
     allowed = [c for c in pool if _breaker_allows(c.base_url)]
     if not allowed:
         raise RoutingError(

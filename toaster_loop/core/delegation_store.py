@@ -7,7 +7,7 @@ far better than an append-only JSONL log — and toaster_loop already runs three
 surfaces (``store/db.py`` traces index, registry DB, per-project index DBs)
 with WAL + busy_timeout, so the conventions and fixtures exist. A separate
 file from the trace buffer keeps training data decoupled from a runtime work
-queue, and lets `toaster_loop doctor` treat this as disposable state (deleting
+queue, and lets `toaster-loop doctor` treat this as disposable state (deleting
 ~/.toaster-loop is still a full reset per D-10).
 
 Conventions mirror ``store/db.py`` verbatim: module ``SCHEMA_VERSION``,

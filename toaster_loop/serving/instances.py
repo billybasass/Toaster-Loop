@@ -362,7 +362,7 @@ def clear_state(home: Path, instance_id: str) -> None:
 # THE compatibility seam, sealed in one place. The reserved "default"
 # instance's runtime state has two homes: the per-instance file at
 # serving/state/default.json AND the legacy <home>/serve_state.json that
-# pre-Phase-6 code (and ``toaster_loop serve`` / deploy's CLI-detached path) still
+# pre-Phase-6 code (and ``toaster-loop serve`` / deploy's CLI-detached path) still
 # writes. Every reader used to re-decide "fold in the legacy file?" inline;
 # every writer used to re-implement the dual-write. Use THESE instead —
 #   * read_state_merged: per-instance state, falling back to the legacy file
@@ -574,7 +574,7 @@ def estimate_model_vram_mib(gguf_path: str,
 def free_vram_mib(device: Optional[str] = None) -> Optional[int]:
     """Free VRAM right now; None when no GPU telemetry exists (skip check).
 
-    Running toaster_loop instances already hold VRAM, so this live reading is the
+    Running toaster-loop instances already hold VRAM, so this live reading is the
     "free accounting for other running instances" figure the over-commit
     warning compares against. ``device`` restricts the reading to one
     physical device id (pinned instances); None keeps the global minimum.

@@ -1,4 +1,4 @@
-"""WP12 guarded autonomous plan loop (`toaster_loop plan loop`).
+"""WP12 guarded autonomous plan loop (`toaster-loop plan loop`).
 
 Runs unblocked plan tasks back-to-back with real agent runs, then closes each
 task ONLY on explicit completion: the task must have been flipped to ``done``

@@ -2,7 +2,7 @@
 
 v0 is daemonless but stateful: when toaster_loop spawns a llama-server it records
 ``<home>/serve_state.json`` {pid, host, port, base_url, model_name, gguf_path,
-model_id}. ``toaster_loop deploy <model_id>`` then:
+model_id}. ``toaster-loop deploy <model_id>`` then:
 
   a) stops the toaster_loop-owned llama-server if running (verified by pid liveness
      AND that we wrote the state file — never kill processes we didn't start),
@@ -111,7 +111,7 @@ def start_server_detached(
     ``record_start_failure`` under the reserved "default" key — this path owns
     ``serve_state.json``, i.e. the default instance's legacy view (metrics
     ``toaster_loop_instances_up`` and the router pool read it). We deliberately do
-    NOT refuse to spawn into an open crash loop: like ``toaster_loop serve`` and
+    NOT refuse to spawn into an open crash loop: like ``toaster-loop serve`` and
     the dashboard Start button, an explicit CLI invocation IS the user-intent
     signal, so the budget is cleared up front and only re-armed on failure —
     dashboard visibility stays honest (``crash_loop_status("default")`` shows
@@ -259,13 +259,13 @@ def deploy_model(
     # restore hint rather than the generic "no GGUF" error.)
     if model.status == "archived":
         raise ServeError(
-            f"model {model_id} is archived — run `toaster_loop models restore "
+            f"model {model_id} is archived — run `toaster-loop models restore "
             f"{model_id}` first"
         )
     if not model.gguf_path:
         raise ServeError(
             f"model {model_id} has no GGUF artifact "
-            "(run the export step / `toaster_loop iterate` first)"
+            "(run the export step / `toaster-loop iterate` first)"
         )
 
     previous = read_serve_state(home)

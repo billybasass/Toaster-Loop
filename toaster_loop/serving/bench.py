@@ -154,7 +154,7 @@ def _one_completion(client: httpx.Client, base_url: str, model: str,
     except httpx.HTTPError as e:
         raise BenchError(
             f"bench request to {url} failed: {e}. Is the supervised "
-            "llama-server running? (`toaster_loop serve` / dashboard)") from e
+            "llama-server running? (`toaster-loop serve` / dashboard)") from e
     if r.status_code != 200:
         raise BenchError(f"bench request to {url} returned HTTP "
                          f"{r.status_code}: {r.text[:200]}")
@@ -427,7 +427,7 @@ def format_report(record: Dict[str, Any], *, saved_path: Optional[Path] = None
     lines: List[str] = []
     kind = record.get("kind", KIND_BENCH)
     label = f" label={record['label']}" if record.get("label") else ""
-    lines.append(f"toaster_loop bench — model={cfg.get('model')} "
+    lines.append(f"toaster-loop bench — model={cfg.get('model')} "
                  f"runs={cfg.get('runs')} kind={kind}{label}")
     lines.append(f"endpoint: {cfg.get('base_url')}  "
                  f"(timings: {record.get('timings_source')}, "

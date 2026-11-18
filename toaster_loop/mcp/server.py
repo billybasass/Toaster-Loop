@@ -1,13 +1,13 @@
 """MCP server: JSON-RPC 2.0 line-delimited over stdio (WP6).
 
 Transport choice — **stdio, no sockets**: MCP's canonical local transport.
-The MCP client spawns ``toaster_loop mcp`` and speaks newline-delimited JSON on
+The MCP client spawns ``toaster-loop mcp`` and speaks newline-delimited JSON on
 stdin/stdout. Nothing binds a port, so the project's loopback-only rule is
 satisfied trivially (there is no listener to protect), zero cloud, zero API
 keys. A single-threaded synchronous loop is used deliberately: MCP stdio
 clients pipeline requests but one-in-flight-at-a-time semantics are fully
 spec-compliant, keep the confirm store trivially safe, and match the rest of
-toaster_loop's defensive posture (documented in README "toaster_loop mcp").
+toaster_loop's defensive posture (documented in README "toaster-loop mcp").
 
 Protocol surface (MCP basics): ``initialize`` / ``notifications/initialized``
 / ``ping`` / ``tools/list`` / ``tools/call``. Responses carry
@@ -24,6 +24,10 @@ import json
 import sys
 from typing import Any, Dict, List, Optional, TextIO
 
+# Package version comes from toaster_loop/__init__ (distribution metadata
+# first, pyproject fallback) so there is one release-version source, not a
+# third hardcoded copy. __init__ itself is stdlib-only (importlib.metadata).
+from .. import __version__ as _PKG_VERSION
 from .confirm import DEFAULT_TTL_S, ConfirmStore
 from .schema import validate_args
 from .tools import Tool, ToolContext, ToolError, build_tools
@@ -31,7 +35,7 @@ from .tools import Tool, ToolContext, ToolError, build_tools
 #: MCP protocol version this server implements (basics subset).
 PROTOCOL_VERSION = "2024-11-05"
 
-SERVER_INFO = {"name": "toaster_loop", "version": "0.1.0"}
+SERVER_INFO = {"name": "toaster_loop", "version": _PKG_VERSION}
 
 # JSON-RPC 2.0 standard error codes.
 _PARSE_ERROR = -32700
@@ -59,7 +63,7 @@ class McpServer:
         self.confirm = ConfirmStore(ttl_s=ttl_s, clock=clock)
         self._initialized = False
         # DashboardApp is heavyweight-ish (threads on first use only); lazy
-        # construction means `toaster_loop mcp --help`-style usage and tools/list
+        # construction means `toaster-loop mcp --help`-style usage and tools/list
         # never touch the home directory. Tests inject a prepared app.
         self._app = app
         self._ctx: Optional[ToolContext] = None
@@ -323,7 +327,7 @@ def serve_stdio(config_path: Optional[str] = None, *,
     fin = stdin if stdin is not None else sys.stdin
     fout = stdout if stdout is not None else sys.stdout
     server = McpServer(config_path)
-    print("toaster_loop mcp: stdio JSON-RPC server ready "
+    print("toaster-loop mcp: stdio JSON-RPC server ready "
           "(loopback-only by construction: no socket)", file=sys.stderr)
     try:
         for line in fin:

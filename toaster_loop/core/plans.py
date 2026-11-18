@@ -3,7 +3,7 @@
 Zero LLM calls live here: this module is the deterministic core (storage,
 validation, dependency math, prompt rendering). The agent tool family
 (``core/tools.py``), the dashboard API (``dashboard/api/plans.py``), the CLI
-(``toaster_loop plan ...``) and the MCP control plane all call into these functions,
+(``toaster-loop plan ...``) and the MCP control plane all call into these functions,
 so every surface agrees on exactly one store.
 
 Storage layout::
@@ -477,7 +477,7 @@ def validate(store: Dict[str, Any]) -> Dict[str, Any]:
 
     Shape: {"ok": bool, "cycles": [[ids]], "dangling_deps":
     [{"task": id, "dep": id}], "duplicate_ids": [..]}. Used by the CLI
-    (`toaster_loop plan validate`), the dashboard GET, and MCP plans_list.
+    (`toaster-loop plan validate`), the dashboard GET, and MCP plans_list.
 
     ``duplicate_ids`` is defensive only: ``validate_store`` already drops a
     second task with an existing id on every load/save, so well-formed stores

@@ -14,7 +14,7 @@ Design notes (matching the project's invariants):
 * State lives in files, not daemons. Config is the ``easy_training:`` YAML
   section (see core/config.py); per-home run state is
   ``<home>/easy_training/state.json``. Autonomous triggering stays on the
-  existing cron entrypoint (``toaster_loop train auto-check --trigger``), which
+  existing cron entrypoint (``toaster-loop train auto-check --trigger``), which
   this module also scopes; the dashboard only *notifies* readiness and offers
   one-click runs.
 * "Optimal settings" is a documented preset, not magic: SFT+DPO curation with

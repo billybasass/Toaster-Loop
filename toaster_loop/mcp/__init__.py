@@ -6,7 +6,7 @@ chosen deliberately:
 
   * No socket is ever opened by this module, so the project's loopback-only
     networking rule is satisfied trivially (there is no listener at all).
-  * The MCP client owns the process lifecycle (spawns ``toaster_loop mcp``,
+  * The MCP client owns the process lifecycle (spawns ``toaster-loop mcp``,
     writes requests to stdin, reads responses from stdout).
   * Single-threaded request/response loop: one message in, one message out.
 

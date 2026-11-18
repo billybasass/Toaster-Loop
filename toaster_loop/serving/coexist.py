@@ -475,7 +475,7 @@ class Coexistence:
             return (f"server instance {iid} was unloaded to free VRAM "
                     f"(reason={st.get('unload_reason', 'idle')}); load it "
                     "(POST /api/servers/"
-                    f"{iid}/load or `toaster_loop instances load {iid}`) or set "
+                    f"{iid}/load or `toaster-loop instances load {iid}`) or set "
                     "serve.lazy_load: true to reload automatically")
         return None
 

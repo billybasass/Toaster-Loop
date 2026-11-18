@@ -25,7 +25,7 @@ for borderline selection near ``min_score`` — NOT ground truth. Never disable
 human feedback in favor of judge scores.
 
 Cost: every judge call is a real GPU inference. That is why this is purely
-flag-driven (``toaster_loop curate --judge N``); no config key turns it on, and the
+flag-driven (``toaster-loop curate --judge N``); no config key turns it on, and the
 default path makes ZERO LLM calls.
 """
 

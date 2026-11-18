@@ -149,7 +149,7 @@ WP9 analytics and guarded export.
 
         GET /api/datasets/diff?a=<id>&b=<id>. Missing datasets -> 404,
         malformed manifests / missing params -> 400 (honest errors from the
-        shared curate/dataset_diff module, also used by `toaster_loop datasets diff`).
+        shared curate/dataset_diff module, also used by `toaster-loop datasets diff`).
         """
         from ...curate.dataset_diff import DatasetDiffError, diff_datasets
 

@@ -21,7 +21,7 @@ Cardinal rules for agents working on this repo: see [AGENTS.md](../AGENTS.md).
 > **Any OS.** The bash scripts below are Linux/macOS. On Windows use the
 > PowerShell equivalents (same flags, same behavior): `.\setup.ps1`,
 > `.\launch.ps1`, `.\cleanup.ps1` — or skip the shims entirely and run the
-> module form everywhere: `python -m toaster-loop setup|launch|...`. All CLI
+> module form everywhere: `python -m toaster_loop setup|launch|...`. All CLI
 > commands, env vars (`TOASTER_LOOP_HOME` etc.) and file layouts are identical
 > across platforms; state always lives under `~/.toaster-loop/`.
 
@@ -49,7 +49,7 @@ pip install -e '.[training]'     # torch/transformers/peft/trl — train/export 
 Sanity check (hermetic — safe anywhere):
 
 ```bash
-python -m toaster-loop --help
+python -m toaster_loop --help
 ```
 
 Expected output (verified): usage line listing the subcommand surface —

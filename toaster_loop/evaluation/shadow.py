@@ -240,7 +240,7 @@ def _model_endpoint(model: Any, *, home: Path) -> Iterator[Tuple[str, str]]:
     if crash_loop_refused(crash_key):
         raise ShadowError(
             f"refusing to start {model.model_id}: crash-loop budget exhausted "
-            "(pass 4 #28) — investigate `toaster_loop serve` before shadow eval")
+            "(pass 4 #28) — investigate `toaster-loop serve` before shadow eval")
     cfg = ToasterLoopConfig(gguf_path=str(model.gguf_path), port=0,
                         model_name=model.model_id)
     sup = ServingSupervisor(cfg)

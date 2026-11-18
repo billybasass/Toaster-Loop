@@ -11,7 +11,7 @@ Cardinal rule #1: nothing here runs on import, on boot, or without an explicit
 user action. The catalog listing is pure data + stat() probes; the install
 runner only ever executes when POST /api/engine-catalog/<id>/install fires
 (the dashboard's Install button). Network use (git clone / pip install) is an
-explicit user action exactly like ``toaster_loop setup`` already is.
+explicit user action exactly like ``toaster-loop setup`` already is.
 
 Kinds follow the registry: ``openai`` engines get an args_template with
 {model}/{host}/{port} placeholders so toaster_loop can spawn them loopback-only;

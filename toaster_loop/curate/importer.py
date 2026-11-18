@@ -1,10 +1,10 @@
 """Dataset import with format auto-detection (backlog item #14).
 
-Seeds the loop from curated public data: `toaster_loop datasets import <file>`
+Seeds the loop from curated public data: `toaster-loop datasets import <file>`
 shape-sniffs each row (format UX idea from the
 ``format_type: auto|alpaca|sharegpt|chatml`` — read-only reference, never
 imported), normalizes to the internal ShareGPT row format used by curate
-output, and writes a dataset directory that flows into `toaster_loop train`
+output, and writes a dataset directory that flows into `toaster-loop train`
 UNCHANGED (identical sft.jsonl contract; manifest mirrors the curater's so
 pipeline/train consume it without special cases).
 
@@ -41,7 +41,6 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -338,7 +337,7 @@ def import_dataset(
         json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    # train.yaml so `toaster_loop train start --dataset <id>` resolves like curated
+    # train.yaml so `toaster-loop train start --dataset <id>` resolves like curated
     # datasets (same template, same REPLACE_* placeholder rules).
     (ds_dir / "train.yaml").write_text(
         render_train_yaml(ds_dir, cfg or CurationConfig(), dataset_id),
