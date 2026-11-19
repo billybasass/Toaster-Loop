@@ -610,6 +610,12 @@ def build_tools() -> List[Tool]:
                 "kind": {"type": "string", "enum": ["sft", "dpo", "grpo"]},
                 "dry_run": {"type": "boolean",
                             "description": "Validate without GPU."},
+                "continue_from": {
+                    "type": "string",
+                    "description": ("Continual training: registry model id "
+                                    "(or adapter directory path) to build on "
+                                    "instead of starting fresh from the base "
+                                    "model.")},
             }, **_CONFIRM_ARG}, required=["dataset"]),
             mutating=True,
             executor=_exec_train_enqueue,

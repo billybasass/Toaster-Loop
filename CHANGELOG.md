@@ -6,6 +6,97 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **Program self-update system** — `core/updater.py` + `toaster-loop upgrade
+  [--check] [--yes]`: detect when a push lands on the GitHub repo and update
+  the app for the user. A git-clone install diffs HEAD with origin via
+  `git ls-remote` (so plain pushes are caught even without release tags);
+  every install also reads the GitHub Releases API for a version number and
+  notes link. Checks throttle through `<home>/update_check.json`
+  (`update.interval_hours`, default 24 h) and degrade gracefully offline.
+  The dashboard shows an update banner (startup background check +
+  `update.available` bus event) with an Apply button running
+  `git pull --ff-only` + reinstall on a background task — refusing on dirty
+  worktrees/detached HEAD/non-fast-forward. Nothing ever updates silently;
+  `--check` exits 10 (established informational code). New `update:` config
+  section (`enabled`, `repo`, `interval_hours`) + `/api/update*` endpoints.
+- **ML-stack version window** — `core/mlstack.py` declares the supported
+  `torch`/`transformers`/`peft`/`trl`/`datasets`/`accelerate` range (mirroring
+  pyproject `[training]`, drift-checked by a test). The worker refuses to start
+  a job with an out-of-window combination loaded — actionable message in the job
+  log instead of mid-run TRL API breakage — and `toaster-loop doctor`'s deps
+  check reports each package's verdict. Escape hatch:
+  `TOASTER_LOOP_ALLOW_UNPINNED_MLSTACK=1` downgrades the stop to a warning.
+- **Real-torch CI smoke covers DPO too** — `scripts/ci_train_smoke.py` now runs
+  SFT *and* DPO end-to-end through the real worker on the tiny CPU model (the
+  exact paths where a TRL minor bump breaks silently), plus an honest GRPO
+  dry-run (generation is skipped rather than faked). The CI `train-smoke` job
+  got a generous timeout and an HF-hub model cache.
+- **Windows cross-process locks** — the easy-loop lock and the scheduler's
+  device-slot/dispatcher locks previously degraded to a silent no-op on NT
+  (no `fcntl`), so dashboard + Task-Scheduler cron could double-train there.
+  A new `core/proclock.py` gives every call site one interface over flock
+  (POSIX, unchanged behavior) / `msvcrt` byte-range locking (Windows,
+  kernel-dropped on process death) / a pid+liveness lockfile fallback that is
+  loud about being advisory-only. `doctor` gained a `proc-locks` check.
+- **gguf-lora artifacts are servable** — deploying a streamed `gguf-lora` row
+  now spawns llama-server as a proper base+adapter pair (`-m <base GGUF>
+  --lora <adapter>`), where the base resolves from provenance `base_gguf`,
+  config `serve.lora_base_gguf`, or `TOASTER_LOOP_LORA_BASE_GGUF`. The gate
+  stays strict: the adapter must parse as a GGUF LoRA adapter, architectures
+  must match, and an incomplete pair still refuses (never serves unmodified
+  base weights under a trained model's name).
+
+### Fixed
+- **Continual training** — a finished model can now be trained on more data.
+  `--base-adapter <dir>` (worker) / `training.base_adapter` (train.yaml) loads
+  an existing LoRA adapter onto its base with `is_trainable=True` instead of a
+  fresh random one, for SFT/DPO/GRPO alike. Exposed as `--continue-from
+  <model_id|dir>` on `toaster-loop train start`, the `continue_from` body field
+  on `POST /api/train`, and the MCP `train_enqueue.continue_from` arg; the new
+  model row records a real lineage edge (`parent_adapter`) and inherits the
+  parent's resolved base model.
+
+### Fixed
+- **Trained adapters no longer strand in the HF hub cache** — every submit path
+  (dashboard Train page, CLI `train start`, iterate) now resolves the dataset
+  train.yaml through one point that pins `output_dir` under `train_runs/<run>/`,
+  so finished adapters are visible to the Models panel and never depend on a
+  location `huggingface-cli` cleanup deletes. (Root cause of "I had to move the
+  model after it was made".)
+- **Stale-checkpoint poisoning** — auto-resume is now scoped by a per-run config
+  fingerprint written alongside the checkpoints; a checkpoint left by a different
+  data/model/lr/rank/base_adapter in a shared output dir is refused (with a hint
+  to resume explicitly) instead of silently training on foreign weights.
+- **DPO/GRPO hardening** — both paths now share SFT's bar: 4-bit tiering with the
+  ROCm/bnb probe, pre-quantized guard, `_tf.set_seed`, checkpoint resume and
+  rotation, and mid-run NaN-loss abort.
+- **Mid-run NaN abort** — a NaN loss stops the run immediately (and fails it)
+  rather than burning hours of GPU before the post-hoc integrity gate.
+- **Checkpoint retention** — `save_total_limit` (default 3) rotates checkpoints
+  on SFT/DPO/GRPO so multi-GB saves no longer accumulate forever.
+- **Worker CLI contract** — a job submitted without `train_yaml` now fails with a
+  JSON error event in the job log instead of an argparse exit-2 and an empty log.
+- **Cross-process id races** — model (`vN`) and job (`job-NNNN`) id allocation
+  retry on PRIMARY KEY collisions, so concurrent dashboard/CLI/cron writers to one
+  WAL DB no longer die with an opaque IntegrityError.
+- **Unresolvable-base provenance** — `finalize_standalone_train` attests
+  `needs_base_resolution` instead of silently writing a poison `unspecified-base`
+  row; `toaster-loop doctor` gained a `model artifacts` check for adapters stranded
+  in the hub cache, vanished artifact paths, unresolved bases, and un-servable
+  `gguf-lora` exports.
+- **Serving honesty** — deploying a `gguf-lora` (streamed) artifact without a
+  resolvable base pair is refused with the reason, and deploys of never-validated
+  models log + return an `unvalidated` flag.
+- **DPO dataset schema for trl>=0.19** — the curater's mixed rows (role/content
+  `prompt` + string `chosen`/`rejected`) died mid-tokenization in TRL's
+  conversational concat path; `dpo_row_for_trl` now wraps completions as
+  assistant messages when the prompt is conversational. Caught by the real-torch
+  CI smoke.
+- **transformers>=5 trainer construction** — DPO/GRPO pin `eval_strategy="no"`:
+  transformers 5 defaults it to `epoch` and hard-fails a Trainer built without
+  an eval dataset (both paths deliberately run no eval loop).
+
 ## [0.1.0] — 2026-11-18
 
 First tagged release. Toaster Loop is a local, self-improving agent system:

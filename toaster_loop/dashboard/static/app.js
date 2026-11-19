@@ -233,6 +233,86 @@ bus.on("index.build", (p) => {
   }
 });
 
+// ------------------------------------------------------------- update banner
+// Self-update notice (core/updater.py): the dashboard checks GitHub once at
+// boot (throttled cache) and again here on load; an `update.available` bus
+// event from the startup check flips the banner without a poll. Applying is
+// always an explicit click: git pull --ff-only + reinstall in the background,
+// then a restart prompt. Never nags twice per session once dismissed.
+let updateDismissed = false;
+const updateBanner = el("div", { class: "card update-banner hidden" });
+
+function renderUpdateBanner(st) {
+  if (updateDismissed || !st || !st.available) {
+    updateBanner.classList.add("hidden");
+    return;
+  }
+  const rv = st.remote_version ? `v${st.remote_version}` : "a new version";
+  const applying = st.apply && st.apply.state === "running";
+  const applyBtn = el("button", {
+    class: "small primary", text: applying ? "updating…" : "Update now",
+    disabled: !!applying,
+  });
+  applyBtn.addEventListener("click", async () => {
+    if (!confirm(`Update Toaster Loop to ${rv}?\n\n` +
+      "The app pulls from GitHub and reinstalls itself. Running training " +
+      "jobs will NOT be interrupted, but the dashboard must restart " +
+      "afterwards.")) return;
+    applyBtn.disabled = true;
+    applyBtn.textContent = "updating…";
+    try {
+      await api("/api/update/apply", { method: "POST", body: {} });
+      pollUpdateApply();
+    } catch (e) {
+      toast(`update failed: ${e.message || e}`, "error");
+      applyBtn.disabled = false;
+      applyBtn.textContent = "Update now";
+    }
+  });
+  const dismissBtn = el("button", { class: "small", text: "Dismiss" });
+  dismissBtn.addEventListener("click", () => {
+    updateDismissed = true;
+    updateBanner.classList.add("hidden");
+  });
+  updateBanner.replaceChildren(
+    el("strong", { text: `Toaster Loop ${rv} is available` }),
+    el("span", { class: "hint", text:
+      ` (you have v${st.current_version || "?"}) — ` }),
+    el("a", { href: st.url || "#", target: "_blank", rel: "noopener",
+      text: "release notes" }),
+    el("span", { style: "flex:1" }),
+    applyBtn, dismissBtn);
+  updateBanner.classList.remove("hidden");
+}
+
+async function pollUpdateApply() {
+  for (let i = 0; i < 240; i++) {
+    await new Promise((r) => setTimeout(r, 1500));
+    let rec = null;
+    try { rec = await api("/api/update/apply"); } catch { continue; }
+    if (rec.state === "done") {
+      toast("✓ Toaster Loop updated — restart to run the new version", "ok");
+      updateBanner.replaceChildren(
+        el("strong", { text: "Update applied" }),
+        el("span", { class: "hint",
+          text: " Close and relaunch Toaster Loop to finish." }));
+      return;
+    }
+    if (rec.state === "error") {
+      toast(`update failed: ${rec.error || "see log"}`, "error");
+      renderUpdateBanner({ available: true, current_version: null });
+      return;
+    }
+  }
+}
+
+async function refreshUpdateBanner() {
+  try { renderUpdateBanner(await api("/api/update")); } catch { /* offline */ }
+}
+refreshUpdateBanner();
+bus.on("update.available", () => refreshUpdateBanner());
+document.querySelector(".app").insertBefore(updateBanner, outlet);
+
 // ------------------------------------------------------------------- toasts
 bus.on("job.state", (p) => {
   const icon = { done: "✓", failed: "✗", cancelled: "⊘" }[p.state] || "▶";

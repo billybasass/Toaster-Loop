@@ -83,9 +83,16 @@ jobs:
   # The train->export path is the actual product, yet no test executes it
   # (torch stays lazy by design). This job runs the REAL worker entry point on
   # a ~1 MB random-init model: any transformers/trl/peft API break in the
-  # locked set fails here instead of in a user's `iterate` loop. CPU-only.
+  # locked set fails here instead of in a user's `iterate` loop. CPU-only, no
+  # llama.cpp (the smoke stops before export). Real SFT + DPO train steps;
+  # GRPO honestly dry-run only (generation-heavy on CPU runners).
   train-smoke:
     runs-on: ubuntu-latest
+    # torch install + two tiny train steps: generous but bounded.
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
 
@@ -93,10 +100,19 @@ jobs:
         with:
           enable-cache: true
 
+      # The tiny model + tokenizer come from the HF hub; cache across runs so
+      # a hub hiccup or rate limit doesn't red a good commit.
+      - name: Cache HF hub models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface/hub
+          key: hf-hub-${{ hashFiles('uv.lock') }}
+          restore-keys: hf-hub-
+
       - name: Install (locked deps incl. training extra)
         run: uv sync --frozen --extra dev --extra training
 
-      - name: CPU tiny-model SFT through the real worker
+      - name: CPU tiny-model SFT + DPO through the real worker
         run: uv run --frozen python scripts/ci_train_smoke.py
 
   # Every other test runs from the source tree, so packaging regressions

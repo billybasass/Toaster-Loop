@@ -352,6 +352,7 @@ def finalize_standalone_train(
     actor: str = "dashboard",
     submit_export: bool = True,
     adapter_dir: Optional[str] = None,
+    parent_adapter: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Turn a finished standalone train job into a registry model (+ GGUF).
 
@@ -419,6 +420,19 @@ def finalize_standalone_train(
     # Resolve the base model the same precedence run_iterate uses, so adopted
     # rows stay comparable across paths.
     base = str(base_model or "").strip()
+    # Continual training (deep-dive fix): a continuation row inherits its
+    # parent's resolved base when the submit didn't pin one — this is exactly
+    # how an `unspecified-base` ancestor stops poisoning the chain.
+    parent_row = None
+    if parent_adapter:
+        try:
+            parent_row = registry.get_model(str(parent_adapter))
+        except Exception:
+            parent_row = None
+    if (not base or base == "unspecified-base") and parent_row is not None:
+        pbase = str(parent_row.base_model or "").strip()
+        if pbase and pbase != "unspecified-base":
+            base = pbase
     if not base and mf.is_file():
         try:
             base = str(json.loads(mf.read_text()).get("base_model") or "")
@@ -426,7 +440,18 @@ def finalize_standalone_train(
             base = ""
     if not base:
         base = "unspecified-base"
+    # Deep-dive fix (provenance): an unresolved base is a POISON row — the
+    # trained GGUF can never be re-paired with its safetensors for further
+    # training, and `continue from this model` cannot find a loadable base.
+    # Refusing outright would break stub/offline flows, so we register but
+    # attest the gap loudly (doctor + Models panel surface it; see
+    # provenance["needs_base_resolution"]).
+    needs_base_resolution = (base == "unspecified-base")
 
+    # Continual-training lineage: a real training edge vN -> vN+1 (registry
+    # parent_adapter column). Only accept it when the reference is an actual
+    # model row; a raw directory path stays metadata-less but still trains.
+    lineage_parent = str(parent_adapter) if parent_row is not None else None
     model = registry.register_model(
         actor=actor,
         base_model=base,
@@ -434,6 +459,7 @@ def finalize_standalone_train(
         manifest_hash=manifest_hash,
         quant=quant,
         display_name=display_name,
+        parent_adapter=lineage_parent,
     )
     out["model_id"] = model.model_id
     registry.set_artifacts(model.model_id, adapter_dir=str(adapter_dir))
@@ -443,7 +469,8 @@ def finalize_standalone_train(
     prov_ev = parse_worker_provenance(log_path)
     rank_history = parse_worker_rank_history(log_path)
     backend_ev = parse_worker_backend(log_path)
-    if prov_ev or rank_history or backend_ev:
+    export_method = parse_worker_export_method(log_path)
+    if prov_ev or rank_history or backend_ev or needs_base_resolution:
         registry.set_provenance(model.model_id, {
             "version": 1,
             "resource": (prov_ev or {}).get("resource") or "base_model",
@@ -452,6 +479,8 @@ def finalize_standalone_train(
             "requested_4bit": (prov_ev or {}).get("requested_4bit"),
             "dataset_files": _dataset_file_inventory(dataset_dir),
             **({"rank_history": rank_history} if rank_history else {}),
+            **({"export_method": export_method} if export_method else {}),
+            **({"needs_base_resolution": True} if needs_base_resolution else {}),
             **backend_ev,
         })
 
@@ -510,6 +539,29 @@ def finalize_standalone_train(
         out["note"] = (f"registered {model.model_id}; export job "
                        f"{export_job.job_id} {state} — adapter kept, no GGUF")
     return out
+
+
+def parse_worker_export_method(log_path: Optional[str]) -> Optional[str]:
+    """Extract the export METHOD (llama.cpp | gguf-lora | awq | gptq) from a
+    finished export job log (deep-dive fix). The method decides servability:
+    ``gguf-lora`` artifacts are adapter GGUFs that current serving spawn code
+    cannot load (no -lora flag), so the row must carry the truth."""
+    if not log_path:
+        return None
+    try:
+        lines = Path(log_path).read_text().splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if '"export_done"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        m = rec.get("method")
+        return str(m) if isinstance(m, str) else None
+    return None
 
 
 def parse_worker_backend(log_path: Optional[str]) -> Dict[str, Any]:

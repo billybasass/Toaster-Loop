@@ -105,6 +105,18 @@ Phase 1 delivered:
   THE exact next command per finding ([`toaster-loop/doctor.py`](toaster_loop/doctor.py)).
 - `toaster-loop launch [--stop]` — one-click program launcher: detached dashboard +
   browser, idempotent, stops only what it launched.
+- `toaster-loop upgrade [--check] [--yes]` — the **program's own update system**
+  ([`toaster_loop/updater.py`](toaster_loop/core/updater.py), distinct from
+  `update`, which rebuilds llama.cpp). Compares this install with the upstream
+  GitHub repo: a git clone diffs HEAD against origin (so any push is detected,
+  release-tagged or not); every install also consults the GitHub Releases API
+  for a version number + notes link. Checks are cached (`update.interval_hours`,
+  default 24 h) and never block; the dashboard shows an update banner from a
+  throttled background check at startup. Applying is always explicit —
+  `git pull --ff-only` + reinstall, refusing on a dirty worktree or non-
+  fast-forward — and nothing ever updates itself silently. `--check` exits 10
+  when an update is available. Configure via the `update:` config section
+  (`enabled`, `repo`, `interval_hours`).
 - `toaster-loop reset --yes [--keep-models]` — cleanup back to a fresh state: wipes
   TOASTER_LOOP_HOME (buffer, datasets, registry, logs, managed llama.cpp); dry-run
   without `--yes`; never touches foreign installs or system paths.

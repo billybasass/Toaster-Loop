@@ -43,18 +43,15 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, IO, List, Optional
+from typing import Any, Dict, List, Optional
+
+from ..core import proclock  # cross-process locks: flock/msvcrt/pidfile
 
 logger = logging.getLogger("toaster_loop.easy")
 
 EASY_DIRNAME = "easy_training"
 STATE_FILENAME = "state.json"
 LOOP_LOCK_FILENAME = "loop.lock"
-
-try:  # POSIX advisory locking; absent on Windows (lock degrades to no-op).
-    import fcntl
-except ImportError:  # pragma: no cover - non-POSIX dev environments
-    fcntl = None  # type: ignore[assignment]
 
 
 def _coerce(value: Any, cast, name: str) -> Optional[Any]:
@@ -314,37 +311,27 @@ def loop_lock_path(home: Path) -> Path:
     return Path(home) / EASY_DIRNAME / LOOP_LOCK_FILENAME
 
 
-def acquire_loop_lock(home: Path) -> Optional[IO[str]]:
+def acquire_loop_lock(home: Path) -> Optional[Any]:
     """Non-blocking advisory lock for one easy-loop run ACROSS processes.
 
     The dashboard (submit_iterate thread) and the cron entrypoint
     (`train auto-check --trigger` -> cmd_iterate) are separate processes; a
     threading.Lock cannot serialize them, so both could pass readiness and
     double-claim traces. Whoever holds this file lock owns the loop; the
-    handle must stay open for the run's duration (closing releases).
-    Returns None when another process holds it. Windows (no fcntl) degrades
-    to always-acquire — same behavior as before this guard existed.
-    Contract: a file handle (possibly unlocked on non-POSIX) means ACQUIRED;
-    None strictly means "another run holds the loop"."""
-    p = loop_lock_path(home)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(p, "a+", encoding="utf-8")
-    if fcntl is None:  # pragma: no cover - non-POSIX: keep handle, no lock
-        return fh
-    try:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        fh.close()
-        return None
-    return fh
+    handle must stay open for the run's duration (releasing closes it).
+    Returns None when another process holds it.
+
+    Backend by platform (core/proclock.py): POSIX flock — byte-identical to
+    the previous inline implementation; Windows msvcrt byte-range locking
+    (kernel-dropped on process death, so dashboard + Task-Scheduler cron can
+    no longer double-train there); pid+liveness lockfile as last resort. The
+    old silent always-acquire no-op fallback is gone — proclock logs a
+    warning once when only advisory pidfile semantics are available."""
+    return proclock.acquire(loop_lock_path(home))
 
 
-def release_loop_lock(handle: Optional[IO[str]]) -> None:
-    if handle is not None:
-        try:
-            handle.close()
-        except OSError:
-            pass
+def release_loop_lock(handle: Optional[Any]) -> None:
+    proclock.release(handle)
 
 
 def _utcnow() -> str:

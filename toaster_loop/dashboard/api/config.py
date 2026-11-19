@@ -149,6 +149,8 @@ class ConfigRoutes(ApiContext):
                 # load_config absorbs them (core/config._normalize_indexing)
                 "paths", "embedding_model", "embedding_url", "top_k",
             },
+            # Self-update system (core/updater.py): raw `update:` section.
+            "update": {"enabled", "repo", "interval_hours"},
             # Serving-launch behavior (WP3 calibration / WP4 watchdog / WP5
             # coexistence). Without this entry the Tuning panel could not
             # toggle serve.calibration through a section patch.

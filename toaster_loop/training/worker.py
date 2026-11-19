@@ -260,6 +260,11 @@ def make_protocol_callback(log_path: Optional[str], scaler: Optional["RankScaler
         def __init__(self) -> None:
             super().__init__()
             self.last_eval_loss: Optional[float] = None
+            #: Deep-dive fix: mid-run NaN divergence detection. Set when a
+            #: logged loss is NaN/inf — the run stops at once instead of
+            #: burning hours of GPU on a numerically dead model. The caller
+            #: (run_sft/run_dpo/run_grpo) fails the job honestly on this flag.
+            self.nan_abort_step: Optional[int] = None
 
         def on_log(self, args, state, control=None, **kwargs):  # noqa: ANN001
             logs = kwargs.get("logs") or {}
@@ -275,6 +280,23 @@ def make_protocol_callback(log_path: Optional[str], scaler: Optional["RankScaler
                 total = t2 if (t2 and int(t2) > 0) else None
             _emit(log_path, **progress_event(
                 getattr(state, "global_step", 0), total, loss))
+            # Deep-dive fix: NaN/inf loss => abort the run immediately. The
+            # post-run find_nan_losses gate stays (defense in depth), but it
+            # only fires hours later; this one saves the GPU window.
+            if loss is not None and control is not None \
+                    and self.nan_abort_step is None:
+                try:
+                    _lv = float(loss)
+                except (TypeError, ValueError):
+                    _lv = None
+                if _lv is not None and math.isnan(_lv):
+                    self.nan_abort_step = int(getattr(state, "global_step", 0))
+                    _emit(log_path, "warning", message=(
+                        f"NaN loss at step {self.nan_abort_step} — aborting "
+                        "run early (diverged training); checkpoint kept for "
+                        "inspection, job will be marked failed"))
+                    control.should_save = False
+                    control.should_stop = True
             # pass4 #34: rank-growth trigger — stop at a checkpoint so the
             # stage loop can rebuild LoraConfig at a higher rank.
             if scaler is not None and control is not None \
@@ -446,7 +468,8 @@ def find_resumable_checkpoint(outputs_root) -> Optional[str]:
 
 
 def resolve_resume_path(tr: Dict[str, Any], outputs_root,
-                        log_path: Optional[str] = None) -> Optional[str]:
+                        log_path: Optional[str] = None,
+                        fingerprint: Optional[str] = None) -> Optional[str]:
     """Turn the `training.resume` knob into a concrete checkpoint path (or None).
 
       * unset / ``auto``  -> auto-discover in the run dir (crash / cancel /
@@ -464,6 +487,19 @@ def resolve_resume_path(tr: Dict[str, Any], outputs_root,
         return None
     if token.lower() in ("auto", "true"):
         found = find_resumable_checkpoint(outputs_root)
+        if found and fingerprint is not None \
+                and not run_marker_matches(outputs_root, fingerprint):
+            # Deep-dive fix (production readiness): auto-resume is scoped to
+            # the same run identity. A checkpoint left by a DIFFERENT config
+            # (different data/model/lr/rank/base_adapter) in a shared output
+            # dir must never silently poison a new run — `train resume` pins
+            # an explicit path for the legitimate cross-config case.
+            _emit(log_path, "warning", message=(
+                f"found checkpoint {found} but it belongs to a different "
+                "training config (run marker fingerprint mismatch) — "
+                "starting fresh; use training.resume=<checkpoint path> to "
+                "resume across configs deliberately"))
+            return None
         if found:
             _emit(log_path, "resume_state", checkpoint=found)
         return found
@@ -508,6 +544,167 @@ def plan_cadence(n_train_rows: int, *, batch_size: int = 2, grad_accum: int = 4,
     return {"save_strategy": "steps", "save_steps": save_steps,
             "eval_strategy": "steps", "eval_steps": save_steps,
             "logging_steps": int(logging_steps)}
+
+
+# ------------------------- continual training + run identity (deep-dive fix)
+
+#: Marker file written into a run's output_dir recording WHICH config owns the
+#: checkpoints there. Auto-resume refuses foreign markers (see resolve_resume_path).
+RUN_MARKER_FILENAME = ".toaster_run.json"
+
+
+def run_fingerprint(cfg: Dict[str, Any]) -> str:
+    """Stable fingerprint of the identity-defining parts of a train config.
+
+    Two runs sharing an output_dir may auto-resume from each other ONLY when
+    these fields agree — model, dataset files, epochs/steps, lr and LoRA rank
+    (shape), and the base_adapter edge. Data-adjacent knobs (save cadence,
+    batch size) are deliberately excluded: `train resume` legitimately re-runs
+    with them unchanged, and a user changing e.g. batch mid-crash still gets a
+    usable checkpoint chain. Pure function, no torch."""
+    import hashlib
+
+    tr = cfg.get("training") or {}
+    data_sec = cfg.get("data") or {}
+    lora = cfg.get("lora") or {}
+    parts = {
+        "model": str(cfg.get("model")),
+        "files": sorted(str(f) for f in (data_sec.get("local_dataset") or [])),
+        "lr": repr(tr.get("learning_rate", 2e-4)),
+        "epochs": repr(tr.get("num_epochs", 3)),
+        "max_steps": int(tr.get("max_steps", 0) or 0),
+        "r": int(lora.get("lora_r", 64)),
+        "base_adapter": str(tr.get("base_adapter") or ""),
+    }
+    blob = json.dumps(parts, sort_keys=True, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def write_run_marker(outputs_root, fingerprint: str) -> None:
+    """Best-effort: record which config owns the checkpoints in this dir."""
+    try:
+        root = Path(str(outputs_root)).expanduser()
+        root.mkdir(parents=True, exist_ok=True)
+        (root / RUN_MARKER_FILENAME).write_text(
+            json.dumps({"fingerprint": fingerprint,
+                        "written_at": datetime.now(timezone.utc).isoformat(
+                            timespec="seconds")}),
+            encoding="utf-8")
+    except OSError:
+        pass
+
+
+def run_marker_matches(outputs_root, fingerprint: str) -> bool:
+    """True when no marker exists (legacy run — old behavior) or it matches.
+
+    An unreadable marker counts as MATCHING only if we would otherwise refuse
+    a same-process crash-resume; the conservative choice is to treat a corrupt
+    marker as foreign? No — corrupt marker = unknown owner; refusing resume
+    costs a restart, resuming foreign weights costs silent corruption. So:
+    missing => match (legacy), unreadable/foreign => no match."""
+    mf = Path(str(outputs_root)).expanduser() / RUN_MARKER_FILENAME
+    if not mf.is_file():
+        return True
+    try:
+        return str(json.loads(mf.read_text()).get("fingerprint")) == fingerprint
+    except (OSError, ValueError):
+        return False
+
+
+def resolve_base_adapter(cfg: Dict[str, Any],
+                         cli_override: Optional[str] = None) -> Optional[str]:
+    """Continual training: resolve the existing adapter to continue from.
+
+    Sources (first wins): the ``--base-adapter`` CLI flag (threaded as
+    ``cfg["_base_adapter"]`` by main()) or ``training.base_adapter`` in the
+    train.yaml. The value must be a directory holding a real training artifact:
+    a LoRA adapter (adapter_config.json) or a full fine-tune checkpoint
+    (training_type.json marker). Returns None when unset — every run without
+    the knob is byte-identical to pre-fix behavior."""
+    raw = str(cli_override
+              or ((cfg.get("training") or {}).get("base_adapter")) or "").strip()
+    if not raw:
+        return None
+    p = Path(raw).expanduser()
+    if not p.is_dir():
+        raise ValueError(
+            f"base_adapter={str(p)!r} is not a directory — point it at the "
+            "adapter dir of a previous training run (train_runs/<run>/adapter)")
+    has_lora = (p / "adapter_config.json").is_file()
+    has_full = (p / "training_type.json").is_file()
+    if not (has_lora or has_full):
+        raise ValueError(
+            f"{p} is not a training artifact (no adapter_config.json / "
+            "training_type.json) — cannot continue training from it")
+    return str(p)
+
+
+def load_model_hardened(model_ref: Any, tr: Dict[str, Any],
+                        log_path: Optional[str], kind: str):
+    """DPO/GRPO base-model load with the SFT path's hardening (deep-dive fix).
+
+    The preference/RL paths used to load with a bare torch_dtype="auto": no
+    4-bit tiering, no ROCm/bnb probe, no pre-quantized guard. A 27B DPO run
+    then OOM'd or segfaulted with none of the honest diagnostics SFT earned
+    the hard way. Same policy as run_sft (core.vram), compact form."""
+    import torch
+    from transformers import AutoModelForCausalLM
+
+    _explicit = tr.get("load_in_4bit")
+    if _explicit is not None and not isinstance(_explicit, bool):
+        _explicit = bool(_explicit)
+    _dims = None
+    _gpu = bool(torch.cuda.is_available())
+    try:
+        from ..core.vram import load_model_dims, resolve_load_in_4bit
+        _dims = load_model_dims(str(model_ref))
+    except Exception:
+        pass
+    li4, why = resolve_load_in_4bit(
+        explicit=_explicit, dims=_dims, train_full=False, gpu_available=_gpu)
+    if li4 and torch.version.hip:
+        try:
+            from ..core.bnbprobe import rocm_bnb_supported
+            _ok, _bnb_why = rocm_bnb_supported()
+            if not _ok:
+                li4 = False
+                why = f"ROCm bnb probe failed, loading bf16: {_bnb_why}"
+        except Exception as e:  # probe must never kill the run
+            _emit(log_path, "warning", message=f"bnb probe unavailable: {e}")
+    _emit(log_path, "load_tier", load_in_4bit=li4, reason=why,
+          kind=kind)
+
+    load_kwargs: Dict[str, Any] = {}
+    if _gpu:
+        load_kwargs["torch_dtype"] = "auto"
+    # Pre-quantized checkpoints are serve-only for adapters (same guard as SFT).
+    _prequantized = False
+    try:
+        _cfgj = Path(str(model_ref)).expanduser() / "config.json"
+        if _cfgj.is_file():
+            _prequantized = "quantization_config" in json.loads(
+                _cfgj.read_text())
+    except (OSError, ValueError):
+        pass
+    if _prequantized:
+        raise RuntimeError(
+            f"{model_ref} is a pre-quantized checkpoint (config.json "
+            "quantization_config) — serve-only for LoRA training. Pick the "
+            "bf16 HF base instead (the Models panel resolve step finds it).")
+    if li4 and _gpu:
+        try:
+            from transformers import BitsAndBytesConfig
+
+            load_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.bfloat16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4",
+            )
+        except ImportError:
+            _emit(log_path, "warning",
+                  message="bitsandbytes missing — loading at native precision")
+    return AutoModelForCausalLM.from_pretrained(str(model_ref), **load_kwargs)
 
 
 # ------------------------------------------------------------------- config
@@ -829,6 +1026,17 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         raise ValueError(
             f"training.training_type must be 'lora' or 'full', got {training_type!r}")
     train_full = training_type == "full"
+    # Continual training (deep-dive fix): continue from an EXISTING adapter
+    # instead of a fresh one on the base. `--base-adapter <dir>` (job param,
+    # surfaced as cfg["_base_adapter"] in main) or training.base_adapter in
+    # the train.yaml. Unset => byte-identical pre-fix behavior.
+    base_adapter = resolve_base_adapter(cfg,
+                                        cli_override=cfg.get("_base_adapter"))
+    if base_adapter and train_full:
+        raise ValueError(
+            "base_adapter is a LoRA continuation — for training_type=full "
+            "point training.base_model at the previous run's merged/adapter "
+            "checkpoint directory instead.")
 
     # Dataset validation happens without GPU deps (json + line count).
     n_rows = sum(len(load_jsonl(Path(f))) for f in files)
@@ -846,6 +1054,7 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         "epochs": tr.get("num_epochs", 3),
         "lr": tr.get("learning_rate", 2e-4),
         "lora_r": lora.get("lora_r", 64),
+        **({"base_adapter": base_adapter} if base_adapter else {}),
     }
     if dry_run:
         _emit(log_path, "dry_run_ok", config=resolved)
@@ -858,7 +1067,12 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
             AutoModelForCausalLM,
             AutoTokenizer,
         )
-        from peft import LoraConfig, get_peft_model, TaskType  # type: ignore[import-not-found]
+        from peft import (  # type: ignore[import-not-found]
+            LoraConfig,
+            PeftModel,
+            get_peft_model,
+            TaskType,
+        )
     except ImportError as e:  # pragma: no cover - env dependent
         raise RuntimeError(
             f"the training stack (torch/transformers/peft) is not importable "
@@ -1144,13 +1358,62 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
                 _emit(log_path, "warning",
                       message=f"gradient checkpointing disabled: {e}")
     else:
-        model = _wrap_adapter(model, current_r)
+        if base_adapter:
+            # Continual training: load the previous adapter onto this base and
+            # keep its LoRA trainable (no fresh random init). peft's
+            # from_pretrained(is_trainable=True) makes the loaded adapter the
+            # active, trainable "default" — subsequent saves overwrite the
+            # same adapter shape, so vN+1 stays a drop-in for vN at serve time.
+            _emit(log_path, "phase", phase="load_base_adapter",
+                  base_adapter=base_adapter)
+            try:
+                # Continuation adapter becomes the trainable policy. The
+                # rebinding through a local keeps mypy quiet (from_pretrained
+                # returns PeftModel; `model` was inferred as the HF class) —
+                # runtime-wise this is exactly what every peft path expects.
+                _continued = PeftModel.from_pretrained(
+                    model, base_adapter, is_trainable=True)
+                model = _continued  # type: ignore[assignment]
+            except Exception as e:
+                raise RuntimeError(
+                    f"could not continue-train from adapter {base_adapter} on "
+                    f"base {cfg['model']}: {e}. A LoRA adapter must be loaded "
+                    "onto the SAME base model it was trained on — check that "
+                    "training.base_model matches the previous run's.") from None
+            if tr.get("gradient_checkpointing", True):
+                try:
+                    model.enable_input_require_grads()
+                    model.gradient_checkpointing_enable()
+                except Exception as e:
+                    _emit(log_path, "warning",
+                          message=f"gradient checkpointing disabled: {e}")
+            # Rank honesty: the loaded adapter's rank wins over the yaml's
+            # lora_r (shapes are fixed by what is on disk).
+            try:
+                # getattr keeps mypy off peft's Module-typed attribute graph.
+                loaded_r = int(getattr(
+                    getattr(model, "active_peft_config", None), "r", current_r))
+                if loaded_r != current_r:
+                    _emit(log_path, "warning", message=(
+                        f"lora.lora_r={current_r} ignored — continuing from "
+                        f"adapter with r={loaded_r} (shapes are fixed by the "
+                        "checkpoint on disk)"))
+                current_r = loaded_r
+            except Exception:
+                pass
+        else:
+            model = _wrap_adapter(model, current_r)
         if scaler.enabled:
-            scaler.start_stage(current_r)
-            _emit(log_path, "rank_scaling_enabled", r=current_r,
-                  max_rank=scaler.max_rank,
-                  min_improvement_steps=scaler.min_improvement_steps,
-                  min_rel_improvement=scaler.min_rel_improvement)
+            if base_adapter:
+                _emit(log_path, "warning", message=(
+                    "rank_scaling is disabled for base_adapter continuation "
+                    "runs (stage-chained growth assumes a fresh adapter)"))
+            else:
+                scaler.start_stage(current_r)
+                _emit(log_path, "rank_scaling_enabled", r=current_r,
+                      max_rank=scaler.max_rank,
+                      min_improvement_steps=scaler.min_improvement_steps,
+                      min_rel_improvement=scaler.min_rel_improvement)
     _emit(log_path, "phase", phase="load_dataset", files=files, format_type=fmt)
     if fmt != "sharegpt":
         raise ValueError(f"worker only supports format_type=sharegpt, got {fmt!r}")
@@ -1244,6 +1507,11 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         max_steps=int(tr.get("max_steps", 0) or 0),
         save_steps=int(tr.get("save_steps", 0) or 0),
     )
+    # Deep-dive fix: checkpoint rotation. save_strategy=steps every N with no
+    # limit accumulated multi-GB checkpoints forever (the janitor only archives
+    # registry artifact paths). Keep the newest few — training.save_total_limit
+    # (default 3; 0 = keep all, old behavior).
+    _stl = int(tr.get("save_total_limit", 3) or 0)
     args_kwargs: Dict[str, Any] = dict(
         output_dir=str(out_dir),
         num_train_epochs=float(tr.get("num_epochs", 3)),
@@ -1253,6 +1521,7 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         warmup_steps=int(tr.get("warmup_steps", 5)),
         weight_decay=float(tr.get("weight_decay", 0.01)),
         report_to=[],
+        **({"save_total_limit": _stl} if _stl > 0 else {}),
         **cadence,
     )
     # plan_cadence mirrors save cadence into eval cadence, but Trainer hard-
@@ -1378,9 +1647,13 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     # out (false) or pins an explicit path; default auto-discovery. Growth
     # stages (#34) never resume trainer state — adapter shapes changed; the
     # seeded weights carry the previous stage forward instead.
-    first_resume = resolve_resume_path(tr, out_dir, log_path)
+    first_resume = resolve_resume_path(
+        tr, out_dir, log_path, fingerprint=run_fingerprint(cfg))
     if first_resume:
         _emit(log_path, "phase", phase="resume", checkpoint=first_resume)
+    # Record which config owns this dir's checkpoints (deep-dive fix): the
+    # NEXT run into this dir auto-resumes only when its fingerprint matches.
+    write_run_marker(out_dir, run_fingerprint(cfg))
 
     # Stage loop (pass 4 #34): one pass per rank; exits when a stage finishes
     # without the RankScaler triggering (or growth is no longer possible).
@@ -1450,6 +1723,13 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         _emit(log_path, "rank_scaling_seeded", to_r=next_r,
               seeded_tensors=seeded[0], of=seeded[1])
 
+    # Deep-dive fix: a mid-run NaN abort is a FAILED run — do not save (and
+    # let the pipeline register) an adapter derived from diverged weights.
+    if callback is not None and callback.nan_abort_step is not None:
+        raise RuntimeError(
+            f"training diverged: NaN loss at step {callback.nan_abort_step} "
+            "(run aborted early to save the GPU window). Checkpoints are kept "
+            f"in {out_dir} for inspection; retry with a lower learning rate.")
     _emit(log_path, "phase", phase="save_adapter", adapter_dir=str(adapter_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
     model.save_pretrained(str(adapter_dir))
@@ -1467,6 +1747,7 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     _emit(log_path, "sft_done", adapter_dir=str(adapter_dir),
           train_loss=train_loss, eval_loss=eval_loss,
           training_type=("full" if train_full else "lora"),
+          **({"base_adapter": base_adapter} if base_adapter else {}),
           **({"rank_history": scaler.rank_history}
              if scaler.enabled and scaler.rank_history else {}))
     out = {"adapter_dir": str(adapter_dir), "train_loss": train_loss,
@@ -1478,8 +1759,35 @@ def run_sft(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
 
 # ---------------------------------------------------------------------- DPO
 
+def dpo_row_for_trl(r: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a toaster_loop dpo.jsonl row to what the installed TRL expects.
+
+    The curater emits a MIXED schema — OpenAI role/content `prompt` list with
+    plain-string `chosen`/`rejected` completions (curater.py:848). TRL's
+    is_conversational() inspects one arbitrary key and then concatenates
+    prompt + completion, so the mixed form dies mid-tokenization with
+    "can only concatenate list (not str) to list" on trl>=0.19-era builds
+    (caught by scripts/ci_train_smoke.py). Conversational rows therefore get
+    their completions wrapped as assistant messages; fully plain rows pass
+    through untouched. Pure function — torch-free, unit-tested."""
+    prompt, chosen, rejected = r["prompt"], r["chosen"], r["rejected"]
+    if isinstance(prompt, list) and isinstance(chosen, str):
+        chosen = [{"role": "assistant", "content": chosen}]
+        rejected = ([{"role": "assistant", "content": rejected}]
+                    if isinstance(rejected, str) else rejected)
+    return {"prompt": prompt, "chosen": chosen, "rejected": rejected}
+
+
 def run_dpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict[str, Any]:
-    """TRL DPOTrainer over dpo.jsonl (schema {prompt[], chosen, rejected})."""
+    """TRL DPOTrainer over dpo.jsonl (schema {prompt[], chosen, rejected}).
+
+    Deep-dive fix: this path now shares the SFT hardening bar — 4-bit tiering
+    + ROCm/bnb probe + pre-quantized guard via load_model_hardened, seed
+    setting, checkpoint resume and rotation, mid-run NaN abort, and continual
+    training from an existing adapter (training.base_adapter / --base-adapter:
+    the loaded LoRA becomes the trainable policy, and TRL's disabled-adapter
+    reference trick still works because it compares against the same base).
+    """
     dataset_dir = Path(cfg.get("_dataset_dir") or ".").expanduser()
     dpo_file = dataset_dir / "dpo.jsonl"
     if not dpo_file.is_file():
@@ -1499,6 +1807,8 @@ def run_dpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
             "preference pipelines are adapter-shaped; see worker run_dpo).")
     out_dir = Path(tr.get("output_dir") or "outputs").expanduser()
     adapter_dir = out_dir / "adapter"
+    base_adapter = resolve_base_adapter(cfg,
+                                        cli_override=cfg.get("_base_adapter"))
 
     if dry_run:
         _emit(log_path, "dry_run_ok", kind="dpo", rows=len(rows),
@@ -1506,9 +1816,10 @@ def run_dpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         return {"adapter_dir": str(adapter_dir), "dry_run": True, "rows": len(rows)}
 
     try:
+        import torch  # noqa: F401 — needed by load_model_hardened's tier logic
         from datasets import Dataset  # type: ignore[import-not-found]
-        from peft import LoraConfig, TaskType  # type: ignore[import-not-found]
-        from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore[import-not-found]
+        from peft import LoraConfig, PeftModel, TaskType  # type: ignore[import-not-found]
+        from transformers import AutoTokenizer  # type: ignore[import-not-found]
         from trl import DPOConfig, DPOTrainer  # type: ignore[import-not-found]
     except ImportError as e:  # pragma: no cover - env dependent
         raise RuntimeError(
@@ -1517,22 +1828,39 @@ def run_dpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
             "(pip install torch transformers peft trl datasets accelerate)."
         ) from None
 
+    seed = int(tr.get("random_seed", 3407))
+    import transformers as _tf  # type: ignore[import-not-found]
+    _tf.set_seed(seed)
+
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"], use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(cfg["model"], torch_dtype="auto")
+    model = load_model_hardened(cfg["model"], tr, log_path, "dpo")
     # Backlog #13: same pure kwargs builder as SFT (rslora/DoRA/string
     # target_modules included). DPO has no packing knob in TRL's DPOConfig.
-    peft_cfg = LoraConfig(
+    peft_cfg: Optional[LoraConfig] = LoraConfig(
         **lora_kwargs_from_config(cfg),
         task_type=TaskType.CAUSAL_LM,
         bias="none",
     )
+    if base_adapter:
+        # Continual DPO: the previous adapter becomes the policy; TRL keeps a
+        # fresh LoraConfig only for shape reference, so hand it None and pass
+        # the PeftModel directly (ref_model=None still uses the disabled
+        # adapter as reference).
+        _emit(log_path, "phase", phase="load_base_adapter",
+              base_adapter=base_adapter)
+        try:
+            model = PeftModel.from_pretrained(model, base_adapter,
+                                              is_trainable=True)
+        except Exception as e:
+            raise RuntimeError(
+                f"could not continue-train (DPO) from adapter {base_adapter} "
+                f"on base {cfg['model']}: {e}. The adapter must match the "
+                "same base model.") from None
+        peft_cfg = None
 
-    ds = Dataset.from_list(
-        [{"prompt": r["prompt"], "chosen": r["chosen"], "rejected": r["rejected"]}
-         for r in rows]
-    )
+    ds = Dataset.from_list([dpo_row_for_trl(r) for r in rows])
     # Backlog item #4: same progress protocol + checkpoints as SFT. Eval split
     # is intentionally skipped here — DPO eval loss on pairwise preference
     # data with only a couple of held-out pairs is noise rather than signal
@@ -1547,6 +1875,15 @@ def run_dpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         save_steps=int(tr.get("save_steps", 0) or 0),
     )
     callback = make_protocol_callback(log_path)
+    # plan_cadence mirrors save cadence into eval cadence, but DPO runs no
+    # eval loop (no eval_dataset — see note above), and transformers>=5
+    # hard-fails the mismatch at construction. Strip the eval keys.
+    cadence.pop("eval_strategy", None)
+    cadence.pop("eval_steps", None)
+    # Deep-dive fix: checkpoint rotation for DPO too (same knob as SFT).
+    _stl_dpo = int(tr.get("save_total_limit", 3) or 0)
+    if _stl_dpo > 0:
+        cadence.setdefault("save_total_limit", _stl_dpo)
     dpo_kwargs: Dict[str, Any] = {}
     optim = str(tr.get("optim", "") or "").strip()
     if optim == "muon":
@@ -1564,6 +1901,10 @@ def run_dpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         peft_config=peft_cfg,
         args=DPOConfig(
             output_dir=str(out_dir),
+            # transformers>=5 defaults eval_strategy to "epoch" and hard-fails
+            # a Trainer constructed without eval_dataset; DPO deliberately runs
+            # no eval loop (see comment above), so pin it off explicitly.
+            eval_strategy="no",
             num_train_epochs=float(tr.get("num_epochs", 3)),
             # Deep-dive fix #10: the old hardcoded `/ 10` (DPO trains best an
             # order of magnitude below SFT) is now the documented default of
@@ -1580,8 +1921,20 @@ def run_dpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
         processing_class=tokenizer,
         callbacks=[callback],
     )
+    # Deep-dive fix: DPO now honors training.resume like SFT (auto-discover in
+    # the run dir, fingerprint-scoped so a foreign checkpoint never hijacks).
+    resume_from = resolve_resume_path(
+        tr, out_dir, log_path, fingerprint=run_fingerprint(cfg))
+    if resume_from:
+        _emit(log_path, "phase", phase="resume", checkpoint=resume_from)
+    write_run_marker(out_dir, run_fingerprint(cfg))
     _emit(log_path, "phase", phase="train_dpo", rows=len(rows))
-    result = trainer.train()
+    result = trainer.train(resume_from_checkpoint=resume_from)
+    # Deep-dive fix: NaN divergence abort (same contract as SFT).
+    if callback.nan_abort_step is not None:
+        raise RuntimeError(
+            f"DPO diverged: NaN loss at step {callback.nan_abort_step} "
+            "(run aborted early); retry with a lower learning rate.")
     out_dir.mkdir(parents=True, exist_ok=True)
     # save_model() routes to the unwrapped (Peft) model's save_pretrained —
     # same adapter-only artifact as trainer.model.save_pretrained().
@@ -1592,7 +1945,8 @@ def run_dpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dict
     except Exception:
         pass
     _emit(log_path, "dpo_done", adapter_dir=str(adapter_dir),
-          train_loss=train_loss, eval_loss=None)
+          train_loss=train_loss, eval_loss=None,
+          **({"base_adapter": base_adapter} if base_adapter else {}))
     return {"adapter_dir": str(adapter_dir), "train_loss": train_loss,
             "eval_loss": None}
 
@@ -1734,6 +2088,8 @@ def run_grpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dic
             "policy collapse anyway).")
     out_dir = Path(tr.get("output_dir") or "outputs").expanduser()
     adapter_dir = out_dir / "adapter"
+    base_adapter = resolve_base_adapter(cfg,
+                                        cli_override=cfg.get("_base_adapter"))
 
     if dry_run:
         _emit(log_path, "dry_run_ok", kind="grpo", rows=len(rows),
@@ -1741,9 +2097,10 @@ def run_grpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dic
         return {"adapter_dir": str(adapter_dir), "dry_run": True, "rows": len(rows)}
 
     try:
+        import torch  # noqa: F401 — needed by load_model_hardened's tier logic
         from datasets import Dataset  # type: ignore[import-not-found]
-        from peft import LoraConfig, TaskType  # type: ignore[import-not-found]
-        from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore[import-not-found]
+        from peft import LoraConfig, PeftModel, TaskType  # type: ignore[import-not-found]
+        from transformers import AutoTokenizer  # type: ignore[import-not-found]
         from trl import GRPOConfig, GRPOTrainer  # type: ignore[import-not-found]
     except ImportError as e:  # pragma: no cover - env dependent
         raise RuntimeError(
@@ -1751,16 +2108,33 @@ def run_grpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dic
             f"importable here: {e} — install it in the training environment "
             "(pip install -U trl).") from None
 
+    seed = int(tr.get("random_seed", 3407))
+    import transformers as _tf  # type: ignore[import-not-found]
+    _tf.set_seed(seed)
+
     tokenizer = AutoTokenizer.from_pretrained(cfg["model"], use_fast=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        cfg["model"], torch_dtype="auto")
-    peft_cfg = LoraConfig(
+    model = load_model_hardened(cfg["model"], tr, log_path, "grpo")
+    peft_cfg: Optional[LoraConfig] = LoraConfig(
         **lora_kwargs_from_config(cfg),
         task_type=TaskType.CAUSAL_LM,
         bias="none",
     )
+    if base_adapter:
+        # Continual RL: previous adapter as the starting policy (fresh LoRA
+        # would discard every prior training round).
+        _emit(log_path, "phase", phase="load_base_adapter",
+              base_adapter=base_adapter)
+        try:
+            model = PeftModel.from_pretrained(model, base_adapter,
+                                              is_trainable=True)
+        except Exception as e:
+            raise RuntimeError(
+                f"could not continue-train (GRPO) from adapter "
+                f"{base_adapter} on base {cfg['model']}: {e}. The adapter "
+                "must match the same base model.") from None
+        peft_cfg = None
 
     ds = Dataset.from_list(rows)
     enabled = [str(x) for x in (tr.get("grpo_rewards") or ["format", "length", "solution"])]
@@ -1795,6 +2169,9 @@ def run_grpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dic
     callback = make_protocol_callback(log_path)
     args = GRPOConfig(
         output_dir=str(out_dir),
+        # Same as DPO: no eval loop here; transformers>=5 validates
+        # eval_strategy against the absent eval_dataset at construction.
+        eval_strategy="no",
         num_train_epochs=float(tr.get("num_epochs", 3)),
         # Same knob as DPO (fix #10): training.dpo_lr_scale, default 0.1 —
         # preference/RL objectives train best an order of magnitude below SFT.
@@ -1816,9 +2193,24 @@ def run_grpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dic
         processing_class=tokenizer,
         callbacks=[callback],
     )
+    # Deep-dive fix: checkpoint rotation for GRPO (same knob as SFT/DPO).
+    _stl_grpo = int(tr.get("save_total_limit", 3) or 0)
+    if _stl_grpo > 0:
+        args.save_total_limit = _stl_grpo
+    # Deep-dive fix: GRPO now honors training.resume like SFT.
+    resume_from = resolve_resume_path(
+        tr, out_dir, log_path, fingerprint=run_fingerprint(cfg))
+    if resume_from:
+        _emit(log_path, "phase", phase="resume", checkpoint=resume_from)
+    write_run_marker(out_dir, run_fingerprint(cfg))
     _emit(log_path, "phase", phase="train_grpo", rows=len(rows),
           rewards=enabled, num_generations=num_gen)
-    result = trainer.train()
+    result = trainer.train(resume_from_checkpoint=resume_from)
+    # Deep-dive fix: NaN divergence abort (same contract as SFT/DPO).
+    if callback.nan_abort_step is not None:
+        raise RuntimeError(
+            f"GRPO diverged: NaN loss at step {callback.nan_abort_step} "
+            "(run aborted early); retry with a lower learning rate.")
     out_dir.mkdir(parents=True, exist_ok=True)
     # save_model() routes to the unwrapped (Peft) model's save_pretrained —
     # same adapter-only artifact as trainer.model.save_pretrained().
@@ -1829,7 +2221,8 @@ def run_grpo(cfg: Dict[str, Any], log_path: Optional[str], dry_run: bool) -> Dic
     except Exception:
         pass
     _emit(log_path, "grpo_done", adapter_dir=str(adapter_dir),
-          train_loss=train_loss, eval_loss=None)
+          train_loss=train_loss, eval_loss=None,
+          **({"base_adapter": base_adapter} if base_adapter else {}))
     return {"adapter_dir": str(adapter_dir), "train_loss": train_loss,
             "eval_loss": None}
 
@@ -2138,11 +2531,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--job", required=True, help="Job id (registry)")
     ap.add_argument("--kind", required=True,
                     choices=["sft", "dpo", "grpo", "export"])
-    ap.add_argument("--config", required=True, help="train.yaml path")
+    # Deep-dive fix #7: --config was argparse-required, but the scheduler only
+    # passes flags whose param values exist — a job submitted without
+    # train_yaml died with argparse exit 2 and NO JSON error event in the log
+    # ("job failed, log empty"). Accept its absence here and fail through the
+    # normal error path below so the job log always tells the truth.
+    ap.add_argument("--config", default=None, help="train.yaml path")
     ap.add_argument("--dataset-dir", help="Dataset directory (for dpo.jsonl etc.)")
     ap.add_argument("--base-model", help="Resolve REPLACE_WITH_* model placeholder")
     ap.add_argument("--log-path", default=None)
     ap.add_argument("--adapter-dir", help="export: adapter to convert")
+    ap.add_argument("--base-adapter",
+                    help="continual training: existing adapter dir to "
+                         "continue from (sft/dpo/grpo)")
     ap.add_argument("--gguf-out", help="export: destination .gguf path")
     ap.add_argument("--quant", default="q4_k_m")
     ap.add_argument("--dry-run", action="store_true")
@@ -2167,9 +2568,35 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     _emit(args.log_path, "start", job=args.job, kind=args.kind, dry_run=args.dry_run)
     try:
+        # ML-stack version window (production-readiness pass 3): every job kind
+        # here touches the torch/transformers/peft/trl stack (export merges with
+        # peft), so a loaded-but-untested combination fails fast with an
+        # actionable message instead of mid-run API breakage. Read from wheel
+        # metadata only — no torch import here. Escape hatch:
+        # TOASTER_LOOP_ALLOW_UNPINNED_MLSTACK=1 downgrades to a logged warning.
+        from ..core import mlstack
+
+        _gate = mlstack.worker_gate()
+        if _gate:
+            raise RuntimeError(_gate)
+        if mlstack.allow_override():
+            _ov_problems = mlstack.window_problems(mlstack.installed_versions())
+            if _ov_problems:
+                _emit(args.log_path, "warning", message=(
+                    "ML-stack window violated but "
+                    f"{mlstack.ALLOW_OVERRIDE_ENV} is set — training anyway: "
+                    + "; ".join(_ov_problems)))
+
+        if not args.config:
+            raise ValueError(
+                "no --config train.yaml was provided for this job; the submit "
+                "path must set params.train_yaml (every dashboard/CLI/pipeline "
+                "submit does — a hand-inserted jobs row needs it too)")
         cfg = load_train_config(args.config, base_model_override=args.base_model)
         if args.dataset_dir:
             cfg["_dataset_dir"] = str(Path(args.dataset_dir).expanduser())
+        if getattr(args, "base_adapter", None):
+            cfg["_base_adapter"] = str(args.base_adapter)
         if args.kind == "sft":
             result = run_sft(cfg, args.log_path, args.dry_run)
         elif args.kind == "dpo":

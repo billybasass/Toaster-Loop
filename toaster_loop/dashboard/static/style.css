@@ -172,6 +172,10 @@ h3 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; color: var(--d
   border-radius: 10px; padding: 18px; text-align: center; margin: 6px 0;
 }
 
+/* self-update banner (app.js): full-width notice above the outlet */
+.update-banner { display: flex; align-items: center; gap: 8px;
+  border-left: 3px solid var(--warn); margin-bottom: 10px; padding: 10px 14px; }
+
 /* pills (status bar) */
 .pill { font-size: 12px; padding: 2px 10px; border-radius: 12px; background: var(--panel2);
   border: 1px solid var(--line); white-space: nowrap; }

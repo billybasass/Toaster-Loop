@@ -18,7 +18,8 @@ from . import __version__
 from .core.agent_runner import AgentBackendError, create_runner
 from .core.config import (ConfigError, ToasterLoopConfig,
                           discover_external_server_url, load_config)
-from .core.exitcodes import EXIT_CONFIG_INVALID, EXIT_CORRUPT_ARTIFACT
+from .core.exitcodes import (EXIT_CONFIG_INVALID, EXIT_CORRUPT_ARTIFACT,
+                             EXIT_INTERRUPTED, EXIT_UPDATE_AVAILABLE)
 from .serving.supervisor import (
     ServeError,
     ServingSupervisor,
@@ -726,6 +727,12 @@ def build_parser() -> argparse.ArgumentParser:
     tsubmit.add_argument("--name", metavar="NAME",
                          help="Human name for the trained model (registry "
                               "display_name + artifact filenames)")
+    tsubmit.add_argument(
+        "--continue-from", metavar="MODEL_OR_DIR", dest="continue_from",
+        default=None,
+        help="Continual training: build on an existing adapter instead of a "
+             "fresh one — a registry model id (uses its adapter_dir) or a "
+             "path to an adapter directory. The new model records lineage.")
     tsubmit.set_defaults(func=cmd_train_start)
 
     tstat = trsub.add_parser("status", help="Job status (all, or one job id)")
@@ -1142,6 +1149,27 @@ def build_parser() -> argparse.ArgumentParser:
     upd.add_argument("--ref", metavar="REF",
                      help="Switch branch/tag and rebuild")
     upd.set_defaults(func=cmd_update)
+
+    # --------------------------------------------------------------- upgrade
+    upg = sub.add_parser(
+        "upgrade",
+        help="Check/apply Toaster Loop program updates from the git repo",
+        description=(
+            "Toaster Loop's own update system (distinct from `update`, which "
+            "rebuilds llama.cpp). Compares this install with the upstream "
+            "GitHub repo (origin for a git clone; Releases API otherwise) and "
+            "reports whether a newer version is available. Without --check it "
+            "applies the update: git pull --ff-only + reinstall — refusing on "
+            "a dirty worktree or non-fast-forward. A restart is required "
+            "afterwards. Exits 10 with --check when an update is available."
+        ),
+    )
+    _add_common(upg)
+    upg.add_argument("--check", action="store_true",
+                     help="Only report whether an update is available")
+    upg.add_argument("-y", "--yes", action="store_true",
+                     help="Apply without an interactive confirmation prompt")
+    upg.set_defaults(func=cmd_upgrade)
 
     # ---------------------------------------------------------------- launch
     lch = sub.add_parser(
@@ -1644,6 +1672,46 @@ def cmd_update(args: argparse.Namespace) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     print("llama.cpp updated. Restart any running server (`toaster-loop serve`) to use it.")
+    return 0
+
+
+# ----------------------------------------------------------------- upgrade
+
+def cmd_upgrade(args: argparse.Namespace) -> int:
+    """`toaster-loop upgrade` — the program's own update system (core/updater)."""
+    from .core import updater
+
+    _setup_logging(args.verbose, args.config)
+    cfg = load_config(args.config)
+
+    status = updater.check_for_update(cfg, force=True)
+    print(updater.format_status(status))
+    if args.check:
+        return 0 if not status.get("available") else EXIT_UPDATE_AVAILABLE
+    if not status.get("available"):
+        print("nothing to do.")
+        return 0
+
+    if not args.yes and sys.stdin.isatty():
+        try:
+            answer = input("Apply update now? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\naborted.")
+            return EXIT_INTERRUPTED
+        if answer not in ("y", "yes"):
+            print("not applying (rerun and answer y, or pass --yes).")
+            return 0
+
+    try:
+        result = updater.apply_update(cfg, log_fn=print)
+    except updater.UpdateError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if not result.get("changed"):
+        print("already at the latest commit.")
+        return 0
+    print(f"updated to v{result.get('to')} — restart Toaster Loop "
+          "(`toaster-loop launch`) to run the new version.")
     return 0
 
 
@@ -3780,29 +3848,57 @@ def cmd_train_start(args: argparse.Namespace) -> int:
         overrides = list(getattr(args, "config_key", None) or [])
         dataset_dir = home / "datasets" / args.dataset
         applied: dict = {}
-        train_yaml_path = dataset_dir / "train.yaml"
-        # WP10 step 2: a configured training.backend must reach the worker
-        # through the resolved train.yaml too (job spec carries backend);
-        # unset stays on the untouched dataset template (default behavior).
-        cfg_backend = getattr(tc, "backend", None)
-        if overrides or cfg_backend:
-            from .training.pipeline import _resolved_train_yaml
+        # Deep-dive fix #1: resolve the train.yaml for EVERY submit (not only
+        # when overrides/backend are set), so output_dir always lands under
+        # train_runs/<run>/ instead of whatever the curater template baked in
+        # (historically the HF hub cache — adapters invisible, manual moves).
+        from .training.pipeline import _resolved_train_yaml
 
-            try:
-                train_yaml_path, applied = _resolved_train_yaml(
-                    dataset_dir, home / "train_runs" / f"{args.dataset}-cli",
-                    tc.base_model, config_overrides=overrides,
-                    backend=cfg_backend,
-                )
-            except ValueError as e:
-                print(f"error: {e}", file=sys.stderr)
-                return 2
+        cfg_backend = getattr(tc, "backend", None)
+        # Continual training: --continue-from <model_id|adapter dir> builds on
+        # an existing adapter instead of starting fresh from the base model.
+        continue_from = str(getattr(args, "continue_from", "") or "").strip()
+        base_adapter_dir: Optional[str] = None
+        if continue_from:
+            p = Path(continue_from).expanduser()
+            if p.is_dir():
+                base_adapter_dir = str(p)
+            else:
+                parent = reg.get_model(continue_from)
+                if parent is None:
+                    print(f"error: --continue-from {continue_from!r} is "
+                          "neither a known model id nor an adapter directory",
+                          file=sys.stderr)
+                    return 2
+                if not parent.adapter_dir or not Path(
+                        str(parent.adapter_dir)).is_dir():
+                    print(f"error: model {continue_from} has no usable "
+                          "adapter artifact to continue from", file=sys.stderr)
+                    return 2
+                base_adapter_dir = str(parent.adapter_dir)
+                # Inherit the parent's resolved base unless overridden.
+                pbase = str(parent.base_model or "").strip()
+                if not tc.base_model and pbase \
+                        and pbase != "unspecified-base":
+                    tc.base_model = pbase
+        try:
+            train_yaml_path, applied = _resolved_train_yaml(
+                dataset_dir, home / "train_runs" / f"{args.dataset}-cli",
+                tc.base_model or None, config_overrides=overrides,
+                backend=cfg_backend,
+            )
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
         params: dict = {
             "train_yaml": str(train_yaml_path),
             "dataset_dir": str(dataset_dir),
             "base_model": tc.base_model or "",
             "dry_run": args.dry_run,
         }
+        if base_adapter_dir:
+            params["base_adapter"] = base_adapter_dir
+            params["continue_from"] = continue_from
         if str(getattr(args, "name", "") or "").strip():
             params["model_name"] = str(args.name).strip()[:80]
         job = sched.submit(
@@ -3861,6 +3957,8 @@ def cmd_train_start(args: argparse.Namespace) -> int:
                 display_name=params.get("model_name"),
                 quant=getattr(tc, "gguf_quant", None),
                 actor="cli",
+                parent_adapter=(str(params["continue_from"])
+                                if params.get("continue_from") else None),
             )
             print(res.get("note") or "")
             if res.get("gguf_path"):

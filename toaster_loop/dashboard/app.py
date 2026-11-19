@@ -88,13 +88,14 @@ from .api.serve import ServeRoutes
 from .api.servers import ServersRoutes
 from .api.traces import TIMELINE_KINDS, build_trace_timeline  # noqa: F401
 from .api.traces import TracesRoutes
+from .api.update import UpdateRoutes
 from .events import EventBus
 from .hardware import HardwareSampler
 
 logger = logging.getLogger("toaster_loop.dashboard")
 
 
-class DashboardApp(OverviewRoutes, ServeRoutes, RemoteRoutes, ServersRoutes, HardwareOpsRoutes, ConfigRoutes, ControlRoutes, ChatRoutes, TracesRoutes, PlaybooksRoutes, DatasetsRoutes, ModelsRoutes, HubRoutes, JobsRoutes, EasyRoutes, IterateRoutes, EvolveRoutes, ProfilesRoutes, ProjectsRoutes, FsBrowseRoutes, PlansRoutes):
+class DashboardApp(OverviewRoutes, ServeRoutes, RemoteRoutes, ServersRoutes, HardwareOpsRoutes, ConfigRoutes, ControlRoutes, ChatRoutes, TracesRoutes, PlaybooksRoutes, DatasetsRoutes, ModelsRoutes, HubRoutes, JobsRoutes, EasyRoutes, IterateRoutes, EvolveRoutes, ProfilesRoutes, ProjectsRoutes, FsBrowseRoutes, PlansRoutes, UpdateRoutes):
     """JSON API over the toaster_loop home. One instance per server process.
 
     Domains are mixins under ``dashboard/api/``; this class owns routing and
@@ -131,6 +132,10 @@ dependency wiring only. Route handlers resolve by name via getattr.
         # report IS the result.
         self._doctor_task = BackgroundTask(self.bus, "doctor.run",
                                            log_cap=None)
+        # Self-update apply (git pull + reinstall): one live run per process;
+        # the check side never needs a slot (throttled cache read).
+        self._update_task = BackgroundTask(self.bus, "update.apply",
+                                           log_cap=200)
         self.hardware = HardwareSampler(self.home)
         self._chat_runs: Dict[str, Dict[str, Any]] = {}
         # Guards the single-flight scan-and-insert below (two concurrent POSTs
@@ -172,6 +177,11 @@ dependency wiring only. Route handlers resolve by name via getattr.
     ROUTES: List[Tuple[str, str, str]] = [
         # status & events
         ("GET", "/api/status", "h_status"),
+        # self-update (core/updater.py): cached status, forced check, apply
+        ("GET", "/api/update", "h_update_get"),
+        ("POST", "/api/update/check", "h_update_check"),
+        ("POST", "/api/update/apply", "h_update_apply"),
+        ("GET", "/api/update/apply", "h_update_apply_status"),
         ("GET", "/api/events", "h_events"),
         # Prometheus text exposition (review idea #5) — same auth/loopback
         # rules as every other /api/* route (enforced in server.py).
@@ -496,6 +506,10 @@ dependency wiring only. Route handlers resolve by name via getattr.
                     display_name=params.get("model_name"),
                     quant=(self.cfg.training or {}).get("gguf_quant"),
                     actor="dashboard",
+                    # Continual training: record the vN -> vN+1 lineage edge
+                    # when the submit continued from an existing model.
+                    parent_adapter=(str(params["continue_from"])
+                                    if params.get("continue_from") else None),
                     # If the GPU never freed up in time, register the model but
                     # leave the export queued rather than fighting for a slot.
                     submit_export=export_attempted,

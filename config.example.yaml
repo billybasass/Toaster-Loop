@@ -510,6 +510,21 @@ dashboard:
   # startup. Toggle also lives in Settings -> Dashboard.
   # expose_lan: false
 
+# Self-update system (core/updater.py) — "there's an update" detection for the
+# Toaster Loop program itself (the `update` command covers llama.cpp; this is
+# the app). Checks compare this install with the upstream GitHub repo: a git
+# clone compares HEAD with origin (so any push is detected, even without a
+# tagged release); everything also consults the GitHub Releases API for a
+# version number + notes link. Checks are cached (TTL below) and never block;
+# applying is ALWAYS an explicit action (`toaster-loop upgrade` or the
+# dashboard banner's Update button) — git pull --ff-only + reinstall, refusing
+# on dirty worktrees. Nothing ever updates itself silently.
+update:
+  enabled: true            # false = no checks at all (banner stays hidden)
+  repo: null               # override upstream, e.g. "you/Toaster-Loop" or a URL
+                           # (default: this clone's origin remote)
+  interval_hours: 24       # cached-check TTL for dashboard/CLI notices
+
 # Agent profiles (Phase 5e) — named runner configurations managed by the
 # dashboard Profiles panel (or by hand here). Chat's agent mode applies the
 # selected profile: system_prompt replaces the built-in prompt, tools restricts

@@ -644,50 +644,72 @@ class ModelRegistry:
         entry ("we trained on D expecting Y"). ``display_name`` is the
         user-chosen label for the model (UI only; model_id stays canonical).
         """
-        with self._lock:
-            if parent_adapter is None:
-                r = self._conn.execute(
-                    "SELECT model_id FROM active_pointers WHERE base_model = ?",
-                    (base_model,),
-                ).fetchone()
-                parent_adapter = r[0] if r else None
-            n = self._conn.execute("SELECT COUNT(*) FROM models").fetchone()[0]
-            model_id = f"v{n + 1}"
-            while self._conn.execute(
-                "SELECT 1 FROM models WHERE model_id = ?", (model_id,)
-            ).fetchone():
-                n += 1
+        # Deep-dive fix #12: id allocation used to rely on the in-process
+        # thread lock only. Two processes (dashboard + a CLI train + a cron
+        # auto-check) sharing one WAL DB could compute the SAME vN and one
+        # INSERT then dies with IntegrityError. The PRIMARY KEY is the real
+        # arbiter, so we retry on collision (recomputing the id) instead of
+        # surfacing an opaque failure or looping forever.
+        last_err: Optional[Exception] = None
+        for _attempt in range(100):
+            with self._lock:
+                if parent_adapter is None:
+                    r = self._conn.execute(
+                        "SELECT model_id FROM active_pointers"
+                        " WHERE base_model = ?",
+                        (base_model,),
+                    ).fetchone()
+                    parent_adapter = r[0] if r else None
+                n = self._conn.execute(
+                    "SELECT COUNT(*) FROM models").fetchone()[0]
                 model_id = f"v{n + 1}"
-            row = ModelRow(
-                model_id=model_id,
-                base_model=base_model,
-                parent_adapter=parent_adapter,
-                dataset_id=dataset_id,
-                manifest_hash=manifest_hash,
-                adapter_dir=None,
-                gguf_path=None,
-                quant=quant,
-                status="candidate",
-                created_at=_utcnow(),
-                validation=None,
-                display_name=(str(display_name).strip() or None),
-            )
-            self._conn.execute(
-                "INSERT INTO models (model_id, base_model, parent_adapter, dataset_id,"
-                " manifest_hash, adapter_dir, gguf_path, quant, status, created_at,"
-                " validation_json, display_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    row.model_id, row.base_model, row.parent_adapter, row.dataset_id,
-                    row.manifest_hash, row.adapter_dir, row.gguf_path, row.quant,
-                    row.status, row.created_at, None, row.display_name,
-                ),
-            )
-            record(self._conn, actor, "register", model_id, before=None,
-                   after={"status": "candidate", "base_model": base_model,
-                          "parent_adapter": parent_adapter},
-                   intent=intent)
-            self._conn.commit()
-        return row
+                while self._conn.execute(
+                    "SELECT 1 FROM models WHERE model_id = ?", (model_id,)
+                ).fetchone():
+                    n += 1
+                    model_id = f"v{n + 1}"
+                row = ModelRow(
+                    model_id=model_id,
+                    base_model=base_model,
+                    parent_adapter=parent_adapter,
+                    dataset_id=dataset_id,
+                    manifest_hash=manifest_hash,
+                    adapter_dir=None,
+                    gguf_path=None,
+                    quant=quant,
+                    status="candidate",
+                    created_at=_utcnow(),
+                    validation=None,
+                    display_name=(str(display_name).strip() or None),
+                )
+                try:
+                    self._conn.execute(
+                        "INSERT INTO models (model_id, base_model,"
+                        " parent_adapter, dataset_id, manifest_hash,"
+                        " adapter_dir, gguf_path, quant, status, created_at,"
+                        " validation_json, display_name)"
+                        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            row.model_id, row.base_model, row.parent_adapter,
+                            row.dataset_id, row.manifest_hash, row.adapter_dir,
+                            row.gguf_path, row.quant, row.status,
+                            row.created_at, None, row.display_name,
+                        ),
+                    )
+                except sqlite3.IntegrityError as e:
+                    # Cross-process collision: roll back and re-allocate.
+                    self._conn.rollback()
+                    last_err = e
+                    continue
+                record(self._conn, actor, "register", model_id, before=None,
+                       after={"status": "candidate", "base_model": base_model,
+                              "parent_adapter": parent_adapter},
+                       intent=intent)
+                self._conn.commit()
+            return row
+        raise RegistryError(
+            f"could not allocate a unique model id after 100 attempts "
+            f"(last error: {last_err})")
 
     def get_model(self, model_id: str) -> Optional[ModelRow]:
         with self._lock:
@@ -1315,40 +1337,60 @@ class ModelRegistry:
                 ).fetchone() is None:
                     raise RegistryError(
                         f"depends_on references unknown job {d!r}")
-            n = self._conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-            job_id = f"job-{n + 1:04d}"
-            while self._conn.execute(
-                "SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)
-            ).fetchone():
-                n += 1
+            # Deep-dive fix #12: job-id allocation must survive cross-process
+            # collisions (dashboard + CLI + cron share one WAL DB; the thread
+            # lock is per-process). PRIMARY KEY is the arbiter; retry on
+            # IntegrityError instead of dying or looping forever.
+            last_err: Optional[Exception] = None
+            for _attempt in range(100):
+                n = self._conn.execute(
+                    "SELECT COUNT(*) FROM jobs").fetchone()[0]
                 job_id = f"job-{n + 1:04d}"
-            row = JobRow(
-                job_id=job_id,
-                kind=kind,
-                dataset_id=dataset_id,
-                model_id=model_id,
-                state="queued",
-                log_path=log_path,
-                queued_at=_utcnow(),
-                params=params or {},
-                depends_on=deps,
-            )
-            self._conn.execute(
-                "INSERT INTO jobs (job_id, kind, dataset_id, model_id, state,"
-                " log_path, queued_at, params_json, depends_on_json)"
-                " VALUES (?,?,?,?,?,?,?,?,?)",
-                (
-                    row.job_id, row.kind, row.dataset_id, row.model_id, row.state,
-                    row.log_path, row.queued_at, json.dumps(row.params),
-                    json.dumps(row.depends_on) if row.depends_on else None,
-                ),
-            )
-            if actor is not None:
-                record(self._conn, actor, "job_queued", row.job_id,
-                       before=None,
-                       after={"kind": kind, "model_id": model_id,
-                              "state": "queued"})
-            self._conn.commit()
+                while self._conn.execute(
+                    "SELECT 1 FROM jobs WHERE job_id = ?", (job_id,)
+                ).fetchone():
+                    n += 1
+                    job_id = f"job-{n + 1:04d}"
+                row = JobRow(
+                    job_id=job_id,
+                    kind=kind,
+                    dataset_id=dataset_id,
+                    model_id=model_id,
+                    state="queued",
+                    log_path=log_path,
+                    queued_at=_utcnow(),
+                    params=params or {},
+                    depends_on=deps,
+                )
+                try:
+                    self._conn.execute(
+                        "INSERT INTO jobs (job_id, kind, dataset_id,"
+                        " model_id, state, log_path, queued_at,"
+                        " params_json, depends_on_json)"
+                        " VALUES (?,?,?,?,?,?,?,?,?)",
+                        (
+                            row.job_id, row.kind, row.dataset_id,
+                            row.model_id, row.state, row.log_path,
+                            row.queued_at, json.dumps(row.params),
+                            json.dumps(row.depends_on)
+                            if row.depends_on else None,
+                        ),
+                    )
+                except sqlite3.IntegrityError as e:
+                    self._conn.rollback()
+                    last_err = e
+                    continue
+                if actor is not None:
+                    record(self._conn, actor, "job_queued", row.job_id,
+                           before=None,
+                           after={"kind": kind, "model_id": model_id,
+                                  "state": "queued"})
+                self._conn.commit()
+                break
+            else:
+                raise RegistryError(
+                    f"could not allocate a unique job id after 100 attempts "
+                    f"(last error: {last_err})")
         return row
 
     def set_job_log_path(self, job_id: str, log_path: str) -> None:

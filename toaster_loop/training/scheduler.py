@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..core import proclock  # cross-process locks: flock/msvcrt/pidfile
 from ..registry.registry import INPROCESS_JOB_KINDS, JobRow, ModelRegistry
 from ..store.db import TraceStore
 
@@ -53,54 +54,28 @@ _INFLIGHT_CLAIMS: Dict[str, int] = {}
 DISPATCH_TICK_S = 5.0
 
 
-fcntl: Any = None  # bound below when POSIX locking is available
-try:  # POSIX advisory locking; absent on Windows -> in-process fallback only
-    import fcntl  # noqa: F811
-    _HAVE_FCNTL = True
-except ImportError:  # pragma: no cover - Windows
-    _HAVE_FCNTL = False
-
-
 def _slot_lock_path(db_path: Path, slot: int) -> Path:
     """Sidecar lock file for one device slot (next to the daemon DB)."""
     return Path(str(db_path) + f".slot{slot}.lock")
 
 
 def _try_slot_lock(db_path: Path, slot: int):
-    """Non-blocking flock on a device slot, held until _release_slot_lock.
+    """Non-blocking cross-process lock on a device slot, held until
+    _release_slot_lock.
 
-    Returns the held file handle when acquired, or None when another process
-    holds the slot (its worker is running there). The kernel drops the lock if
-    this process dies — no stale-lock cleanup needed. Without fcntl (Windows)
-    returns a dummy sentinel so callers keep uniform logic; the in-process
-    dict bookkeeping still guards slots within one process.
+    Returns the held handle when acquired, or None when another process holds
+    the slot (its worker is running there). Backend by platform via
+    core/proclock.py: POSIX flock (kernel-dropped on death — unchanged
+    semantics); Windows msvcrt byte-range locking (previously a silent no-op
+    sentinel here, which let two NT processes dispatch onto one GPU); pid +
+    liveness lockfile as last resort. The in-process dict bookkeeping still
+    guards slots within one process on every backend.
     """
-    if not _HAVE_FCNTL:
-        return object()
-    lock_path = _slot_lock_path(db_path, slot)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(lock_path, "a+")
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        fh.close()
-        return None
-    return fh
+    return proclock.acquire(_slot_lock_path(db_path, slot))
 
 
 def _release_slot_lock(handle) -> None:
-    if handle is None:
-        return
-    try:
-        if _HAVE_FCNTL and hasattr(handle, "fileno"):
-            fcntl.flock(handle, fcntl.LOCK_UN)
-    except Exception:
-        pass
-    try:
-        if hasattr(handle, "close"):
-            handle.close()
-    except Exception:
-        pass
+    proclock.release(handle)
 
 
 # ------------------------------------------------------------- config object
@@ -699,6 +674,8 @@ class Scheduler:
             ("--adapter-dir", params.get("adapter_dir")),
             ("--gguf-out", params.get("gguf_out")),
             ("--quant", params.get("quant")),
+            # Continual training (deep-dive fix): existing adapter to build on.
+            ("--base-adapter", params.get("base_adapter")),
         ]
         for flag, value in optional_flags:
             if value not in (None, ""):
@@ -1246,8 +1223,9 @@ class JobDispatcher:
     holder pid + path on contention. Like the device-slot locks, the kernel
     drops the flock when the holder dies — stale locks from dead pids are
     reclaimed automatically (the pid inside is informational; it is rewritten
-    on every successful claim). Without fcntl (Windows) the lock degrades to
-    this-process-only, matching ``_try_slot_lock``.
+    on every successful claim). On Windows the same lock runs through msvcrt
+    byte-range locking (core/proclock.py) — previously this degraded to
+    this-process-only, matching the old ``_try_slot_lock`` no-op.
 
     ``scheduler_factory`` is called once per thread (and once for the startup
     reap) so every worker thread owns its own SQLite connection; the
@@ -1274,45 +1252,22 @@ class JobDispatcher:
 
     def _acquire_lock(self) -> None:
         path = _dispatcher_lock_path(self.db_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(path, "a+")
-        try:
-            if _HAVE_FCNTL:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            # (Re)claim: truncate away any stale pid from a dead holder and
-            # record ours, so the next contended start can name us.
-            fh.seek(0)
-            fh.truncate()
-            fh.write(str(os.getpid()))
-            fh.flush()
-        except OSError as e:
-            holder = ""
-            try:
-                fh.seek(0)
-                holder = fh.read().strip()
-            except Exception:  # pragma: no cover - defensive
-                pass
-            fh.close()
+        handle = proclock.acquire(path)
+        if handle is None:
+            holder = proclock.holder_pid(path)
             raise DispatcherAlreadyRunning(
                 f"another toaster_loop dispatcher is running for this database "
                 f"(lockfile {path}, holder pid {holder or 'unknown'}) — "
                 "two dashboards must not share one DB; stop the other "
-                f"process first ({e})") from e
-        self._lock_fh = fh
+                "process first")
+        # (Re)claim: truncate away any stale pid from a dead holder and
+        # record ours, so the next contended start can name us.
+        proclock.write_holder(handle)
+        self._lock_fh = handle
 
     def _release_lock(self) -> None:
         fh, self._lock_fh = self._lock_fh, None
-        if fh is None:
-            return
-        try:
-            if _HAVE_FCNTL and hasattr(fh, "fileno"):
-                fcntl.flock(fh, fcntl.LOCK_UN)
-        except Exception:  # pragma: no cover - defensive
-            pass
-        try:
-            fh.close()
-        except Exception:  # pragma: no cover - defensive
-            pass
+        proclock.release(fh)
 
     # ---- lifecycle -----------------------------------------------------------
 

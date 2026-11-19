@@ -104,6 +104,7 @@ def stop_owned_server(home: Path, grace: float = 8.0) -> bool:
 def start_server_detached(
     cfg: ToasterLoopConfig, gguf_path: str, model_name: Optional[str] = None,
     model_id: Optional[str] = None, home: Optional[Path] = None,
+    lora_gguf: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Spawn llama-server detached from the CLI; record serve_state. Returns it.
 
@@ -130,7 +131,8 @@ def start_server_detached(
     clear_crash_loop(crash_key)  # explicit user action (see docstring)
     try:
         return _start_server_detached_once(
-            cfg, gguf_path, model_name=model_name, model_id=model_id, home=home)
+            cfg, gguf_path, model_name=model_name, model_id=model_id, home=home,
+            lora_gguf=lora_gguf)
     except (ServeError, OSError):
         # ServeError = early exit / unhealthy; OSError = spawn failure —
         # same pair supervisor.start_instance_server counts as one cycle.
@@ -138,9 +140,78 @@ def start_server_detached(
         raise
 
 
+def resolve_lora_pair(home: Path, registry: ModelRegistry, model_id: str,
+                      cfg: ToasterLoopConfig) -> Optional[Dict[str, str]]:
+    """Resolve a gguf-lora row into a servable (base_gguf, adapter_gguf) pair.
+
+    The streamed backend's export relocates a GGUF *LoRA adapter* (method
+    ``gguf-lora``); llama-server loads it with ``--lora`` on top of the base
+    model's own GGUF. A row is servable ONLY when both halves are provable:
+
+      1. the adapter artifact itself parses as a GGUF LoRA adapter
+         (``general.type == "adapter"``, core/gguf_meta reader); and
+      2. a base GGUF resolves, in order of precedence:
+         provenance["base_gguf"] (stamped by an explicit pairing step) >
+         config ``serve.lora_base_gguf`` > env TOASTER_LOOP_LORA_BASE_GGUF;
+         and its ``general.architecture`` matches the adapter's (llama.cpp
+         throws on mismatch — we refuse earlier with a clear message).
+
+    Returns None for rows that are not gguf-lora exports at all. Raises
+    ServeError for gguf-lora rows whose pair is incomplete — never spawns an
+    unmodified base under the trained model's name (the silent-wrong-weights
+    failure this gate exists to prevent)."""
+    model = registry.get_model(model_id)
+    if model is None:
+        raise ServeError(f"no model {model_id} in registry")
+    prov = model.provenance if isinstance(model.provenance, dict) else {}
+    if str(prov.get("export_method") or "") != "gguf-lora":
+        return None
+    adapter = str(model.gguf_path or "")
+    if not adapter or not Path(adapter).is_file():
+        raise ServeError(
+            f"model {model_id} is a gguf-lora export but its adapter GGUF "
+            f"is missing ({adapter or 'unset'}) — re-run the export step")
+
+    from ..core.gguf_meta import gguf_arch, read_gguf_metadata
+
+    md = read_gguf_metadata(adapter)
+    if not md or str(md["keys"].get("general.type") or "") != "adapter":
+        raise ServeError(
+            f"model {model_id}'s GGUF is labeled a gguf-lora export but does "
+            f"not parse as a GGUF LoRA adapter (general.type != 'adapter'): "
+            f"{adapter} — refusing to serve")
+
+    serve_cfg = getattr(cfg, "serve", None) or {}
+    base = ""
+    if isinstance(prov.get("base_gguf"), str) and prov["base_gguf"]:
+        base = str(prov["base_gguf"])
+    elif isinstance(serve_cfg, dict) and serve_cfg.get("lora_base_gguf"):
+        base = str(serve_cfg["lora_base_gguf"])
+    elif os.environ.get("TOASTER_LOOP_LORA_BASE_GGUF"):
+        base = str(os.environ["TOASTER_LOOP_LORA_BASE_GGUF"])
+    if not base or not Path(base).expanduser().is_file():
+        raise ServeError(
+            f"model {model_id}'s GGUF is a streamed gguf-lora adapter; "
+            "serving it needs its BASE model GGUF for llama-server's --lora "
+            "flag, and none resolves. Set one of: provenance base_gguf "
+            "(recommended), config serve.lora_base_gguf, or env "
+            "TOASTER_LOOP_LORA_BASE_GGUF — pointing at the GGUF built from "
+            f"the same base ({model.base_model!r}); or re-export with the "
+            "peft backend (merged standalone GGUF).")
+    base = str(Path(base).expanduser())
+    a_arch, b_arch = gguf_arch(adapter), gguf_arch(base)
+    if a_arch and b_arch and a_arch != b_arch:
+        raise ServeError(
+            f"gguf-lora pair mismatch for {model_id}: adapter architecture "
+            f"{a_arch!r} vs base {b_arch!r} ({base}) — llama-server would "
+            "reject the load; point base_gguf at the matching base model")
+    return {"base_gguf": base, "adapter_gguf": adapter}
+
+
 def _start_server_detached_once(
     cfg: ToasterLoopConfig, gguf_path: str, model_name: Optional[str] = None,
     model_id: Optional[str] = None, home: Optional[Path] = None,
+    lora_gguf: Optional[str] = None,
 ) -> Dict[str, Any]:
     """One spawn/healthcheck attempt for start_server_detached (no budget)."""
     from ..core.model_discovery import resolve_gguf_shards, shard_group
@@ -165,6 +236,11 @@ def _start_server_detached_once(
     from .calibrate import apply_calibration
 
     rs = {**apply_calibration(cfg, str(gguf)), **(cfg.run_settings or {})}
+    # gguf-lora pairing (production-readiness pass 3): -m is the BASE model,
+    # --lora carries the trained adapter. Empty list unless a pair was
+    # resolved upstream, so every non-lora spawn stays byte-identical.
+    from .run_args import lora_args
+
     cmd = [
         binary, "-m", str(gguf), "--alias", name,
         "--host", cfg.host, "--port", str(port),
@@ -173,6 +249,7 @@ def _start_server_detached_once(
         + run_settings_args(rs,
                             gpu_layers=runtime.gpu_layers(cfg.gpu_layers, rt),
                             gguf_path=str(gguf)) \
+        + lora_args(lora_gguf) \
         + list(cfg.extra_llama_args)
 
     # Honor the configured home (TOASTER_LOOP_HOME env > config `home:` > ~/.toaster-loop)
@@ -267,13 +344,27 @@ def deploy_model(
             f"model {model_id} has no GGUF artifact "
             "(run the export step / `toaster-loop iterate` first)"
         )
+    # Streamed gguf-lora exports are SERVED as a base+adapter pair (pass 3):
+    # resolve_lora_pair proves both halves (adapter GGUF parses as an adapter,
+    # base resolves via provenance/config/env, architectures match) and the
+    # spawn passes llama-server's --lora. An incomplete pair still raises —
+    # serving the adapter alone, or the bare base under a trained model's
+    # name, would silently answer with the wrong weights.
+    lora_pair = resolve_lora_pair(home, registry, model_id, cfg)
+    # Unvalidated models are servable by design (manual deploy), but say so
+    # loudly — the Models panel and this result carry the flag. A row that
+    # never went through set_validation keeps status 'candidate'.
+    unvalidated = model.status not in ("validated", "promoted")
 
     previous = read_serve_state(home)
     stopped = stop_owned_server(home) if stop_first else False
 
+    # For a lora pair, -m is the BASE GGUF; model.gguf_path stays the adapter.
+    spawn_gguf = lora_pair["base_gguf"] if lora_pair else model.gguf_path
     state = start_server_detached(
-        cfg, model.gguf_path, model_name=model.model_id or gguf_stem(model),
+        cfg, spawn_gguf, model_name=model.model_id or gguf_stem(model),
         model_id=model.model_id, home=home,
+        lora_gguf=lora_pair["adapter_gguf"] if lora_pair else None,
     )
     # Idea adapted from PIASystem (MIT) app/core/adapter_manager.py — stamp the
     # activation so age-based archival policy sees actual use. Once per deploy,
@@ -290,14 +381,22 @@ def deploy_model(
         except Exception as e:  # daemon path must never crash on swap
             logger.warning("runner.switch_model raised %s: %s", type(e).__name__, e)
 
+    if unvalidated:
+        logger.warning(
+            "serving model %s WITHOUT validation (status=%s) — it never "
+            "passed the golden-task gate", model_id, model.status)
     return {
         "model_id": model.model_id,
         "base_url": state["base_url"],
         "model_name": state["model_name"],
         "gguf_path": state["gguf_path"],
+        # Honest pairing record for gguf-lora serves (state.gguf_path is the
+        # BASE; the trained artifact stays on the registry row).
+        **({"lora_adapter": lora_pair["adapter_gguf"]} if lora_pair else {}),
         "stopped_previous": stopped,
         "previous": previous,
         "switched": switched,
+        "unvalidated": unvalidated,
     }
 
 

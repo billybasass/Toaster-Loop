@@ -669,6 +669,29 @@ def serve_dashboard(
             coex.start_idle_loop()
     except Exception:
         logger.exception("coexistence idle loop failed to start")
+    # Self-update (core/updater.py): one throttled background check at boot so
+    # the UI banner knows about a new release without blocking startup or
+    # polling GitHub. Honors update.enabled + the cached-check TTL; any
+    # failure is recorded in the cache and never breaks the dashboard.
+    try:
+        from ..core import updater as _updater
+
+        def _startup_update_check() -> None:
+            try:
+                st = _updater.check_for_update(
+                    httpd.toaster_loop_app.cfg,  # type: ignore[attr-defined]
+                    home=httpd.toaster_loop_app.home)  # type: ignore[attr-defined]
+                if st.get("available"):
+                    httpd.toaster_loop_app.bus.publish(  # type: ignore[attr-defined]
+                        "update.available",
+                        {"remote_version": st.get("remote_version"),
+                         "url": st.get("url")})
+            except Exception:  # noqa: BLE001 - update notice is best-effort
+                logger.debug("startup update check failed", exc_info=True)
+
+        threading.Thread(target=_startup_update_check, daemon=True).start()
+    except Exception:
+        logger.exception("update check failed to schedule")
     if block:
         print(f"toaster-loop dashboard: {url}")
         if tok:

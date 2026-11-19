@@ -95,7 +95,7 @@ _DICT_FIELDS = frozenset({
     "curation", "training", "validation", "dashboard", "agent", "tools",
     "janitor", "run_settings", "sampling", "indexing", "evolution",
     "playbooks", "skills", "logging", "rft", "goldens_mine", "easy_training",
-    "routing", "serve", "plans",
+    "routing", "serve", "plans", "update",
 })
 _LIST_FIELDS = frozenset({"extra_llama_args", "profiles"})
 
@@ -377,6 +377,12 @@ class ToasterLoopConfig:
     # recognized keys; empty => defaults). Binds loopback unless
     # ``expose_lan: true`` widens it to 0.0.0.0 (token auth then mandatory).
     dashboard: dict[str, Any] = field(default_factory=dict)
+    # Raw `update:` YAML section — Toaster Loop self-update system
+    # (core/updater.py). Keys: enabled (bool, default true), repo
+    # ("owner/name" or URL override for the upstream; default = the clone's
+    # origin), interval_hours (cached-check TTL for dashboard/CLI notices,
+    # default 24). Applying is always an explicit user action.
+    update: dict[str, Any] = field(default_factory=dict)
     # Raw `agent:` YAML section. Recognized keys:
     #   context_token_budget: int  — compress REPL/chat history when the
     #     estimated prompt exceeds this many tokens (0 disables; default is

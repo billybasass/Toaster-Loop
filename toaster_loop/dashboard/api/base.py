@@ -52,6 +52,7 @@ class ApiContext:
         _exec_lock: Any
         _metrics_lock: Any
         _runtime_task: Any
+        _update_task: Any
 
         # --- cross-domain helpers (DashboardApp or sibling mixins) ---------
         def handle(self, *args: Any, **kwargs: Any) -> Any: ...

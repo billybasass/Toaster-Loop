@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -282,12 +283,57 @@ rft/mine_goldens) and the train check/estimate endpoints.
                     code="already_running",
                 )
             sched = self._scheduler(reg)
+            # Continual training (deep-dive fix): "train on more data" — the
+            # UI passes continue_from=<model_id> (or a raw adapter dir). The
+            # worker loads that adapter onto the base and keeps it trainable,
+            # so vN+1 builds on everything the model already learned.
+            base_adapter_dir: Optional[str] = None
+            continue_from = str(b.get("continue_from") or "").strip()
+            if continue_from:
+                base_adapter_dir = self._resolve_continue_from(
+                    reg, continue_from)
+                # The continuation MUST load onto the same HF base the parent
+                # adapter was trained on; an explicit base_model still wins.
+                if not b.get("base_model"):
+                    parent = reg.get_model(continue_from)
+                    pbase = str(parent.base_model or "") if parent else ""
+                    if pbase and pbase != "unspecified-base":
+                        tc.base_model = pbase
+            # Deep-dive fix #1: resolve the dataset train.yaml for EVERY submit
+            # path (dashboard included), so output_dir is always under
+            # train_runs/<run>/ — never whatever the curater template baked in
+            # (historically the HF hub cache, which made finished adapters
+            # invisible to the Models panel and forced manual moves).
+            from ...training.pipeline import _resolved_train_yaml
+
+            dataset_dir = self.home / "datasets" / dataset_id
+            # pid + uuid suffix: two submits in the same second must never
+            # share a run dir (checkpoints, resolved yaml, provenance).
+            import uuid as _uuid
+
+            run_slug = (f"{dataset_id}-dash-{int(time.time())}"
+                        f"-{os.getpid()}-{_uuid.uuid4().hex[:6]}")
+            try:
+                resolved_yaml, _applied = _resolved_train_yaml(
+                    dataset_dir, self.home / "train_runs" / run_slug,
+                    tc.base_model or None,
+                    eval_fraction=getattr(tc, "eval_fraction", None),
+                    eval_seed=getattr(tc, "eval_seed", None),
+                )
+            except Exception:
+                # Template unreadable/invalid: fall back to the raw path — the
+                # worker's own validation produces the honest error.
+                resolved_yaml = dataset_dir / "train.yaml"
             params: Dict[str, Any] = {
-                "train_yaml": str(self.home / "datasets" / dataset_id / "train.yaml"),
-                "dataset_dir": str(self.home / "datasets" / dataset_id),
+                "train_yaml": str(resolved_yaml),
+                "dataset_dir": str(dataset_dir),
                 "base_model": tc.base_model or "",
                 "dry_run": dry_run,
             }
+            if base_adapter_dir:
+                params["base_adapter"] = base_adapter_dir
+                if continue_from:
+                    params["continue_from"] = continue_from
             # Optional human name for the trained artifacts (recorded on the
             # job; propagated to the registry model row's display_name).
             if str(b.get("model_name") or "").strip():
@@ -337,6 +383,28 @@ rft/mine_goldens) and the train check/estimate endpoints.
 
         threading.Thread(target=_run, args=(job.job_id,), daemon=True).start()
         return {"ok": True, "job_id": job.job_id, "state": "queued"}
+
+    def _resolve_continue_from(self, reg, ref: str) -> str:
+        """Resolve a `continue_from` reference to an adapter directory.
+
+        Accepts a registry model_id (uses its adapter_dir) or a direct path.
+        Raises HttpError with the reason when nothing trainable is found —
+        silently starting from scratch would defeat the whole request."""
+        p = Path(ref).expanduser()
+        if p.is_dir():
+            return str(p)
+        model = reg.get_model(ref)
+        if model is None:
+            raise HttpError(400, f"continue_from={ref!r} is neither a known "
+                                 "model id nor an adapter directory")
+        if not model.adapter_dir:
+            raise HttpError(400, f"model {ref} has no adapter artifact to "
+                                 "continue from (archived or export-only row)")
+        ad = Path(str(model.adapter_dir))
+        if not ad.is_dir():
+            raise HttpError(400, f"model {ref}'s adapter directory is gone: "
+                                 f"{ad} — retrain from its base model instead")
+        return str(ad)
 
     def _merge_datasets(self, ids: List[str]) -> str:
         """Materialize a merged dataset from several existing ones.

@@ -143,6 +143,19 @@ def speculative_args(run_settings: Dict[str, Any],
     return args
 
 
+def lora_args(adapter_gguf: Optional[str]) -> List[str]:
+    """llama-server args for serving a GGUF-LoRA ADAPTER on its base model.
+
+    ``--lora`` is the long, stable form of llama.cpp's adapter flag (the WP10
+    golden gate exercised it end-to-end against a real llama-server build:
+    experiments/wp10_golden_gate/run_gate.py rides exactly this arg through
+    extra_llama_args). Empty list when unset so every existing command line
+    stays byte-identical."""
+    if not adapter_gguf:
+        return []
+    return ["--lora", str(adapter_gguf)]
+
+
 def run_settings_args(run_settings: Optional[Dict[str, Any]],
                       gpu_layers: Optional[int] = None,
                       gguf_path: Optional[str] = None) -> List[str]:

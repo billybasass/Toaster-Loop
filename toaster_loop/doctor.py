@@ -159,6 +159,24 @@ def check_deps(find_spec: Callable[[str], Any] = importlib.util.find_spec
                                    "--index-url hint above"])
         except Exception as e:  # never let the probe break the doctor
             lines.append(f"torch flavor check skipped: {e}")
+        # Version-window check (core/mlstack.py): an out-of-window torch/trl
+        # combination breaks SFT/DPO/GRPO with API drift; the worker refuses
+        # to train, so say so here too. Metadata-only — no heavy imports.
+        try:
+            from .core import mlstack
+
+            ok_win, win_lines = mlstack.check_function()
+            lines.extend(win_lines)
+            if not ok_win:
+                return CheckResult(
+                    "deps", "problem", lines,
+                    next_commands=["reinstall the [training] extras inside the "
+                                   "supported window (see PROBLEM lines above; "
+                                   "./setup.sh does it), or set "
+                                   f"{mlstack.ALLOW_OVERRIDE_ENV}=1 to override "
+                                   "the worker's refusal at your own risk"])
+        except Exception as e:  # noqa: BLE001 - reporting only
+            lines.append(f"ml-stack window check skipped: {e}")
     if find_spec("bitsandbytes") is not None:
         # bitsandbytes is an optional loader (not in `extras`/`have`) — gate on
         # its own presence so the probe line actually renders when installed.
@@ -196,6 +214,28 @@ def check_deps(find_spec: Callable[[str], Any] = importlib.util.find_spec
             next_commands=["pip install 'compressed-tensors>=0.15'"
                            " bitsandbytes  (or re-run ./setup.sh)"])
     return CheckResult("deps", "ok", lines)
+
+
+def check_proc_locks(system: Optional[str] = None) -> CheckResult:
+    """Cross-process locking capability (production-readiness pass 3).
+
+    The easy-loop lock and the scheduler's device-slot locks prevent dashboard
+    + cron from double-training. On platforms with neither flock nor msvcrt
+    they fall back to advisory pidfile semantics — a real but weaker guard, so
+    report it as a warning (and a problem on NT, where the old code was a
+    silent no-op and users must know what they're getting)."""
+    from .core import proclock
+
+    ok, lines = proclock.check_function(system=system)
+    if not ok:
+        return CheckResult("proc-locks", "problem", lines,
+                           next_commands=["install a Python with msvcrt "
+                                          "(standard CPython on Windows); "
+                                          "otherwise treat concurrent training "
+                                          "as UNSAFE (advisory-only locks)"])
+    if proclock.locking_mode() == proclock.MODE_PIDFILE:
+        return CheckResult("proc-locks", "warn", lines)
+    return CheckResult("proc-locks", "ok", lines)
 
 
 def check_config(config_path: Optional[str], *, out: Callable[[str], None],
@@ -760,6 +800,106 @@ def check_datasets_env(cfg: Any) -> CheckResult:
                        "pip install datasets (in the training env)"])
 
 
+def check_model_artifacts(home: Path, *, list_models_fn: Optional[Callable[[], List[Any]]] = None
+                          ) -> CheckResult:
+    """Deep-dive fix (production readiness): registry rows whose artifacts are
+    misplaced or unresolvable.
+
+    Three failure modes this catches — all of them were silent before:
+
+      * adapter_dir points into the HuggingFace hub cache (the legacy curater
+        template wrote there; those adapters are invisible to the Models panel,
+        get garbage-collected by `huggingface-cli delete`, and forced users to
+        move files by hand);
+      * adapter_dir / gguf_path recorded but no longer on disk (janitor or a
+        manual cleanup broke the row — training on top of it will fail);
+      * base_model is unresolved ('unspecified-base'): the trained GGUF can
+        never be re-paired with its safetensors, so continual training from
+        that model cannot work.
+    """
+    try:
+        if list_models_fn is None:
+            db = Path(home) / "buffer" / "toaster_loop.db"
+            if not db.is_file():
+                return CheckResult("model artifacts", "ok",
+                                   ["no registry yet (nothing to check)"])
+            from .registry.registry import ModelRegistry
+
+            reg = ModelRegistry(db)
+            try:
+                models = reg.list_models()
+            finally:
+                reg.close()
+        else:
+            models = list_models_fn()
+    except Exception as e:  # a broken DB must not break the doctor
+        return CheckResult("model artifacts", "warn",
+                           [f"could not read the registry: {e}"])
+
+    hub_root = str(Path.home() / ".cache" / "huggingface" / "hub")
+    missing_adapter, in_hub_cache, no_base, missing_gguf, lora_only = \
+        [], [], [], [], []
+    for m in models:
+        if getattr(m, "status", "") == "archived":
+            continue
+        mid = getattr(m, "model_id", "?")
+        ad = str(getattr(m, "adapter_dir", "") or "")
+        if ad:
+            if ad.startswith(hub_root) or "models--toaster-loop--" in ad:
+                in_hub_cache.append(mid)
+            elif not Path(ad).is_dir():
+                missing_adapter.append(mid)
+        gp = str(getattr(m, "gguf_path", "") or "")
+        if gp and not Path(gp).is_file():
+            missing_gguf.append(mid)
+        prov = getattr(m, "provenance", None)
+        if isinstance(prov, dict) \
+                and str(prov.get("export_method") or "") == "gguf-lora":
+            lora_only.append(mid)
+        if str(getattr(m, "base_model", "") or "").strip() in (
+                "", "unspecified-base"):
+            no_base.append(mid)
+
+    def _lst(name: str, ids: List[str]) -> str:
+        shown = ", ".join(ids[:8]) + (f" (+{len(ids) - 8} more)"
+                                      if len(ids) > 8 else "")
+        return f"{name}: {shown}"
+
+    problems: List[str] = []
+    if in_hub_cache:
+        problems.append(_lst("adapters inside the HF hub cache (move them "
+                             "under train_runs/; they are invisible to the "
+                             "Models panel and HF cleanup will delete them)",
+                             in_hub_cache))
+    if missing_adapter:
+        problems.append(_lst("adapter_dir recorded but missing on disk",
+                             missing_adapter))
+    if missing_gguf:
+        problems.append(_lst("gguf_path recorded but missing on disk",
+                             missing_gguf))
+    warns = []
+    if no_base:
+        warns.append(_lst("base_model unresolved (continual training from "
+                          "these will fail; set training.base_model and "
+                          "re-register)", no_base))
+    if lora_only:
+        warns.append(_lst("gguf-lora exports (served as base+adapter pair via "
+                          "llama-server --lora; deploy needs a resolvable base "
+                          "GGUF — set provenance base_gguf / serve.lora_base_gguf "
+                          "/ TOASTER_LOOP_LORA_BASE_GGUF, or re-export with the "
+                          "peft backend for a standalone GGUF)", lora_only))
+    if problems:
+        return CheckResult("model artifacts", "problem", problems + warns,
+                           next_commands=["retrain affected models (the "
+                                          "submit paths now keep artifacts "
+                                          "under train_runs/), or repair the "
+                                          "registry rows"])
+    if warns:
+        return CheckResult("model artifacts", "warn", warns)
+    return CheckResult("model artifacts", "ok",
+                       [f"{len(models)} model row(s), artifacts resolve"])
+
+
 def check_noise_floor(home: Path, *,
                       load_fn: Optional[Callable[..., Optional[Dict[str, Any]]]] = None,
                       ) -> CheckResult:
@@ -834,6 +974,7 @@ def collect_checks(*, config_path: Optional[str] = None, fix: bool = False,
     results: List[CheckResult] = []
     results.append(check_python())
     results.append(check_deps())
+    results.append(check_proc_locks())
 
     cfg_res = check_config(config_path, out=out, load_config_fn=load_config_fn)
     if cfg_res.status == "problem":
@@ -894,6 +1035,9 @@ def collect_checks(*, config_path: Optional[str] = None, fix: bool = False,
     # WP3b: `datasets` importability in the training interpreter (warn with
     # the exact pip command — datasets installs independently of [training]).
     results.append(check_datasets_env(cfg))
+    # Deep-dive fix (production readiness): registry artifact health —
+    # adapters stranded in the HF hub cache, vanished files, unresolved bases.
+    results.append(check_model_artifacts(home))
     results.append(check_noise_floor(home))
     results.append(check_calibration_profile(cfg, home))
 
